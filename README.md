@@ -1,3 +1,8 @@
+# ⚠️: IMPORTANT
+**It's a fork of the original repository. Including unplanned features of the original repository.**
+
+> currently only test for **local environment**
+
 <p align="center">
   <a href="https://vibekanban.com">
     <picture>
@@ -20,6 +25,16 @@
 </h1>
 
 ![](frontend/public/vibe-kanban-screenshot-overview.png)
+
+## RoadMap
+- [x] using agent cli in system path rather than npx
+- [x] add start port configure by using "--port" flag
+- [ ] add agent cli support (internal use)
+- [ ] add "dangerously_skip_permissions" and "plan" setting when create a task
+- [ ] add web terminal support && open workspace in terminal(such as iterm2)
+- [ ] add integration with wechat, lark, or telegram
+- [ ] add support for more user-friendly pages to modify or submit a task
+- [ ] ... 
 
 ## Overview
 
