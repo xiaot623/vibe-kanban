@@ -60,7 +60,7 @@ const DEFAULT_PROFILES_JSON: &str = include_str!("../default_profiles.json");
 // Executor-centric profile identifier
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, TS, Hash, Eq)]
 pub struct ExecutorProfileId {
-    /// The executor type (e.g., "CLAUDE_CODE", "AMP")
+    /// The executor type (e.g., "CLAUDE_CODE")
     #[serde(alias = "profile", deserialize_with = "de_base_coding_agent_kebab")]
     // Backwards compatability with ProfileVariantIds, esp stored in DB under ExecutorAction
     pub executor: BaseCodingAgent,

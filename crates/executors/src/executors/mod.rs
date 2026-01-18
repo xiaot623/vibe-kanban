@@ -20,24 +20,20 @@ use crate::{
     command::CommandBuildError,
     env::ExecutionEnv,
     executors::{
-        amp::Amp, claude::ClaudeCode, codex::Codex, copilot::Copilot, cursor::CursorAgent,
-        droid::Droid, gemini::Gemini, opencode::Opencode, qwen::QwenCode,
+        claude::ClaudeCode, codex::Codex, droid::Droid, gemini::Gemini,
+        opencode::Opencode,
     },
     mcp_config::McpConfig,
 };
 
 pub mod acp;
-pub mod amp;
 pub mod claude;
 pub mod codex;
-pub mod copilot;
-pub mod cursor;
 pub mod droid;
 pub mod gemini;
 pub mod opencode;
 #[cfg(feature = "qa-mode")]
 pub mod qa_mock;
-pub mod qwen;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, TS)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
@@ -93,16 +89,9 @@ pub enum ExecutorError {
 )]
 pub enum CodingAgent {
     ClaudeCode,
-    Amp,
     Gemini,
     Codex,
     Opencode,
-    #[serde(alias = "CURSOR")]
-    #[strum_discriminants(serde(alias = "CURSOR"))]
-    #[strum_discriminants(strum(serialize = "CURSOR", serialize = "CURSOR_AGENT"))]
-    CursorAgent,
-    QwenCode,
-    Copilot,
     Droid,
     #[cfg(feature = "qa-mode")]
     QaMock(QaMockExecutor),
@@ -118,14 +107,6 @@ impl CodingAgent {
                 }),
                 self.preconfigured_mcp(),
                 true,
-            ),
-            Self::Amp(_) => McpConfig::new(
-                vec!["amp.mcpServers".to_string()],
-                serde_json::json!({
-                    "amp.mcpServers": {}
-                }),
-                self.preconfigured_mcp(),
-                false,
             ),
             Self::Opencode(_) => McpConfig::new(
                 vec!["mcp".to_string()],
@@ -162,17 +143,13 @@ impl CodingAgent {
     pub fn capabilities(&self) -> Vec<BaseAgentCapability> {
         match self {
             Self::ClaudeCode(_)
-            | Self::Amp(_)
             | Self::Gemini(_)
-            | Self::QwenCode(_)
             | Self::Droid(_)
             | Self::Opencode(_) => vec![BaseAgentCapability::SessionFork],
             Self::Codex(_) => vec![
                 BaseAgentCapability::SessionFork,
                 BaseAgentCapability::SetupHelper,
             ],
-            Self::CursorAgent(_) => vec![BaseAgentCapability::SetupHelper],
-            Self::Copilot(_) => vec![],
             #[cfg(feature = "qa-mode")]
             Self::QaMock(_) => vec![], // QA mock doesn't need special capabilities
         }
@@ -347,28 +324,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_cursor_agent_deserialization() {
-        // Test that CURSOR_AGENT is accepted
-        let result = BaseCodingAgent::from_str("CURSOR_AGENT");
-        assert!(result.is_ok(), "CURSOR_AGENT should be valid");
-        assert_eq!(result.unwrap(), BaseCodingAgent::CursorAgent);
-
-        // Test that legacy CURSOR is still accepted for backwards compatibility
-        let result = BaseCodingAgent::from_str("CURSOR");
-        assert!(
-            result.is_ok(),
-            "CURSOR should be valid for backwards compatibility"
-        );
-        assert_eq!(result.unwrap(), BaseCodingAgent::CursorAgent);
-
-        // Test serde deserialization for CURSOR_AGENT
-        let result: Result<BaseCodingAgent, _> = serde_json::from_str(r#""CURSOR_AGENT""#);
-        assert!(result.is_ok(), "CURSOR_AGENT should deserialize via serde");
-        assert_eq!(result.unwrap(), BaseCodingAgent::CursorAgent);
-
-        // Test serde deserialization for legacy CURSOR
-        let result: Result<BaseCodingAgent, _> = serde_json::from_str(r#""CURSOR""#);
-        assert!(result.is_ok(), "CURSOR should deserialize via serde");
-        assert_eq!(result.unwrap(), BaseCodingAgent::CursorAgent);
+    fn test_base_agent_deserialization() {
+        let result = BaseCodingAgent::from_str("CLAUDE_CODE");
+        assert!(result.is_ok(), "CLAUDE_CODE should be valid");
+        assert_eq!(result.unwrap(), BaseCodingAgent::ClaudeCode);
     }
 }
