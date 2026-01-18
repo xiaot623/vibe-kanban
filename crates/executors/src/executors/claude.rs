@@ -3,7 +3,12 @@ pub mod client;
 pub mod protocol;
 pub mod types;
 
-use std::{collections::HashMap, path::Path, process::Stdio, sync::Arc};
+use std::{
+    collections::HashMap,
+    path::Path,
+    process::Stdio,
+    sync::{Arc, LazyLock},
+};
 
 use async_trait::async_trait;
 use command_group::AsyncCommandGroup;
@@ -24,7 +29,10 @@ use self::{
 };
 use crate::{
     approvals::ExecutorApprovalService,
-    command::{CmdOverrides, CommandBuildError, CommandBuilder, CommandParts, apply_overrides},
+    command::{
+        CmdOverrides, CommandBuildError, CommandBuilder, CommandParts, apply_overrides,
+        env_command_or_default,
+    },
     env::ExecutionEnv,
     executors::{
         AppendPrompt, AvailabilityInfo, ExecutorError, SpawnedChild, StandardCodingAgentExecutor,
@@ -39,11 +47,28 @@ use crate::{
     stdout_dup::create_stdout_pipe_writer,
 };
 
+static CLAUDE_COMMAND: LazyLock<String> =
+    LazyLock::new(|| env_command_or_default("VK_CLAUDE", "claude"));
+
+static CLAUDE_ROUTER_COMMAND: LazyLock<String> =
+    LazyLock::new(|| env_command_or_default("VK_CLAUDE_ROUTER", "claude-code-router code"));
+
+const FALLBACK_CLAUDE_COMMAND: &str = "npx -y @anthropic-ai/claude-code@2.1.7";
+const FALLBACK_CLAUDE_ROUTER_COMMAND: &str = "npx -y @musistudio/claude-code-router@1.0.66 code";
+
 fn base_command(claude_code_router: bool) -> &'static str {
     if claude_code_router {
-        "npx -y @musistudio/claude-code-router@1.0.66 code"
+        CLAUDE_ROUTER_COMMAND.as_str()
     } else {
-        "npx -y @anthropic-ai/claude-code@2.1.7"
+        CLAUDE_COMMAND.as_str()
+    }
+}
+
+fn fallback_command(claude_code_router: bool) -> &'static str {
+    if claude_code_router {
+        FALLBACK_CLAUDE_ROUTER_COMMAND
+    } else {
+        FALLBACK_CLAUDE_COMMAND
     }
 }
 
@@ -76,7 +101,10 @@ pub struct ClaudeCode {
 }
 
 impl ClaudeCode {
-    async fn build_command_builder(&self) -> Result<CommandBuilder, CommandBuildError> {
+    async fn build_command_builder_with_base(
+        &self,
+        base: &str,
+    ) -> Result<CommandBuilder, CommandBuildError> {
         // If base_command_override is provided and claude_code_router is also set, log a warning
         if self.cmd.base_command_override.is_some() && self.claude_code_router.is_some() {
             tracing::warn!(
@@ -84,9 +112,7 @@ impl ClaudeCode {
             );
         }
 
-        let mut builder =
-            CommandBuilder::new(base_command(self.claude_code_router.unwrap_or(false)))
-                .params(["-p"]);
+        let mut builder = CommandBuilder::new(base).params(["-p"]);
 
         let plan = self.plan.unwrap_or(false);
         let approvals = self.approvals.unwrap_or(false);
@@ -116,6 +142,33 @@ impl ClaudeCode {
         ]);
 
         apply_overrides(builder, &self.cmd)
+    }
+
+    async fn build_command_builder(&self) -> Result<CommandBuilder, CommandBuildError> {
+        tracing::info!(
+            "build_command_builder using system claude command {}",
+            base_command(self.claude_code_router.unwrap_or(false))
+        );
+        self.build_command_builder_with_base(base_command(self.claude_code_router.unwrap_or(false)))
+            .await
+    }
+
+    async fn build_fallback_command_builder(&self) -> Result<CommandBuilder, CommandBuildError> {
+        tracing::info!(
+            "build_fallback_builder using fallback npx claude command {}",
+            fallback_command(self.claude_code_router.unwrap_or(false))
+        );
+        self.build_command_builder_with_base(fallback_command(
+            self.claude_code_router.unwrap_or(false),
+        ))
+        .await
+    }
+
+    fn should_fallback_to_npx(&self, err: &ExecutorError) -> bool {
+        if self.cmd.base_command_override.is_some() {
+            return false;
+        }
+        matches!(err, ExecutorError::ExecutableNotFound { .. })
     }
 
     pub fn permission_mode(&self) -> PermissionMode {
@@ -185,8 +238,22 @@ impl StandardCodingAgentExecutor for ClaudeCode {
     ) -> Result<SpawnedChild, ExecutorError> {
         let command_builder = self.build_command_builder().await?;
         let command_parts = command_builder.build_initial()?;
-        self.spawn_internal(current_dir, prompt, command_parts, env)
+        match self
+            .spawn_internal(current_dir, prompt, command_parts, env)
             .await
+        {
+            Ok(child) => Ok(child),
+            Err(err) => {
+                if self.should_fallback_to_npx(&err) {
+                    let fallback_builder = self.build_fallback_command_builder().await?;
+                    let fallback_parts = fallback_builder.build_initial()?;
+                    return self
+                        .spawn_internal(current_dir, prompt, fallback_parts, env)
+                        .await;
+                }
+                Err(err)
+            }
+        }
     }
 
     async fn spawn_follow_up(
@@ -197,13 +264,28 @@ impl StandardCodingAgentExecutor for ClaudeCode {
         env: &ExecutionEnv,
     ) -> Result<SpawnedChild, ExecutorError> {
         let command_builder = self.build_command_builder().await?;
-        let command_parts = command_builder.build_follow_up(&[
+        let follow_up_args = vec![
             "--fork-session".to_string(),
             "--resume".to_string(),
             session_id.to_string(),
-        ])?;
-        self.spawn_internal(current_dir, prompt, command_parts, env)
+        ];
+        let command_parts = command_builder.build_follow_up(&follow_up_args)?;
+        match self
+            .spawn_internal(current_dir, prompt, command_parts, env)
             .await
+        {
+            Ok(child) => Ok(child),
+            Err(err) => {
+                if self.should_fallback_to_npx(&err) {
+                    let fallback_builder = self.build_fallback_command_builder().await?;
+                    let fallback_parts = fallback_builder.build_follow_up(&follow_up_args)?;
+                    return self
+                        .spawn_internal(current_dir, prompt, fallback_parts, env)
+                        .await;
+                }
+                Err(err)
+            }
+        }
     }
 
     fn normalize_logs(&self, msg_store: Arc<MsgStore>, current_dir: &Path) {

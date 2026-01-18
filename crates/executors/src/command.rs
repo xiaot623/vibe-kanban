@@ -172,6 +172,10 @@ fn split_command_line(input: &str) -> Result<Vec<String>, CommandBuildError> {
     }
 }
 
+pub fn env_command_or_default(key: &str, default: &'static str) -> String {
+    std::env::var(key).unwrap_or_else(|_| default.to_owned())
+}
+
 pub fn apply_overrides(
     builder: CommandBuilder,
     overrides: &CmdOverrides,

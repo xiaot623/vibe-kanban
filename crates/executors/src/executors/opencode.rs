@@ -1,4 +1,8 @@
-use std::{path::Path, sync::Arc, time::Duration};
+use std::{
+    path::Path,
+    sync::{Arc, LazyLock},
+    time::Duration,
+};
 
 use async_trait::async_trait;
 use command_group::AsyncCommandGroup;
@@ -11,7 +15,10 @@ use workspace_utils::msg_store::MsgStore;
 
 use crate::{
     approvals::ExecutorApprovalService,
-    command::{CmdOverrides, CommandBuildError, CommandBuilder, apply_overrides},
+    command::{
+        CmdOverrides, CommandBuildError, CommandBuilder, CommandParts, apply_overrides,
+        env_command_or_default,
+    },
     env::ExecutionEnv,
     executors::{
         AppendPrompt, AvailabilityInfo, ExecutorError, ExecutorExitResult, SpawnedChild,
@@ -25,6 +32,19 @@ mod sdk;
 mod types;
 
 use sdk::{LogWriter, RunConfig, run_session};
+
+static CODEX_COMMAND: LazyLock<String> =
+    LazyLock::new(|| env_command_or_default("VK_OPENCODE", "opencode"));
+
+const FALLBACK_CODEX_COMMAND: &str = "npx -y @openai/codex@0.77.0";
+
+pub fn base_command() -> &'static str {
+    CODEX_COMMAND.as_str()
+}
+
+pub fn fallback_command() -> &'static str {
+    FALLBACK_CODEX_COMMAND
+}
 
 #[derive(Derivative, Clone, Serialize, Deserialize, TS, JsonSchema)]
 #[derivative(Debug, PartialEq)]
@@ -47,12 +67,38 @@ pub struct Opencode {
 }
 
 impl Opencode {
-    fn build_command_builder(&self) -> Result<CommandBuilder, CommandBuildError> {
-        let builder = CommandBuilder::new("npx -y opencode-ai@1.1.3")
+    fn build_command_builder_with_base(
+        &self,
+        base: &str,
+    ) -> Result<CommandBuilder, CommandBuildError> {
+        let builder = CommandBuilder::new(base)
             // Pass hostname/port as separate args so OpenCode treats them as explicitly set
             // (it checks `process.argv.includes(\"--port\")` / `\"--hostname\"`).
             .extend_params(["serve", "--hostname", "127.0.0.1", "--port", "0"]);
         apply_overrides(builder, &self.cmd)
+    }
+
+    fn build_command_builder(&self) -> Result<CommandBuilder, CommandBuildError> {
+        tracing::info!(
+            "build_command_builder using system opencode command {}",
+            base_command()
+        );
+        self.build_command_builder_with_base(base_command())
+    }
+
+    fn build_fallback_command_builder(&self) -> Result<CommandBuilder, CommandBuildError> {
+        tracing::info!(
+            "build_fallback_builder using fallback npx opencode command {}",
+            fallback_command()
+        );
+        self.build_command_builder_with_base(fallback_command())
+    }
+
+    fn should_fallback_to_npx(&self, err: &ExecutorError) -> bool {
+        if self.cmd.base_command_override.is_some() {
+            return false;
+        }
+        matches!(err, ExecutorError::ExecutableNotFound { .. })
     }
 
     async fn spawn_inner(
@@ -60,11 +106,10 @@ impl Opencode {
         current_dir: &Path,
         prompt: &str,
         resume_session: Option<&str>,
+        command_parts: CommandParts,
         env: &ExecutionEnv,
     ) -> Result<SpawnedChild, ExecutorError> {
         let combined_prompt = self.append_prompt.combine_prompt(prompt);
-
-        let command_parts = self.build_command_builder()?.build_initial()?;
         let (program_path, args) = command_parts.into_resolved().await?;
 
         let mut command = Command::new(program_path);
@@ -201,7 +246,22 @@ impl StandardCodingAgentExecutor for Opencode {
         env: &ExecutionEnv,
     ) -> Result<SpawnedChild, ExecutorError> {
         let env = setup_approvals_env(self.auto_approve, env);
-        self.spawn_inner(current_dir, prompt, None, &env).await
+        let command_parts = self.build_command_builder()?.build_initial()?;
+        match self
+            .spawn_inner(current_dir, prompt, None, command_parts, &env)
+            .await
+        {
+            Ok(child) => Ok(child),
+            Err(err) => {
+                if self.should_fallback_to_npx(&err) {
+                    let fallback_parts = self.build_fallback_command_builder()?.build_initial()?;
+                    return self
+                        .spawn_inner(current_dir, prompt, None, fallback_parts, &env)
+                        .await;
+                }
+                Err(err)
+            }
+        }
     }
 
     async fn spawn_follow_up(
@@ -212,8 +272,22 @@ impl StandardCodingAgentExecutor for Opencode {
         env: &ExecutionEnv,
     ) -> Result<SpawnedChild, ExecutorError> {
         let env = setup_approvals_env(self.auto_approve, env);
-        self.spawn_inner(current_dir, prompt, Some(session_id), &env)
+        let command_parts = self.build_command_builder()?.build_initial()?;
+        match self
+            .spawn_inner(current_dir, prompt, Some(session_id), command_parts, &env)
             .await
+        {
+            Ok(child) => Ok(child),
+            Err(err) => {
+                if self.should_fallback_to_npx(&err) {
+                    let fallback_parts = self.build_fallback_command_builder()?.build_initial()?;
+                    return self
+                        .spawn_inner(current_dir, prompt, Some(session_id), fallback_parts, &env)
+                        .await;
+                }
+                Err(err)
+            }
+        }
     }
 
     fn normalize_logs(&self, msg_store: Arc<MsgStore>, worktree_path: &Path) {

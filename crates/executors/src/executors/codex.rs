@@ -7,8 +7,21 @@ use std::{
     collections::HashMap,
     env,
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{Arc, LazyLock},
 };
+
+static CODEX_COMMAND: LazyLock<String> =
+    LazyLock::new(|| env_command_or_default("VK_CODEX", "codex"));
+
+const FALLBACK_CODEX_COMMAND: &str = "npx -y @openai/codex@0.77.0";
+
+pub fn base_command() -> &'static str {
+    CODEX_COMMAND.as_str()
+}
+
+pub fn fallback_command() -> &'static str {
+    FALLBACK_CODEX_COMMAND
+}
 
 /// Returns the Codex home directory.
 ///
@@ -46,7 +59,10 @@ use self::{
 };
 use crate::{
     approvals::ExecutorApprovalService,
-    command::{CmdOverrides, CommandBuildError, CommandBuilder, CommandParts, apply_overrides},
+    command::{
+        CmdOverrides, CommandBuildError, CommandBuilder, CommandParts, apply_overrides,
+        env_command_or_default,
+    },
     env::ExecutionEnv,
     executors::{
         AppendPrompt, AvailabilityInfo, ExecutorError, ExecutorExitResult, SpawnedChild,
@@ -174,13 +190,29 @@ impl StandardCodingAgentExecutor for Codex {
         prompt: &str,
         env: &ExecutionEnv,
     ) -> Result<SpawnedChild, ExecutorError> {
-        let command_parts = self.build_command_builder()?.build_initial()?;
         let combined_prompt = self.append_prompt.combine_prompt(prompt);
         let action = CodexSessionAction::Chat {
-            prompt: combined_prompt,
+            prompt: combined_prompt.clone(),
         };
-        self.spawn_inner(current_dir, command_parts, action, None, env)
+        let command_parts = self.build_command_builder()?.build_initial()?;
+        match self
+            .spawn_inner(current_dir, command_parts, action, None, env)
             .await
+        {
+            Ok(child) => Ok(child),
+            Err(err) => {
+                if self.should_fallback_to_npx(&err) {
+                    let fallback_parts = self.build_fallback_command_builder()?.build_initial()?;
+                    let action = CodexSessionAction::Chat {
+                        prompt: combined_prompt,
+                    };
+                    return self
+                        .spawn_inner(current_dir, fallback_parts, action, None, env)
+                        .await;
+                }
+                Err(err)
+            }
+        }
     }
 
     async fn spawn_follow_up(
@@ -190,13 +222,31 @@ impl StandardCodingAgentExecutor for Codex {
         session_id: &str,
         env: &ExecutionEnv,
     ) -> Result<SpawnedChild, ExecutorError> {
-        let command_parts = self.build_command_builder()?.build_follow_up(&[])?;
         let combined_prompt = self.append_prompt.combine_prompt(prompt);
         let action = CodexSessionAction::Chat {
-            prompt: combined_prompt,
+            prompt: combined_prompt.clone(),
         };
-        self.spawn_inner(current_dir, command_parts, action, Some(session_id), env)
+        let command_parts = self.build_command_builder()?.build_follow_up(&[])?;
+        match self
+            .spawn_inner(current_dir, command_parts, action, Some(session_id), env)
             .await
+        {
+            Ok(child) => Ok(child),
+            Err(err) => {
+                if self.should_fallback_to_npx(&err) {
+                    let fallback_parts = self
+                        .build_fallback_command_builder()?
+                        .build_follow_up(&[])?;
+                    let action = CodexSessionAction::Chat {
+                        prompt: combined_prompt,
+                    };
+                    return self
+                        .spawn_inner(current_dir, fallback_parts, action, Some(session_id), env)
+                        .await;
+                }
+                Err(err)
+            }
+        }
     }
 
     fn normalize_logs(&self, msg_store: Arc<MsgStore>, worktree_path: &Path) {
@@ -242,31 +292,69 @@ impl StandardCodingAgentExecutor for Codex {
         session_id: Option<&str>,
         env: &ExecutionEnv,
     ) -> Result<SpawnedChild, ExecutorError> {
-        let command_parts = self.build_command_builder()?.build_initial()?;
-        let review_target = ReviewTarget::Custom {
-            instructions: prompt.to_string(),
-        };
+        let instructions = prompt.to_string();
         let action = CodexSessionAction::Review {
-            target: review_target,
+            target: ReviewTarget::Custom {
+                instructions: instructions.clone(),
+            },
         };
-        self.spawn_inner(current_dir, command_parts, action, session_id, env)
+        let command_parts = self.build_command_builder()?.build_initial()?;
+        match self
+            .spawn_inner(current_dir, command_parts, action, session_id, env)
             .await
+        {
+            Ok(child) => Ok(child),
+            Err(err) => {
+                if self.should_fallback_to_npx(&err) {
+                    let fallback_parts = self.build_fallback_command_builder()?.build_initial()?;
+                    let action = CodexSessionAction::Review {
+                        target: ReviewTarget::Custom { instructions },
+                    };
+                    return self
+                        .spawn_inner(current_dir, fallback_parts, action, session_id, env)
+                        .await;
+                }
+                Err(err)
+            }
+        }
     }
 }
 
 impl Codex {
-    pub fn base_command() -> &'static str {
-        "npx -y @openai/codex@0.77.0"
-    }
-
-    fn build_command_builder(&self) -> Result<CommandBuilder, CommandBuildError> {
-        let mut builder = CommandBuilder::new(Self::base_command());
+    fn build_command_builder_with_base(
+        &self,
+        base: &str,
+    ) -> Result<CommandBuilder, CommandBuildError> {
+        let mut builder = CommandBuilder::new(base);
         builder = builder.extend_params(["app-server"]);
         if self.oss.unwrap_or(false) {
             builder = builder.extend_params(["--oss"]);
         }
 
         apply_overrides(builder, &self.cmd)
+    }
+
+    fn build_command_builder(&self) -> Result<CommandBuilder, CommandBuildError> {
+        tracing::info!(
+            "build_command_builder using system codex command {}",
+            base_command()
+        );
+        self.build_command_builder_with_base(base_command())
+    }
+
+    fn build_fallback_command_builder(&self) -> Result<CommandBuilder, CommandBuildError> {
+        tracing::info!(
+            "build_fallback_builder using fallback npx codex command {}",
+            fallback_command()
+        );
+        self.build_command_builder_with_base(fallback_command())
+    }
+
+    fn should_fallback_to_npx(&self, err: &ExecutorError) -> bool {
+        if self.cmd.base_command_override.is_some() {
+            return false;
+        }
+        matches!(err, ExecutorError::ExecutableNotFound { .. })
     }
 
     fn build_new_conversation_params(&self, cwd: &Path) -> NewConversationParams {

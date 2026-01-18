@@ -20,8 +20,7 @@ use crate::{
     command::CommandBuildError,
     env::ExecutionEnv,
     executors::{
-        claude::ClaudeCode, codex::Codex, droid::Droid, gemini::Gemini,
-        opencode::Opencode,
+        claude::ClaudeCode, codex::Codex, droid::Droid, gemini::Gemini, opencode::Opencode,
     },
     mcp_config::McpConfig,
 };
@@ -142,10 +141,9 @@ impl CodingAgent {
 
     pub fn capabilities(&self) -> Vec<BaseAgentCapability> {
         match self {
-            Self::ClaudeCode(_)
-            | Self::Gemini(_)
-            | Self::Droid(_)
-            | Self::Opencode(_) => vec![BaseAgentCapability::SessionFork],
+            Self::ClaudeCode(_) | Self::Gemini(_) | Self::Droid(_) | Self::Opencode(_) => {
+                vec![BaseAgentCapability::SessionFork]
+            }
             Self::Codex(_) => vec![
                 BaseAgentCapability::SessionFork,
                 BaseAgentCapability::SetupHelper,

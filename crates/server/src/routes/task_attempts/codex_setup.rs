@@ -10,7 +10,10 @@ use executors::{
         script::{ScriptContext, ScriptRequest, ScriptRequestLanguage},
     },
     command::{CommandBuilder, apply_overrides},
-    executors::{ExecutorError, codex::Codex},
+    executors::{
+        ExecutorError,
+        codex::{Codex, base_command, fallback_command},
+    },
 };
 use services::services::container::ContainerService;
 use uuid::Uuid;
@@ -76,16 +79,41 @@ pub async fn run_codex_setup(
 }
 
 async fn get_setup_helper_action(codex: &Codex) -> Result<ExecutorAction, ApiError> {
-    let mut login_command = CommandBuilder::new(Codex::base_command());
+    let mut login_command = CommandBuilder::new(base_command());
     login_command = login_command.extend_params(["login"]);
     login_command = apply_overrides(login_command, &codex.cmd)?;
 
-    let (program_path, args) = login_command
+    let (program_path, args) = match login_command
         .build_initial()
         .map_err(|err| ApiError::Executor(ExecutorError::from(err)))?
         .into_resolved()
         .await
-        .map_err(ApiError::Executor)?;
+    {
+        Ok(resolved) => resolved,
+        Err(err) => {
+            if matches!(err, ExecutorError::ExecutableNotFound { .. })
+                && codex.cmd.base_command_override.is_none()
+            {
+                if let ExecutorError::ExecutableNotFound { program } = &err {
+                    tracing::info!(
+                        %program,
+                        "Codex executable not found. Falling back to npx."
+                    );
+                }
+                let mut fallback_command = CommandBuilder::new(fallback_command());
+                fallback_command = fallback_command.extend_params(["login"]);
+                fallback_command = apply_overrides(fallback_command, &codex.cmd)?;
+                fallback_command
+                    .build_initial()
+                    .map_err(|err| ApiError::Executor(ExecutorError::from(err)))?
+                    .into_resolved()
+                    .await
+                    .map_err(ApiError::Executor)?
+            } else {
+                return Err(ApiError::Executor(err));
+            }
+        }
+    };
     let login_script = format!("{} {}", program_path.to_string_lossy(), args.join(" "));
     let login_request = ScriptRequest {
         script: login_script,
