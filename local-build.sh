@@ -42,41 +42,23 @@ fi
 echo "🔍 Detected platform: $PLATFORM"
 echo "🔧 Using target directory: $CARGO_TARGET_DIR"
 echo "🧹 Cleaning previous builds..."
-rm -rf npx-cli/dist
-mkdir -p npx-cli/dist/$PLATFORM
+rm -rf artifact
+mkdir -p artifact/$PLATFORM
 
 echo "🔨 Building frontend..."
 (cd frontend && npm run build)
 
-echo "🔨 Building Rust binaries..."
-cargo build --release --manifest-path Cargo.toml
-cargo build --release --bin mcp_task_server --manifest-path Cargo.toml
+echo "🔨 Building Rust binary..."
+cargo build --release --bin server --manifest-path Cargo.toml
 
-echo "📦 Creating distribution package..."
+echo "📦 Staging distribution artifact..."
 
-# Copy the main binary
-cp ${CARGO_TARGET_DIR}/release/server vibe-kanban
-zip -q vibe-kanban.zip vibe-kanban
-rm -f vibe-kanban 
-mv vibe-kanban.zip npx-cli/dist/$PLATFORM/vibe-kanban.zip
-
-# Copy the MCP binary
-cp ${CARGO_TARGET_DIR}/release/mcp_task_server vibe-kanban-mcp
-zip -q vibe-kanban-mcp.zip vibe-kanban-mcp
-rm -f vibe-kanban-mcp
-mv vibe-kanban-mcp.zip npx-cli/dist/$PLATFORM/vibe-kanban-mcp.zip
-
-# Copy the Review CLI binary
-cp ${CARGO_TARGET_DIR}/release/review vibe-kanban-review
-zip -q vibe-kanban-review.zip vibe-kanban-review
-rm -f vibe-kanban-review
-mv vibe-kanban-review.zip npx-cli/dist/$PLATFORM/vibe-kanban-review.zip
+# Copy the main binary (no zip)
+cp ${CARGO_TARGET_DIR}/release/server artifact/$PLATFORM/vibe-kanban
 
 echo "✅ Build complete!"
 echo "📁 Files created:"
-echo "   - npx-cli/dist/$PLATFORM/vibe-kanban.zip"
-echo "   - npx-cli/dist/$PLATFORM/vibe-kanban-mcp.zip"
-echo "   - npx-cli/dist/$PLATFORM/vibe-kanban-review.zip"
+echo "   - artifact/$PLATFORM/vibe-kanban"
 echo ""
 echo "🚀 To test locally, run:"
 echo "   cd npx-cli && node bin/cli.js"
