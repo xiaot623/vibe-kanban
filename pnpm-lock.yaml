@@ -7,6 +7,10 @@ settings:
 importers:
 
   .:
+    dependencies:
+      react-virtuoso:
+        specifier: ^4.18.1
+        version: 4.18.1(react-dom@18.3.1(react@18.3.1))(react@18.3.1)
     devDependencies:
       concurrently:
         specifier: ^8.2.2
@@ -3231,6 +3235,12 @@ packages:
 
   react-virtuoso@4.14.0:
     resolution: {integrity: sha512-fR+eiCvirSNIRvvCD7ueJPRsacGQvUbjkwgWzBZXVq+yWypoH7mRUvWJzGHIdoRaCZCT+6mMMMwIG2S1BW3uwA==}
+    peerDependencies:
+      react: '>=16 || >=17 || >= 18 || >= 19'
+      react-dom: '>=16 || >=17 || >= 18 || >=19'
+
+  react-virtuoso@4.18.1:
+    resolution: {integrity: sha512-KF474cDwaSb9+SJ380xruBB4P+yGWcVkcu26HtMqYNMTYlYbrNy8vqMkE+GpAApPPufJqgOLMoWMFG/3pJMXUA==}
     peerDependencies:
       react: '>=16 || >=17 || >= 18 || >= 19'
       react-dom: '>=16 || >=17 || >= 18 || >=19'
@@ -6666,6 +6676,11 @@ snapshots:
   react-use-websocket@4.13.0: {}
 
   react-virtuoso@4.14.0(react-dom@18.3.1(react@18.3.1))(react@18.3.1):
+    dependencies:
+      react: 18.3.1
+      react-dom: 18.3.1(react@18.3.1)
+
+  react-virtuoso@4.18.1(react-dom@18.3.1(react@18.3.1))(react@18.3.1):
     dependencies:
       react: 18.3.1
       react-dom: 18.3.1(react@18.3.1)

@@ -95,15 +95,12 @@ async fn main() -> Result<(), VibeKanbanError> {
 
     let app_router = routes::router(deployment.clone());
 
+    let cli_port = parse_cli_port();
     let port = std::env::var("BACKEND_PORT")
-        .or_else(|_| std::env::var("PORT"))
         .ok()
-        .and_then(|s| {
-            // remove any ANSI codes, then turn into String
-            let cleaned =
-                String::from_utf8(strip(s.as_bytes())).expect("UTF-8 after stripping ANSI");
-            cleaned.trim().parse::<u16>().ok()
-        })
+        .and_then(|s| parse_port_value(&s))
+        .or_else(|| cli_port)
+        .or_else(|| std::env::var("PORT").ok().and_then(|s| parse_port_value(&s)))
         .unwrap_or_else(|| {
             tracing::info!("No PORT environment variable set, using port 0 for auto-assignment");
             0
@@ -184,4 +181,25 @@ pub async fn perform_cleanup_actions(deployment: &DeploymentImpl) {
         .kill_all_running_processes()
         .await
         .expect("Failed to cleanly kill running execution processes");
+}
+
+fn parse_cli_port() -> Option<u16> {
+    let mut args = std::env::args().skip(1);
+    while let Some(arg) = args.next() {
+        if let Some(value) = arg.strip_prefix("--port=") {
+            return parse_port_value(value);
+        }
+
+        if arg == "--port" {
+            let value = args.next();
+            return value.as_deref().and_then(parse_port_value);
+        }
+    }
+
+    None
+}
+
+fn parse_port_value(raw: &str) -> Option<u16> {
+    let cleaned = String::from_utf8(strip(raw.as_bytes())).ok()?;
+    cleaned.trim().parse::<u16>().ok()
 }
