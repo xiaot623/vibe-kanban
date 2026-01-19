@@ -52,9 +52,7 @@ export function IdeIcon({ editorType, className = 'h-4 w-4' }: IdeIconProps) {
 
   if (
     !editorType ||
-    editorType === EditorType.CUSTOM ||
-    editorType === EditorType.GO_LAND ||
-    editorType === EditorType.TRAE
+    editorType === EditorType.CUSTOM
   ) {
     // Generic fallback for other IDEs or no IDE configured
     return <Code2 className={className} />;
@@ -75,6 +73,9 @@ export function IdeIcon({ editorType, className = 'h-4 w-4' }: IdeIconProps) {
     case EditorType.INTELLI_J:
       ideIconPath = '/ide/intellij.svg';
       break;
+    case EditorType.GO_LAND:
+      ideIconPath = '/ide/golang.svg';
+      break;
     case EditorType.ZED:
       ideIconPath = isDark ? '/ide/zed-dark.svg' : '/ide/zed-light.svg';
       break;
@@ -85,6 +86,9 @@ export function IdeIcon({ editorType, className = 'h-4 w-4' }: IdeIconProps) {
       ideIconPath = isDark
         ? '/ide/antigravity-dark.svg'
         : '/ide/antigravity-light.svg';
+      break;
+    case EditorType.TRAE:
+      ideIconPath = '/ide/trae.svg';
       break;
   }
 
