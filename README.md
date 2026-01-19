@@ -29,7 +29,8 @@
 ## RoadMap
 - [x] using agent cli in system path rather than npx
 - [x] add start port configure by using "--port" flag
-- [ ] add proxy configure from web config && passthrough the running proxy to the agent cli
+- [x] add proxy configure from web config && passthrough the running proxy to the agent cli
+- [ ] add trae/goland editor support
 - [ ] add agent cli support (internal use)
 - [ ] add "dangerously_skip_permissions" and "plan" setting when create a task
 - [ ] add web terminal support && open workspace in terminal(such as iterm2)
