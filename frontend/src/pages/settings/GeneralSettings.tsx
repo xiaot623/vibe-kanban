@@ -358,7 +358,8 @@ export function GeneralSettings() {
             draft?.editor.editor_type === EditorType.CURSOR ||
             draft?.editor.editor_type === EditorType.WINDSURF ||
             draft?.editor.editor_type === EditorType.GOOGLE_ANTIGRAVITY ||
-            draft?.editor.editor_type === EditorType.ZED) && (
+            draft?.editor.editor_type === EditorType.ZED ||
+            draft?.editor.editor_type === EditorType.TRAE) && (
             <>
               <div className="space-y-2">
                 <Label htmlFor="remote-ssh-host">

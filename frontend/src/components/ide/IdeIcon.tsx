@@ -27,6 +27,8 @@ export function getIdeName(editorType: EditorType | undefined | null): string {
       return 'Windsurf';
     case EditorType.INTELLI_J:
       return 'IntelliJ IDEA';
+    case EditorType.GO_LAND:
+      return 'GoLand';
     case EditorType.ZED:
       return 'Zed';
     case EditorType.XCODE:
@@ -35,6 +37,8 @@ export function getIdeName(editorType: EditorType | undefined | null): string {
       return 'IDE';
     case EditorType.GOOGLE_ANTIGRAVITY:
       return 'Antigravity';
+    case EditorType.TRAE:
+      return 'Trae';
   }
 }
 
@@ -46,7 +50,12 @@ export function IdeIcon({ editorType, className = 'h-4 w-4' }: IdeIconProps) {
   const ideName = getIdeName(editorType);
   let ideIconPath = '';
 
-  if (!editorType || editorType === EditorType.CUSTOM) {
+  if (
+    !editorType ||
+    editorType === EditorType.CUSTOM ||
+    editorType === EditorType.GO_LAND ||
+    editorType === EditorType.TRAE
+  ) {
     // Generic fallback for other IDEs or no IDE configured
     return <Code2 className={className} />;
   }

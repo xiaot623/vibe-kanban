@@ -48,9 +48,11 @@ pub enum EditorType {
     Cursor,
     Windsurf,
     IntelliJ,
+    GoLand,
     Zed,
     Xcode,
     GoogleAntigravity,
+    Trae,
     Custom,
 }
 
@@ -87,9 +89,11 @@ impl EditorConfig {
             EditorType::Cursor => "cursor",
             EditorType::Windsurf => "windsurf",
             EditorType::IntelliJ => "idea",
+            EditorType::GoLand => "goland",
             EditorType::Zed => "zed",
             EditorType::Xcode => "xed",
             EditorType::GoogleAntigravity => "antigravity",
+            EditorType::Trae => "trae",
             EditorType::Custom => {
                 // Custom editor - use user-provided command or fallback to VSCode
                 self.custom_command.as_deref().unwrap_or("code")
@@ -152,6 +156,7 @@ impl EditorConfig {
             EditorType::Cursor => "cursor",
             EditorType::Windsurf => "windsurf",
             EditorType::GoogleAntigravity => "antigravity",
+            EditorType::Trae => "trae",
             EditorType::Zed => {
                 return Some(format!("zed://ssh/{user_part}{remote_host}{path_str}"));
             }
