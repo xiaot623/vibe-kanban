@@ -43,7 +43,7 @@ use serde_json::json;
 use services::services::{
     analytics::AnalyticsContext,
     approvals::{Approvals, executor_approvals::ExecutorApprovalBridge},
-    config::Config,
+    config::{Config, ProxyConfig},
     container::{ContainerError, ContainerRef, ContainerService},
     diff_stream::{self, DiffStreamHandle},
     git::{GitCli, GitService},
@@ -899,6 +899,19 @@ impl LocalContainerService {
     }
 }
 
+fn apply_proxy_env(env: &mut ExecutionEnv, proxy: &ProxyConfig) {
+    apply_proxy_value(env, "HTTP_PROXY", &proxy.http_proxy);
+    apply_proxy_value(env, "HTTPS_PROXY", &proxy.https_proxy);
+    apply_proxy_value(env, "NO_PROXY", &proxy.no_proxy);
+}
+
+fn apply_proxy_value(env: &mut ExecutionEnv, key: &str, value: &Option<String>) {
+    if let Some(value) = value.as_ref().map(|value| value.trim()).filter(|value| !value.is_empty())
+    {
+        env.insert(key, value);
+    }
+}
+
 fn failure_exit_status() -> std::process::ExitStatus {
     #[cfg(unix)]
     {
@@ -1114,8 +1127,13 @@ impl ContainerService for LocalContainerService {
         let repo_names: Vec<String> = repos.iter().map(|r| r.name.clone()).collect();
         let repo_context = RepoContext::new(current_dir.clone(), repo_names);
 
-        let commit_reminder = self.config.read().await.commit_reminder;
+        let config = self.config.read().await;
+        let commit_reminder = config.commit_reminder;
+        let proxy_config = config.proxy.clone();
+        drop(config);
+
         let mut env = ExecutionEnv::new(repo_context, commit_reminder);
+        apply_proxy_env(&mut env, &proxy_config);
 
         // Load task and project context for environment variables
         let task = workspace

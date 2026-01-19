@@ -137,6 +137,25 @@
           }
         }
       },
+      "proxy": {
+        "title": "Proxy",
+        "description": "Override HTTP(S)_PROXY and NO_PROXY for coding agent runs. Leave empty to use environment variables.",
+        "http": {
+          "label": "HTTP Proxy",
+          "placeholder": "http://127.0.0.1:7890",
+          "helper": "Proxy URL for HTTP requests."
+        },
+        "https": {
+          "label": "HTTPS Proxy",
+          "placeholder": "http://127.0.0.1:7890",
+          "helper": "Proxy URL for HTTPS requests."
+        },
+        "noProxy": {
+          "label": "No Proxy",
+          "placeholder": "localhost,127.0.0.1",
+          "helper": "Comma-separated hostnames or IPs that should bypass the proxy."
+        }
+      },
       "pullRequests": {
         "title": "Pull Requests",
         "description": "Configure PR creation behavior",

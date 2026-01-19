@@ -31,7 +31,7 @@ use crate::{
     approvals::ExecutorApprovalService,
     command::{
         CmdOverrides, CommandBuildError, CommandBuilder, CommandParts, apply_overrides,
-        env_command_or_default,
+        env_command_or_default, format_command_for_log,
     },
     env::ExecutionEnv,
     executors::{
@@ -336,6 +336,10 @@ impl ClaudeCode {
     ) -> Result<SpawnedChild, ExecutorError> {
         let (program_path, args) = command_parts.into_resolved().await?;
         let combined_prompt = self.append_prompt.combine_prompt(prompt);
+        tracing::debug!(
+            command = %format_command_for_log(&program_path, &args),
+            "Spawning Claude Code command"
+        );
 
         let mut command = Command::new(program_path);
         command

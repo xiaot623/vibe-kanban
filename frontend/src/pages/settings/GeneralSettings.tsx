@@ -468,6 +468,83 @@ export function GeneralSettings() {
 
       <Card>
         <CardHeader>
+          <CardTitle>{t('settings.general.proxy.title')}</CardTitle>
+          <CardDescription>{t('settings.general.proxy.description')}</CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          <div className="space-y-2">
+            <Label htmlFor="proxy-http">
+              {t('settings.general.proxy.http.label')}
+            </Label>
+            <Input
+              id="proxy-http"
+              placeholder={t('settings.general.proxy.http.placeholder')}
+              value={draft?.proxy?.http_proxy ?? ''}
+              onChange={(e) => {
+                const value = e.target.value.trim();
+                updateDraft({
+                  proxy: {
+                    ...draft!.proxy,
+                    http_proxy: value || null,
+                  },
+                });
+              }}
+            />
+            <p className="text-sm text-muted-foreground">
+              {t('settings.general.proxy.http.helper')}
+            </p>
+          </div>
+
+          <div className="space-y-2">
+            <Label htmlFor="proxy-https">
+              {t('settings.general.proxy.https.label')}
+            </Label>
+            <Input
+              id="proxy-https"
+              placeholder={t('settings.general.proxy.https.placeholder')}
+              value={draft?.proxy?.https_proxy ?? ''}
+              onChange={(e) => {
+                const value = e.target.value.trim();
+                updateDraft({
+                  proxy: {
+                    ...draft!.proxy,
+                    https_proxy: value || null,
+                  },
+                });
+              }}
+            />
+            <p className="text-sm text-muted-foreground">
+              {t('settings.general.proxy.https.helper')}
+            </p>
+          </div>
+
+          <div className="space-y-2">
+            <Label htmlFor="proxy-no">
+              {t('settings.general.proxy.noProxy.label')}
+            </Label>
+            <Input
+              id="proxy-no"
+              placeholder={t('settings.general.proxy.noProxy.placeholder')}
+              value={draft?.proxy?.no_proxy ?? ''}
+              onChange={(e) => {
+                const value = e.target.value.trim();
+                updateDraft({
+                  proxy: {
+                    ...draft!.proxy,
+                    no_proxy: value || null,
+                  },
+                });
+              }}
+            />
+            <p className="text-sm text-muted-foreground">
+              {t('settings.general.proxy.noProxy.helper')}
+            </p>
+          </div>
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader>
           <CardTitle>{t('settings.general.pullRequests.title')}</CardTitle>
           <CardDescription>
             {t('settings.general.pullRequests.description')}

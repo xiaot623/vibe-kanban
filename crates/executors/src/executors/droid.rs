@@ -10,7 +10,7 @@ use ts_rs::TS;
 use workspace_utils::msg_store::MsgStore;
 
 use crate::{
-    command::{CommandBuildError, CommandBuilder, CommandParts},
+    command::{CommandBuildError, CommandBuilder, CommandParts, format_command_for_log},
     env::ExecutionEnv,
     executors::{AppendPrompt, ExecutorError, SpawnedChild, StandardCodingAgentExecutor},
     logs::utils::EntryIndexProvider,
@@ -113,6 +113,10 @@ async fn spawn_droid(
     cmd_overrides: &crate::command::CmdOverrides,
 ) -> Result<SpawnedChild, ExecutorError> {
     let (program_path, args) = command_parts.into_resolved().await?;
+    tracing::debug!(
+        command = %format_command_for_log(&program_path, &args),
+        "Spawning Droid command"
+    );
 
     let mut command = Command::new(program_path);
     command

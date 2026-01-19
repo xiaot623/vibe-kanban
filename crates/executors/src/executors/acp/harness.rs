@@ -20,7 +20,7 @@ use workspace_utils::{approvals::ApprovalStatus, stream_lines::LinesStreamExt};
 use super::{AcpClient, SessionManager};
 use crate::{
     approvals::ExecutorApprovalService,
-    command::{CmdOverrides, CommandParts},
+    command::{CmdOverrides, CommandParts, format_command_for_log},
     env::ExecutionEnv,
     executors::{ExecutorError, ExecutorExitResult, SpawnedChild, acp::AcpEvent},
 };
@@ -78,6 +78,10 @@ impl AcpAgentHarness {
         approvals: Option<std::sync::Arc<dyn ExecutorApprovalService>>,
     ) -> Result<SpawnedChild, ExecutorError> {
         let (program_path, args) = command_parts.into_resolved().await?;
+        tracing::debug!(
+            command = %format_command_for_log(&program_path, &args),
+            "Spawning ACP agent command"
+        );
         let mut command = Command::new(program_path);
         command
             .kill_on_drop(true)
@@ -128,6 +132,10 @@ impl AcpAgentHarness {
         approvals: Option<std::sync::Arc<dyn ExecutorApprovalService>>,
     ) -> Result<SpawnedChild, ExecutorError> {
         let (program_path, args) = command_parts.into_resolved().await?;
+        tracing::debug!(
+            command = %format_command_for_log(&program_path, &args),
+            "Spawning ACP agent follow-up command"
+        );
         let mut command = Command::new(program_path);
         command
             .kill_on_drop(true)

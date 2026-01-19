@@ -1,4 +1,7 @@
-use std::{collections::HashMap, path::PathBuf};
+use std::{
+    collections::HashMap,
+    path::{Path, PathBuf},
+};
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -38,6 +41,21 @@ impl CommandParts {
             .ok_or(ExecutorError::ExecutableNotFound { program })?;
         Ok((executable, args))
     }
+}
+
+pub fn format_command_for_log(program: &Path, args: &[String]) -> String {
+    let mut parts = Vec::with_capacity(args.len() + 1);
+    parts.push(quote_for_log(program.to_string_lossy().as_ref()));
+    for arg in args {
+        parts.push(quote_for_log(arg));
+    }
+    parts.join(" ")
+}
+
+fn quote_for_log(value: &str) -> String {
+    shlex::try_quote(value)
+        .map(|value| value.into_owned())
+        .unwrap_or(value.to_string())
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, TS, JsonSchema, Default)]
