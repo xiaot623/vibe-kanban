@@ -22,7 +22,6 @@ pub struct Project {
     pub id: Uuid,
     pub name: String,
     pub default_agent_working_dir: Option<String>,
-    pub remote_project_id: Option<Uuid>,
     #[ts(type = "Date")]
     pub created_at: DateTime<Utc>,
     #[ts(type = "Date")]
@@ -70,7 +69,6 @@ impl Project {
             r#"SELECT id as "id!: Uuid",
                       name,
                       default_agent_working_dir,
-                      remote_project_id as "remote_project_id: Uuid",
                       created_at as "created_at!: DateTime<Utc>",
                       updated_at as "updated_at!: DateTime<Utc>"
                FROM projects
@@ -87,7 +85,6 @@ impl Project {
             r#"
             SELECT p.id as "id!: Uuid", p.name,
                    p.default_agent_working_dir,
-                   p.remote_project_id as "remote_project_id: Uuid",
                    p.created_at as "created_at!: DateTime<Utc>", p.updated_at as "updated_at!: DateTime<Utc>"
             FROM projects p
             WHERE p.id IN (
@@ -110,7 +107,6 @@ impl Project {
             r#"SELECT id as "id!: Uuid",
                       name,
                       default_agent_working_dir,
-                      remote_project_id as "remote_project_id: Uuid",
                       created_at as "created_at!: DateTime<Utc>",
                       updated_at as "updated_at!: DateTime<Utc>"
                FROM projects
@@ -127,33 +123,11 @@ impl Project {
             r#"SELECT id as "id!: Uuid",
                       name,
                       default_agent_working_dir,
-                      remote_project_id as "remote_project_id: Uuid",
                       created_at as "created_at!: DateTime<Utc>",
                       updated_at as "updated_at!: DateTime<Utc>"
                FROM projects
                WHERE rowid = $1"#,
             rowid
-        )
-        .fetch_optional(pool)
-        .await
-    }
-
-    pub async fn find_by_remote_project_id(
-        pool: &SqlitePool,
-        remote_project_id: Uuid,
-    ) -> Result<Option<Self>, sqlx::Error> {
-        sqlx::query_as!(
-            Project,
-            r#"SELECT id as "id!: Uuid",
-                      name,
-                      default_agent_working_dir,
-                      remote_project_id as "remote_project_id: Uuid",
-                      created_at as "created_at!: DateTime<Utc>",
-                      updated_at as "updated_at!: DateTime<Utc>"
-               FROM projects
-               WHERE remote_project_id = $1
-               LIMIT 1"#,
-            remote_project_id
         )
         .fetch_optional(pool)
         .await
@@ -175,7 +149,6 @@ impl Project {
                 RETURNING id as "id!: Uuid",
                           name,
                           default_agent_working_dir,
-                          remote_project_id as "remote_project_id: Uuid",
                           created_at as "created_at!: DateTime<Utc>",
                           updated_at as "updated_at!: DateTime<Utc>""#,
             project_id,
@@ -204,7 +177,6 @@ impl Project {
                RETURNING id as "id!: Uuid",
                          name,
                          default_agent_working_dir,
-                         remote_project_id as "remote_project_id: Uuid",
                          created_at as "created_at!: DateTime<Utc>",
                          updated_at as "updated_at!: DateTime<Utc>""#,
             id,
@@ -212,46 +184,6 @@ impl Project {
         )
         .fetch_one(pool)
         .await
-    }
-
-    pub async fn set_remote_project_id(
-        pool: &SqlitePool,
-        id: Uuid,
-        remote_project_id: Option<Uuid>,
-    ) -> Result<(), sqlx::Error> {
-        sqlx::query!(
-            r#"UPDATE projects
-               SET remote_project_id = $2
-               WHERE id = $1"#,
-            id,
-            remote_project_id
-        )
-        .execute(pool)
-        .await?;
-
-        Ok(())
-    }
-
-    /// Transaction-compatible version of set_remote_project_id
-    pub async fn set_remote_project_id_tx<'e, E>(
-        executor: E,
-        id: Uuid,
-        remote_project_id: Option<Uuid>,
-    ) -> Result<(), sqlx::Error>
-    where
-        E: Executor<'e, Database = Sqlite>,
-    {
-        sqlx::query!(
-            r#"UPDATE projects
-               SET remote_project_id = $2
-               WHERE id = $1"#,
-            id,
-            remote_project_id
-        )
-        .execute(executor)
-        .await?;
-
-        Ok(())
     }
 
     pub async fn delete(pool: &SqlitePool, id: Uuid) -> Result<u64, sqlx::Error> {

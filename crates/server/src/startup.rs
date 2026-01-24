@@ -128,16 +128,6 @@ pub async fn spawn_background_services(deployment: &DeploymentImpl, platform: &s
             tracing::warn!("Failed to warm file search cache: {}", e);
         }
     });
-
-    // Verify shared tasks in background
-    let deployment_for_verification = deployment.clone();
-    tokio::spawn(async move {
-        if let Some(publisher) = deployment_for_verification.container().share_publisher()
-            && let Err(e) = publisher.cleanup_shared_tasks().await
-        {
-            tracing::warn!("Failed to verify shared tasks: {}", e);
-        }
-    });
 }
 
 /// Start the HTTP server and return the actual port and a handle to the server task

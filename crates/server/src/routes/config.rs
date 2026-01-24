@@ -8,7 +8,7 @@ use axum::{
     response::{Json as ResponseJson, Response},
     routing::{get, put},
 };
-use deployment::{Deployment, DeploymentError};
+use deployment::Deployment;
 use executors::{
     executors::{
         AvailabilityInfo, BaseAgentCapability, BaseCodingAgent, StandardCodingAgentExecutor,
@@ -25,7 +25,7 @@ use services::services::config::{
 };
 use tokio::fs;
 use ts_rs::TS;
-use utils::{api::oauth::LoginStatus, assets::config_path, response::ApiResponse};
+use utils::{assets::config_path, response::ApiResponse};
 
 use crate::{DeploymentImpl, error::ApiError};
 
@@ -73,7 +73,6 @@ impl Environment {
 pub struct UserSystemInfo {
     pub config: Config,
     pub analytics_user_id: String,
-    pub login_status: LoginStatus,
     #[serde(flatten)]
     pub profiles: ExecutorConfigs,
     pub environment: Environment,
@@ -81,18 +80,15 @@ pub struct UserSystemInfo {
     pub capabilities: HashMap<String, Vec<BaseAgentCapability>>,
 }
 
-// TODO: update frontend, BE schema has changed, this replaces GET /config and /config/constants
 #[axum::debug_handler]
 async fn get_user_system_info(
     State(deployment): State<DeploymentImpl>,
 ) -> ResponseJson<ApiResponse<UserSystemInfo>> {
     let config = deployment.config().read().await;
-    let login_status = deployment.get_login_status().await;
 
     let user_system_info = UserSystemInfo {
         config: config.clone(),
         analytics_user_id: deployment.user_id().to_string(),
-        login_status,
         profiles: ExecutorConfigs::get_cached(),
         environment: Environment::new(),
         capabilities: {
@@ -185,8 +181,11 @@ async fn handle_config_events(deployment: &DeploymentImpl, old: &Config, new: &C
     }
 }
 
-async fn get_sound(Path(sound): Path<SoundFile>) -> Result<Response, ApiError> {
-    let sound = sound.serve().await.map_err(DeploymentError::Other)?;
+async fn get_sound(Path(sound): Path<SoundFile>) -> Result<Response<Body>, ApiError> {
+    let sound = sound
+        .serve()
+        .await
+        .map_err(deployment::DeploymentError::Other)?;
     let response = Response::builder()
         .status(http::StatusCode::OK)
         .header(
@@ -205,7 +204,6 @@ pub struct McpServerQuery {
 
 #[derive(TS, Debug, Serialize, Deserialize)]
 pub struct GetMcpServerResponse {
-    // servers: HashMap<String, Value>,
     mcp_config: McpConfig,
     config_path: String,
 }

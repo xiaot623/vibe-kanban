@@ -1,12 +1,11 @@
-import { useUserSystem } from '../../components/ConfigProvider';
+import { useCurrentUser } from './useCurrentUser';
 
 export function useAuth() {
-  const { loginStatus } = useUserSystem();
+  const { data: status, isLoading } = useCurrentUser();
 
   return {
-    isSignedIn: loginStatus?.status === 'loggedin',
-    isLoaded: loginStatus !== null,
-    userId:
-      loginStatus?.status === 'loggedin' ? loginStatus.profile.user_id : null,
+    isSignedIn: status?.logged_in ?? false,
+    isLoaded: !isLoading && status !== undefined,
+    userId: status?.profile?.user_id ?? null,
   };
 }
