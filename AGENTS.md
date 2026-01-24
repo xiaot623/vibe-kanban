@@ -1,5 +1,11 @@
 # Repository Guidelines
 
+## difference from upstream
+- using system path claude cli first
+- only cli for claude codex gemini opencode droid
+- add global proxy setting
+- add editor support for trae and goland
+
 ## Project Structure & Module Organization
 - `crates/`: Rust workspace crates — `server` (API + bins), `db` (SQLx models/migrations), `executors`, `services`, `utils`, `deployment`, `local-deployment`, `remote`.
 - `frontend/`: React + TypeScript app (Vite, Tailwind). Source in `frontend/src`.
