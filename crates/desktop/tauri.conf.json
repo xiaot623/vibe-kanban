@@ -1,0 +1,42 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Vibe Kanban",
+  "identifier": "ai.bloop.vibe-kanban",
+  "version": "0.0.155",
+  "build": {
+    "beforeBuildCommand": "pnpm --dir ../.. run frontend:build",
+    "frontendDist": "../../frontend/dist"
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "icon": [],
+    "category": "DeveloperTool",
+    "shortDescription": "AI-powered task management for developers",
+    "longDescription": "Vibe Kanban helps developers manage tasks with AI-powered coding agents",
+    "macOS": {
+      "minimumSystemVersion": "10.15"
+    },
+    "windows": {
+      "nsis": {
+        "installMode": "currentUser"
+      }
+    }
+  },
+  "app": {
+    "windows": [
+      {
+        "title": "Vibe Kanban",
+        "width": 1400,
+        "height": 900,
+        "minWidth": 800,
+        "minHeight": 600,
+        "visible": false,
+        "center": true
+      }
+    ],
+    "security": {
+      "csp": "default-src 'self'; connect-src 'self' http://localhost:* ws://localhost:*; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'"
+    }
+  }
+}

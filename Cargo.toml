@@ -9,7 +9,8 @@ members = [
     "crates/local-deployment",
     "crates/deployment",
     "crates/remote",
-    "crates/review"
+    "crates/review",
+    "crates/desktop"
 ]
 
 [workspace.dependencies]
@@ -29,6 +30,8 @@ ts-rs = { git = "https://github.com/xazukx/ts-rs.git", branch = "use-ts-enum", f
 schemars = { version = "1.0.4", features = ["derive", "chrono04", "uuid1", "preserve_order"] }
 serde_with = "3"
 async-trait = "0.1"
+tauri = { version = "2.2", features = [] }
+tauri-build = { version = "2.0" }
 
 [profile.release]
 debug = 1

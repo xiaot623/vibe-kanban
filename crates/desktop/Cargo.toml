@@ -1,0 +1,37 @@
+[package]
+name = "vibe-kanban-desktop"
+version = "0.0.155"
+edition = "2021"
+description = "Vibe Kanban Desktop Application"
+
+[build-dependencies]
+tauri-build = { workspace = true, features = [] }
+
+[dependencies]
+server = { path = "../server" }
+deployment = { path = "../deployment" }
+local-deployment = { path = "../local-deployment" }
+services = { path = "../services" }
+utils = { path = "../utils" }
+db = { path = "../db" }
+
+tauri = { workspace = true, features = ["devtools"] }
+tokio = { workspace = true }
+axum = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+serde_json = { workspace = true }
+rustls = { workspace = true }
+anyhow = { workspace = true }
+
+[features]
+default = ["custom-protocol"]
+custom-protocol = ["tauri/custom-protocol"]
+
+[[bin]]
+name = "vibe-kanban-desktop"
+path = "src/main.rs"
+
+[lib]
+name = "vibe_kanban_desktop"
+path = "src/lib.rs"

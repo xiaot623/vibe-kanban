@@ -1,140 +1,34 @@
-use anyhow::{self, Error as AnyhowError};
-use deployment::{Deployment, DeploymentError};
-use server::{DeploymentImpl, routes};
-use services::services::container::ContainerService;
-use sqlx::Error as SqlxError;
+use server::startup::{self, ServerConfig, StartupError};
 use strip_ansi_escapes::strip;
-use thiserror::Error;
-use tracing_subscriber::{EnvFilter, prelude::*};
-use utils::{
-    assets::asset_dir,
-    browser::open_browser,
-    port_file::write_port_file,
-    sentry::{self as sentry_utils, SentrySource, sentry_layer},
-};
-
-#[derive(Debug, Error)]
-pub enum VibeKanbanError {
-    #[error(transparent)]
-    Io(#[from] std::io::Error),
-    #[error(transparent)]
-    Sqlx(#[from] SqlxError),
-    #[error(transparent)]
-    Deployment(#[from] DeploymentError),
-    #[error(transparent)]
-    Other(#[from] AnyhowError),
-}
 
 #[tokio::main]
-async fn main() -> Result<(), VibeKanbanError> {
+async fn main() -> Result<(), StartupError> {
     // Install rustls crypto provider before any TLS operations
     rustls::crypto::aws_lc_rs::default_provider()
         .install_default()
         .expect("Failed to install rustls crypto provider");
 
-    sentry_utils::init_once(SentrySource::Backend);
+    startup::init_logging();
 
-    let log_level = std::env::var("RUST_LOG").unwrap_or_else(|_| "info".to_string());
-    let filter_string = format!(
-        "warn,server={level},services={level},db={level},executors={level},deployment={level},local_deployment={level},utils={level}",
-        level = log_level
-    );
-    let env_filter = EnvFilter::try_new(filter_string).expect("Failed to create tracing filter");
-    tracing_subscriber::registry()
-        .with(tracing_subscriber::fmt::layer().with_filter(env_filter))
-        .with(sentry_layer())
-        .init();
+    let deployment = startup::initialize_deployment().await?;
+    startup::spawn_background_services(&deployment, "cli").await;
 
-    // Create asset directory if it doesn't exist
-    if !asset_dir().exists() {
-        std::fs::create_dir_all(asset_dir())?;
-    }
+    let config = ServerConfig {
+        port: resolve_port(),
+        host: resolve_host(),
+        open_browser: !cfg!(debug_assertions),
+        write_port_file: true,
+    };
 
-    let deployment = DeploymentImpl::new().await?;
-    deployment.update_sentry_scope().await?;
-    deployment
-        .container()
-        .cleanup_orphan_executions()
-        .await
-        .map_err(DeploymentError::from)?;
-    deployment
-        .container()
-        .backfill_before_head_commits()
-        .await
-        .map_err(DeploymentError::from)?;
-    deployment
-        .container()
-        .backfill_repo_names()
-        .await
-        .map_err(DeploymentError::from)?;
-    deployment.spawn_pr_monitor_service().await;
-    deployment
-        .track_if_analytics_allowed("session_start", serde_json::json!({}))
-        .await;
-    // Pre-warm file search cache for most active projects
-    let deployment_for_cache = deployment.clone();
-    tokio::spawn(async move {
-        if let Err(e) = deployment_for_cache
-            .file_search_cache()
-            .warm_most_active(&deployment_for_cache.db().pool, 3)
-            .await
-        {
-            tracing::warn!("Failed to warm file search cache: {}", e);
-        }
-    });
+    let (_port, server_handle) = startup::start_server(deployment.clone(), config).await?;
 
-    // Verify shared tasks in background
-    let deployment_for_verification = deployment.clone();
-    tokio::spawn(async move {
-        if let Some(publisher) = deployment_for_verification.container().share_publisher()
-            && let Err(e) = publisher.cleanup_shared_tasks().await
-        {
-            tracing::warn!("Failed to verify shared tasks: {}", e);
-        }
-    });
+    // Wait for shutdown signal
+    shutdown_signal().await;
 
-    let app_router = routes::router(deployment.clone());
+    // Abort the server task
+    server_handle.abort();
 
-    let cli_port = parse_cli_port();
-    let port = std::env::var("BACKEND_PORT")
-        .ok()
-        .and_then(|s| parse_port_value(&s))
-        .or_else(|| cli_port)
-        .or_else(|| std::env::var("PORT").ok().and_then(|s| parse_port_value(&s)))
-        .unwrap_or_else(|| {
-            tracing::info!("No PORT environment variable set, using port 0 for auto-assignment");
-            0
-        }); // Use 0 to find free port if no specific port provided
-
-    let host = std::env::var("HOST").unwrap_or_else(|_| "127.0.0.1".to_string());
-    let listener = tokio::net::TcpListener::bind(format!("{host}:{port}")).await?;
-    let actual_port = listener.local_addr()?.port(); // get → 53427 (example)
-
-    // Write port file for discovery if prod, warn on fail
-    if let Err(e) = write_port_file(actual_port).await {
-        tracing::warn!("Failed to write port file: {}", e);
-    }
-
-    tracing::info!("Server running on http://{host}:{actual_port}");
-
-    if !cfg!(debug_assertions) {
-        tracing::info!("Opening browser...");
-        tokio::spawn(async move {
-            if let Err(e) = open_browser(&format!("http://127.0.0.1:{actual_port}")).await {
-                tracing::warn!(
-                    "Failed to open browser automatically: {}. Please open http://127.0.0.1:{} manually.",
-                    e,
-                    actual_port
-                );
-            }
-        });
-    }
-
-    axum::serve(listener, app_router)
-        .with_graceful_shutdown(shutdown_signal())
-        .await?;
-
-    perform_cleanup_actions(&deployment).await;
+    startup::cleanup(&deployment).await;
 
     Ok(())
 }
@@ -175,12 +69,21 @@ pub async fn shutdown_signal() {
     }
 }
 
-pub async fn perform_cleanup_actions(deployment: &DeploymentImpl) {
-    deployment
-        .container()
-        .kill_all_running_processes()
-        .await
-        .expect("Failed to cleanly kill running execution processes");
+fn resolve_port() -> u16 {
+    let cli_port = parse_cli_port();
+    std::env::var("BACKEND_PORT")
+        .ok()
+        .and_then(|s| parse_port_value(&s))
+        .or_else(|| cli_port)
+        .or_else(|| std::env::var("PORT").ok().and_then(|s| parse_port_value(&s)))
+        .unwrap_or_else(|| {
+            tracing::info!("No PORT environment variable set, using port 0 for auto-assignment");
+            0
+        })
+}
+
+fn resolve_host() -> String {
+    std::env::var("HOST").unwrap_or_else(|_| "127.0.0.1".to_string())
 }
 
 fn parse_cli_port() -> Option<u16> {
