@@ -209,6 +209,23 @@
     @apply min-h-screen;
   }
 
+  /* Prevent over-scroll bounce for Tauri */
+  html,
+  body {
+    overscroll-behavior: none;
+  }
+
+  /* Match theme background color for over-scroll areas */
+  html.light,
+  html.light body {
+    background-color: hsl(48 33% 97%);
+  }
+
+  html.dark,
+  html.dark body {
+    background-color: hsl(48 4% 16%);
+  }
+
   .legacy-design {
     @apply bg-background text-foreground font-chivo-mono;
   }

@@ -1,7 +1,6 @@
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { attemptsApi } from '@/lib/api';
 import { attemptKeys } from '@/hooks/useAttempt';
-import { workspaceSummaryKeys } from '@/components/ui-new/hooks/useWorkspaces';
 
 interface ToggleArchiveParams {
   workspaceId: string;
@@ -38,8 +37,6 @@ export function useWorkspaceMutations(options?: UseWorkspaceMutationsOptions) {
       attemptsApi.update(workspaceId, { archived: !archived }),
     onSuccess: (_, params) => {
       invalidateQueries(params.workspaceId);
-      // Invalidate workspace summaries so stats are refreshed
-      queryClient.invalidateQueries({ queryKey: workspaceSummaryKeys.all });
       options?.onArchiveSuccess?.(params);
     },
     onError: (err) => {
@@ -52,8 +49,6 @@ export function useWorkspaceMutations(options?: UseWorkspaceMutationsOptions) {
       attemptsApi.update(workspaceId, { pinned: !pinned }),
     onSuccess: (_, { workspaceId }) => {
       invalidateQueries(workspaceId);
-      // Invalidate workspace summaries so stats are refreshed
-      queryClient.invalidateQueries({ queryKey: workspaceSummaryKeys.all });
     },
     onError: (err) => {
       console.error('Failed to toggle workspace pin:', err);
@@ -68,8 +63,6 @@ export function useWorkspaceMutations(options?: UseWorkspaceMutationsOptions) {
       queryClient.removeQueries({
         queryKey: attemptKeys.byId(params.workspaceId),
       });
-      // Invalidate workspace summaries so list is refreshed
-      queryClient.invalidateQueries({ queryKey: workspaceSummaryKeys.all });
       options?.onDeleteSuccess?.(params);
     },
     onError: (err) => {

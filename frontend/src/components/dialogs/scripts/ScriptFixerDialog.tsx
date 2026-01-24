@@ -20,13 +20,41 @@ import {
   SelectValue,
 } from '@/components/ui/select';
 import { AutoExpandingTextarea } from '@/components/ui/auto-expanding-textarea';
-import { VirtualizedProcessLogs } from '@/components/ui-new/containers/VirtualizedProcessLogs';
-import { RunningDots } from '@/components/ui-new/primitives/RunningDots';
 import { defineModal } from '@/lib/modals';
 import { repoApi, attemptsApi } from '@/lib/api';
 import { useLogStream } from '@/hooks/useLogStream';
 import { useExecutionProcesses } from '@/hooks/useExecutionProcesses';
 import type { RepoWithTargetBranch, PatchType, UpdateRepo } from 'shared/types';
+
+// Simple RunningDots component
+function RunningDots() {
+  return <span className="animate-pulse">...</span>;
+}
+
+// Simple logs viewer component
+function SimpleLogs({
+  logs,
+  error,
+}: {
+  logs: Array<{ type: string; content: string }>;
+  error?: string | null;
+}) {
+  if (error) {
+    return <div className="p-2 text-error text-sm">Error loading logs: {error}</div>;
+  }
+  if (logs.length === 0) {
+    return <div className="p-2 text-muted-foreground text-sm">No logs available</div>;
+  }
+  return (
+    <div className="h-full overflow-auto p-2 font-mono text-xs">
+      {logs.map((log, index) => (
+        <div key={index} className={log.type === 'STDERR' ? 'text-error' : ''}>
+          {log.content}
+        </div>
+      ))}
+    </div>
+  );
+}
 
 export type ScriptType = 'setup' | 'cleanup' | 'dev_server';
 
@@ -351,13 +379,7 @@ const ScriptFixerDialogImpl = NiceModal.create<ScriptFixerDialogProps>(
               </div>
               <div className="bg-secondary py-base flex-1 border rounded-md bg-muted overflow-hidden min-w-0">
                 {latestProcess ? (
-                  <VirtualizedProcessLogs
-                    logs={logs}
-                    error={logsError}
-                    searchQuery=""
-                    matchIndices={[]}
-                    currentMatchIndex={-1}
-                  />
+                  <SimpleLogs logs={logs} error={logsError} />
                 ) : (
                   <div className="h-full flex items-center justify-center text-muted-foreground text-sm">
                     {t('scriptFixer.noLogs')}

@@ -801,23 +801,6 @@ export function GeneralSettings() {
         <CardContent className="space-y-4">
           <div className="flex items-center space-x-2">
             <Checkbox
-              id="beta-workspaces"
-              checked={draft?.beta_workspaces ?? false}
-              onCheckedChange={(checked: boolean) =>
-                updateDraft({ beta_workspaces: checked })
-              }
-            />
-            <div className="space-y-0.5">
-              <Label htmlFor="beta-workspaces" className="cursor-pointer">
-                {t('settings.general.beta.workspaces.label')}
-              </Label>
-              <p className="text-sm text-muted-foreground">
-                {t('settings.general.beta.workspaces.helper')}
-              </p>
-            </div>
-          </div>
-          <div className="flex items-center space-x-2">
-            <Checkbox
               id="commit-reminder"
               checked={draft?.commit_reminder ?? false}
               onCheckedChange={(checked: boolean) =>

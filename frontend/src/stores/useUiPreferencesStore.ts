@@ -1,7 +1,9 @@
 import { useMemo, useCallback } from 'react';
 import { create } from 'zustand';
 import { persist } from 'zustand/middleware';
-import type { RepoAction } from '@/components/ui-new/primitives/RepoCard';
+
+// RepoAction type for repo card actions
+export type RepoAction = 'pull-request' | 'branch' | 'commit';
 
 export const RIGHT_MAIN_PANEL_MODES = {
   CHANGES: 'changes',
