@@ -6,12 +6,11 @@ import {
   parseInstance,
 } from '@git-diff-view/react';
 import { SquarePen } from 'lucide-react';
-import { useUserSystem } from '@/components/ConfigProvider';
 import { getHighLightLanguageFromPath } from '@/utils/extToLanguage';
-import { getActualTheme } from '@/utils/theme';
 import '@/styles/diff-style-overrides.css';
 import '@/styles/edit-diff-overrides.css';
 import { cn } from '@/lib/utils';
+import { useTheme } from '@/components/ThemeProvider';
 
 type Props = {
   path: string;
@@ -70,11 +69,10 @@ function EditDiffRenderer({
   statusAppearance = 'default',
   forceExpanded = false,
 }: Props) {
-  const { config } = useUserSystem();
+  const { resolvedTheme: theme } = useTheme();
   const [expanded, setExpanded] = useExpandable(expansionKey, defaultExpanded);
   const effectiveExpanded = forceExpanded || expanded;
 
-  const theme = getActualTheme(config?.theme);
   const { hunks, hideLineNumbers, additions, deletions, isValidDiff } = useMemo(
     () => processUnifiedDiff(unifiedDiff, hasLineNumbers),
     [unifiedDiff, hasLineNumbers]

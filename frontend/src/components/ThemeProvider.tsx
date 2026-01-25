@@ -8,11 +8,13 @@ type ThemeProviderProps = {
 
 type ThemeProviderState = {
   theme: ThemeMode;
+  resolvedTheme: 'light' | 'dark';
   setTheme: (theme: ThemeMode) => void;
 };
 
 const initialState: ThemeProviderState = {
   theme: ThemeMode.SYSTEM,
+  resolvedTheme: 'light',
   setTheme: () => null,
 };
 
@@ -24,6 +26,15 @@ export function ThemeProvider({
   ...props
 }: ThemeProviderProps) {
   const [theme, setThemeState] = useState<ThemeMode>(initialTheme);
+  const [resolvedTheme, setResolvedTheme] = useState<'light' | 'dark'>(() => {
+    if (typeof window === 'undefined') return 'light';
+    if (initialTheme === ThemeMode.SYSTEM) {
+      return window.matchMedia('(prefers-color-scheme: dark)').matches
+        ? 'dark'
+        : 'light';
+    }
+    return initialTheme === ThemeMode.DARK ? 'dark' : 'light';
+  });
 
   // Update theme when initialTheme changes
   useEffect(() => {
@@ -31,22 +42,32 @@ export function ThemeProvider({
   }, [initialTheme]);
 
   useEffect(() => {
-    const root = window.document.documentElement;
-
-    root.classList.remove('light', 'dark');
-
-    if (theme === ThemeMode.SYSTEM) {
-      const systemTheme = window.matchMedia('(prefers-color-scheme: dark)')
-        .matches
-        ? 'dark'
-        : 'light';
-
-      root.classList.add(systemTheme);
+    if (theme !== ThemeMode.SYSTEM) {
+      setResolvedTheme(theme === ThemeMode.DARK ? 'dark' : 'light');
       return;
     }
 
-    root.classList.add(theme.toLowerCase());
+    const media = window.matchMedia('(prefers-color-scheme: dark)');
+    const updateResolvedTheme = () => {
+      setResolvedTheme(media.matches ? 'dark' : 'light');
+    };
+
+    updateResolvedTheme();
+
+    if (media.addEventListener) {
+      media.addEventListener('change', updateResolvedTheme);
+      return () => media.removeEventListener('change', updateResolvedTheme);
+    }
+
+    media.addListener(updateResolvedTheme);
+    return () => media.removeListener(updateResolvedTheme);
   }, [theme]);
+
+  useEffect(() => {
+    const root = window.document.documentElement;
+    root.classList.remove('light', 'dark');
+    root.classList.add(resolvedTheme);
+  }, [resolvedTheme]);
 
   const setTheme = (newTheme: ThemeMode) => {
     setThemeState(newTheme);
@@ -54,6 +75,7 @@ export function ThemeProvider({
 
   const value = {
     theme,
+    resolvedTheme,
     setTheme,
   };
 

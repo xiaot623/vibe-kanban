@@ -1,20 +1,11 @@
 import { Code2 } from 'lucide-react';
-import { EditorType, ThemeMode } from 'shared/types';
+import { EditorType } from 'shared/types';
 import { useTheme } from '@/components/ThemeProvider';
 
 type IdeIconProps = {
   editorType?: EditorType | null;
   className?: string;
 };
-
-function getResolvedTheme(theme: ThemeMode): 'light' | 'dark' {
-  if (theme === ThemeMode.SYSTEM) {
-    return window.matchMedia('(prefers-color-scheme: dark)').matches
-      ? 'dark'
-      : 'light';
-  }
-  return theme === ThemeMode.DARK ? 'dark' : 'light';
-}
 
 export function getIdeName(editorType: EditorType | undefined | null): string {
   if (!editorType) return 'IDE';
@@ -43,8 +34,7 @@ export function getIdeName(editorType: EditorType | undefined | null): string {
 }
 
 export function IdeIcon({ editorType, className = 'h-4 w-4' }: IdeIconProps) {
-  const { theme } = useTheme();
-  const resolvedTheme = getResolvedTheme(theme);
+  const { resolvedTheme } = useTheme();
   const isDark = resolvedTheme === 'dark';
 
   const ideName = getIdeName(editorType);

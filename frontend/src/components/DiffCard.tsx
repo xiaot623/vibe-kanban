@@ -2,9 +2,7 @@ import { Diff } from 'shared/types';
 import { DiffModeEnum, DiffView, SplitSide } from '@git-diff-view/react';
 import { generateDiffFile, type DiffFile } from '@git-diff-view/file';
 import { useMemo } from 'react';
-import { useUserSystem } from '@/components/ConfigProvider';
 import { getHighLightLanguageFromPath } from '@/utils/extToLanguage';
-import { getActualTheme } from '@/utils/theme';
 import { stripLineEnding } from '@/utils/string';
 import { Button } from '@/components/ui/button';
 import {
@@ -35,6 +33,7 @@ import {
   useWrapTextDiff,
 } from '@/stores/useDiffViewStore';
 import { useProject } from '@/contexts/ProjectContext';
+import { useTheme } from '@/components/ThemeProvider';
 
 type Props = {
   diff: Diff;
@@ -80,8 +79,7 @@ export default function DiffCard({
   onToggle,
   selectedAttempt,
 }: Props) {
-  const { config } = useUserSystem();
-  const theme = getActualTheme(config?.theme);
+  const { resolvedTheme: theme } = useTheme();
   const { comments, drafts, setDraft } = useReview();
   const globalMode = useDiffViewMode();
   const ignoreWhitespace = useIgnoreWhitespaceDiff();

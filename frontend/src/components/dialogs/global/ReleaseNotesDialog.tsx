@@ -10,7 +10,6 @@ import { Button } from '@/components/ui/button';
 import { AlertCircle, ExternalLink } from 'lucide-react';
 import NiceModal, { useModal } from '@ebay/nice-modal-react';
 import { useTheme } from '@/components/ThemeProvider';
-import { getActualTheme } from '@/utils/theme';
 import { defineModal, type NoProps } from '@/lib/modals';
 
 const RELEASE_NOTES_BASE_URL = 'https://vibekanban.com/release-notes';
@@ -18,14 +17,13 @@ const RELEASE_NOTES_BASE_URL = 'https://vibekanban.com/release-notes';
 const ReleaseNotesDialogImpl = NiceModal.create<NoProps>(() => {
   const modal = useModal();
   const [iframeError, setIframeError] = useState(false);
-  const { theme } = useTheme();
+  const { resolvedTheme } = useTheme();
 
   const releaseNotesUrl = useMemo(() => {
-    const actualTheme = getActualTheme(theme);
     const url = new URL(RELEASE_NOTES_BASE_URL);
-    url.searchParams.set('theme', actualTheme);
+    url.searchParams.set('theme', resolvedTheme);
     return url.toString();
-  }, [theme]);
+  }, [resolvedTheme]);
 
   const handleOpenInBrowser = () => {
     window.open(releaseNotesUrl, '_blank');

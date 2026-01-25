@@ -1,13 +1,12 @@
 import { type FileChange } from 'shared/types';
-import { useUserSystem } from '@/components/ConfigProvider';
 import { Trash2, FilePlus2, ArrowRight, FileX, FileClock } from 'lucide-react';
 import { getHighLightLanguageFromPath } from '@/utils/extToLanguage';
-import { getActualTheme } from '@/utils/theme';
 import EditDiffRenderer from './EditDiffRenderer';
 import FileContentView from './FileContentView';
 import '@/styles/diff-style-overrides.css';
 import { useExpandable } from '@/stores/useExpandableStore';
 import { cn } from '@/lib/utils';
+import { useTheme } from '@/components/ThemeProvider';
 
 type Props = {
   path: string;
@@ -47,11 +46,10 @@ const FileChangeRenderer = ({
   statusAppearance = 'default',
   forceExpanded = false,
 }: Props) => {
-  const { config } = useUserSystem();
+  const { resolvedTheme: theme } = useTheme();
   const [expanded, setExpanded] = useExpandable(expansionKey, defaultExpanded);
   const effectiveExpanded = forceExpanded || expanded;
 
-  const theme = getActualTheme(config?.theme);
   const headerClass = cn('flex items-center gap-1.5 text-secondary-foreground');
 
   const statusIcon =
