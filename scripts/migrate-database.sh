@@ -12,8 +12,8 @@ fi
 
 echo "Migrating database from $SOURCE_DB to $TARGET_DB..."
 
-sqlite3 "$TARGET_DB" << 'EOF'
-ATTACH '~/Library/Application Support/ai.bloop.vibe-kanban/db.sqlite' AS source_db;
+sqlite3 "$TARGET_DB" << EOF
+ATTACH '$SOURCE_DB' AS source_db;
 
 PRAGMA foreign_keys = OFF;
 
