@@ -9,7 +9,9 @@
   "bundle": {
     "active": true,
     "targets": "all",
-    "icon": [],
+    "icon": [
+      "icons/icon.png"
+    ],
     "category": "DeveloperTool",
     "shortDescription": "AI-powered task management for developers",
     "longDescription": "Vibe Kanban helps developers manage tasks with AI-powered coding agents",
