@@ -1,11 +1,24 @@
+#!/bin/bash
+
+set -e
+
+SOURCE_DB="${SOURCE_DB:-$HOME/Library/Application Support/ai.bloop.vibe-kanban/db.sqlite}"
+TARGET_DB="${TARGET_DB:-$HOME/.kanban/db.sqlite}"
+
+if [ ! -f "$SOURCE_DB" ]; then
+    echo "Error: Source database not found: $SOURCE_DB"
+    exit 1
+fi
+
+echo "Migrating database from $SOURCE_DB to $TARGET_DB..."
+
+sqlite3 "$TARGET_DB" << 'EOF'
 ATTACH '~/Library/Application Support/ai.bloop.vibe-kanban/db.sqlite' AS source_db;
 
 PRAGMA foreign_keys = OFF;
 
 BEGIN TRANSACTION;
 
--- CLEAR DATA FROM NEW DATABASE ONLY (main)
--- The original database (source_db) is NOT touched.
 DELETE FROM main.task_images;
 DELETE FROM main.images;
 DELETE FROM main.merges;
@@ -22,8 +35,6 @@ DELETE FROM main.projects;
 DELETE FROM main.repos;
 DELETE FROM main.tags;
 DELETE FROM main.scratch;
-
--- IMPORT DATA FROM OLD DATABASE (source_db) TO NEW (main)
 
 INSERT INTO main.projects (id, name, default_agent_working_dir, created_at, updated_at)
 SELECT id, name, default_agent_working_dir, created_at, updated_at FROM source_db.projects;
@@ -74,3 +85,6 @@ INSERT INTO main.merges (id, workspace_id, repo_id, merge_type, merge_commit, pr
 SELECT id, workspace_id, repo_id, merge_type, merge_commit, pr_number, pr_url, pr_status, pr_merged_at, pr_merge_commit_sha, target_branch_name, created_at FROM source_db.merges;
 
 COMMIT;
+EOF
+
+echo "Migration completed successfully!"
