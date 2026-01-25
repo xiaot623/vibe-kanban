@@ -834,7 +834,9 @@ pub trait ContainerService {
                         LogMsg::Finished => {
                             break;
                         }
-                        LogMsg::JsonPatch(_) | LogMsg::Ready => continue,
+                        LogMsg::JsonPatch(_) | LogMsg::Ready | LogMsg::Notification(_, _) => {
+                            continue;
+                        }
                     }
                 }
             }

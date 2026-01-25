@@ -8,6 +8,7 @@ pub const EV_JSON_PATCH: &str = "json_patch";
 pub const EV_SESSION_ID: &str = "session_id";
 pub const EV_READY: &str = "ready";
 pub const EV_FINISHED: &str = "finished";
+pub const EV_NOTIFICATION: &str = "notification";
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum LogMsg {
@@ -17,6 +18,7 @@ pub enum LogMsg {
     SessionId(String),
     Ready,
     Finished,
+    Notification(String, String), // title, message
 }
 
 impl LogMsg {
@@ -28,6 +30,7 @@ impl LogMsg {
             LogMsg::SessionId(_) => EV_SESSION_ID,
             LogMsg::Ready => EV_READY,
             LogMsg::Finished => EV_FINISHED,
+            LogMsg::Notification(_, _) => EV_NOTIFICATION,
         }
     }
 
@@ -42,6 +45,10 @@ impl LogMsg {
             LogMsg::SessionId(s) => Event::default().event(EV_SESSION_ID).data(s.clone()),
             LogMsg::Ready => Event::default().event(EV_READY).data(""),
             LogMsg::Finished => Event::default().event(EV_FINISHED).data(""),
+            LogMsg::Notification(title, message) => {
+                let data = serde_json::json!({ "title": title, "message": message });
+                Event::default().event(EV_NOTIFICATION).data(data.to_string())
+            }
         }
     }
 
@@ -80,6 +87,9 @@ impl LogMsg {
             LogMsg::SessionId(s) => EV_SESSION_ID.len() + s.len() + OVERHEAD,
             LogMsg::Ready => EV_READY.len() + OVERHEAD,
             LogMsg::Finished => EV_FINISHED.len() + OVERHEAD,
+            LogMsg::Notification(title, message) => {
+                EV_NOTIFICATION.len() + title.len() + message.len() + OVERHEAD
+            }
         }
     }
 }

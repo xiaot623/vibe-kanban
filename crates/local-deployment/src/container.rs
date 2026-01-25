@@ -89,10 +89,11 @@ impl LocalContainerService {
         analytics: Option<AnalyticsContext>,
         approvals: Approvals,
         queued_message_service: QueuedMessageService,
+        events_msg_store: Arc<MsgStore>,
     ) -> Self {
         let child_store = Arc::new(RwLock::new(HashMap::new()));
         let interrupt_senders = Arc::new(RwLock::new(HashMap::new()));
-        let notification_service = NotificationService::new(config.clone());
+        let notification_service = NotificationService::new(config.clone(), Some(events_msg_store));
 
         let container = LocalContainerService {
             db,

@@ -7491,11 +7491,13 @@ name = "vibe-kanban-desktop"
 version = "0.0.1"
 dependencies = [
  "anyhow",
+ "async-trait",
  "axum",
  "db",
  "deployment",
  "local-deployment",
  "rustls",
+ "serde",
  "serde_json",
  "server",
  "services",

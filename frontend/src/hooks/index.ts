@@ -28,3 +28,4 @@ export { useAuthStatus } from './auth/useAuthStatus';
 export { useCurrentUser } from './auth/useCurrentUser';
 export { useVariant } from './useVariant';
 export { useRetryProcess } from './useRetryProcess';
+export { useNotifications } from './useNotifications';

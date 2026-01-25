@@ -482,7 +482,8 @@ impl ClaudeLogProcessor {
                     LogMsg::JsonPatch(_)
                     | LogMsg::SessionId(_)
                     | LogMsg::Stderr(_)
-                    | LogMsg::Ready => continue,
+                    | LogMsg::Ready
+                    | LogMsg::Notification(_, _) => continue,
                     LogMsg::Finished => break,
                 };
 

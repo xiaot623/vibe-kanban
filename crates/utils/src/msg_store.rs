@@ -13,17 +13,19 @@ use crate::{log_msg::LogMsg, stream_lines::LinesStreamExt};
 // 100 MB Limit
 const HISTORY_BYTES: usize = 100000 * 1024;
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 struct StoredMsg {
     msg: LogMsg,
     bytes: usize,
 }
 
+#[derive(Debug)]
 struct Inner {
     history: VecDeque<StoredMsg>,
     total_bytes: usize,
 }
 
+#[derive(Debug)]
 pub struct MsgStore {
     inner: RwLock<Inner>,
     sender: broadcast::Sender<LogMsg>,

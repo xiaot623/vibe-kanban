@@ -7,7 +7,7 @@ import { ProjectTasks } from '@/pages/ProjectTasks';
 import { FullAttemptLogsPage } from '@/pages/FullAttemptLogs';
 import { NormalLayout } from '@/components/layout/NormalLayout';
 import { usePostHog } from 'posthog-js/react';
-import { useAuth } from '@/hooks';
+import { useAuth, useNotifications } from '@/hooks';
 import { usePreviousPath } from '@/hooks/usePreviousPath';
 
 import {
@@ -45,6 +45,9 @@ function AppContent() {
 
   // Track previous path for back navigation
   usePreviousPath();
+
+  // Listen for notifications
+  useNotifications();
 
   // Handle opt-in/opt-out and user identification when config loads
   useEffect(() => {

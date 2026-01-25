@@ -157,6 +157,7 @@ impl Deployment for LocalDeployment {
             analytics_ctx,
             approvals.clone(),
             queued_message_service.clone(),
+            events_msg_store.clone(),
         )
         .await;
 

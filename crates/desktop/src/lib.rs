@@ -1,8 +1,35 @@
 use server::startup::{self, ServerConfig};
+use services::services::notification::{Notifier, set_global_notifier};
 use std::sync::Arc;
-use tauri::{Manager, WebviewUrl, WebviewWindowBuilder};
+use tauri::{Emitter, Manager, WebviewUrl, WebviewWindowBuilder};
 use tokio::sync::Mutex;
 use tracing_subscriber::{EnvFilter, prelude::*};
+
+#[derive(Debug, Clone)]
+struct TauriNotifier {
+    app_handle: tauri::AppHandle,
+}
+
+#[async_trait::async_trait]
+impl Notifier for TauriNotifier {
+    async fn notify(&self, title: &str, message: &str) {
+        #[derive(serde::Serialize, Clone)]
+        struct NotifyPayload {
+            title: String,
+            message: String,
+        }
+
+        if let Err(e) = self.app_handle.emit(
+            "notify",
+            NotifyPayload {
+                title: title.to_string(),
+                message: message.to_string(),
+            },
+        ) {
+            tracing::error!("Failed to emit notification event: {}", e);
+        }
+    }
+}
 
 pub fn run() {
     // Install rustls crypto provider before any TLS operations
@@ -16,6 +43,11 @@ pub fn run() {
     tauri::Builder::default()
         .setup(|app| {
             let app_handle = app.handle().clone();
+
+            // Register global notifier
+            set_global_notifier(Arc::new(TauriNotifier {
+                app_handle: app_handle.clone(),
+            }));
 
             // Spawn the embedded server
             tauri::async_runtime::spawn(async move {

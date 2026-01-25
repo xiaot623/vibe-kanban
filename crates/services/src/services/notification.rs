@@ -1,26 +1,46 @@
 use std::sync::{Arc, OnceLock};
 
 use tokio::sync::RwLock;
-use utils;
+use utils::{self, log_msg::LogMsg, msg_store::MsgStore};
 
 use crate::services::config::{Config, NotificationConfig, SoundFile};
+
+/// Trait for handling notifications
+#[async_trait::async_trait]
+pub trait Notifier: Send + Sync + std::fmt::Debug {
+    async fn notify(&self, title: &str, message: &str);
+}
+
+/// Global notifier instance
+static GLOBAL_NOTIFIER: OnceLock<Arc<dyn Notifier>> = OnceLock::new();
+
+/// Set the global notifier instance
+pub fn set_global_notifier(notifier: Arc<dyn Notifier>) {
+    let _ = GLOBAL_NOTIFIER.set(notifier);
+}
 
 /// Service for handling cross-platform notifications including sound alerts and push notifications
 #[derive(Debug, Clone)]
 pub struct NotificationService {
     config: Arc<RwLock<Config>>,
+    msg_store: Option<Arc<MsgStore>>,
 }
 
 /// Cache for WSL root path from PowerShell
 static WSL_ROOT_PATH_CACHE: OnceLock<Option<String>> = OnceLock::new();
 
 impl NotificationService {
-    pub fn new(config: Arc<RwLock<Config>>) -> Self {
-        Self { config }
+    pub fn new(config: Arc<RwLock<Config>>, msg_store: Option<Arc<MsgStore>>) -> Self {
+        Self { config, msg_store }
     }
 
     /// Send both sound and push notifications if enabled
     pub async fn notify(&self, title: &str, message: &str) {
+        // Broadcast to web clients via SSE if msg_store is available
+        if let Some(msg_store) = &self.msg_store {
+            msg_store.push(LogMsg::Notification(title.to_string(), message.to_string()));
+        }
+
         let config = self.config.read().await.notifications.clone();
         Self::send_notification(&config, title, message).await;
     }
@@ -32,6 +52,12 @@ impl NotificationService {
         }
 
         if config.push_enabled {
+            // Check if a global notifier is set (e.g. for Tauri)
+            if let Some(notifier) = GLOBAL_NOTIFIER.get() {
+                notifier.notify(title, message).await;
+                return;
+            }
+
             Self::send_push_notification(title, message).await;
         }
     }
