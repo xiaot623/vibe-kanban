@@ -10,10 +10,11 @@ use tokio::fs;
 use ts_rs::TS;
 
 use crate::executors::{CodingAgent, ExecutorError};
+use workspace_utils::assets::default_mcp;
 
-static DEFAULT_MCP_JSON: &str = include_str!("../default_mcp.json");
 pub static PRECONFIGURED_MCP_SERVERS: LazyLock<Value> = LazyLock::new(|| {
-    serde_json::from_str::<Value>(DEFAULT_MCP_JSON).expect("Failed to parse default MCP JSON")
+    let mcp_bytes = default_mcp();
+    serde_json::from_slice::<Value>(&mcp_bytes).expect("Failed to parse default MCP JSON")
 });
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]

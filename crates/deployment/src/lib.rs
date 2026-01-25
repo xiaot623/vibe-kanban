@@ -78,6 +78,9 @@ pub trait Deployment: Clone + Send + Sync + 'static {
 
     fn config(&self) -> &Arc<RwLock<Config>>;
 
+    /// Returns the config parse error if the config file failed to parse
+    fn config_parse_error(&self) -> &Arc<RwLock<Option<String>>>;
+
     fn db(&self) -> &DBService;
 
     fn analytics(&self) -> &Option<AnalyticsService>;

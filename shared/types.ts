@@ -140,7 +140,11 @@ export type UserSystemInfo = { config: Config, analytics_user_id: string, enviro
 /**
  * Capabilities supported per executor (e.g., { "CLAUDE_CODE": ["SESSION_FORK"] })
  */
-capabilities: { [key in string]?: Array<BaseAgentCapability> }, executors: { [key in BaseCodingAgent]?: ExecutorConfig }, };
+capabilities: { [key in string]?: Array<BaseAgentCapability> }, 
+/**
+ * If the config file failed to parse, this contains the error message
+ */
+config_parse_error: string | null, executors: { [key in BaseCodingAgent]?: ExecutorConfig }, };
 
 export type Environment = { os_type: string, os_version: string, os_architecture: string, bitness: string, };
 

@@ -78,6 +78,8 @@ pub struct UserSystemInfo {
     pub environment: Environment,
     /// Capabilities supported per executor (e.g., { "CLAUDE_CODE": ["SESSION_FORK"] })
     pub capabilities: HashMap<String, Vec<BaseAgentCapability>>,
+    /// If the config file failed to parse, this contains the error message
+    pub config_parse_error: Option<String>,
 }
 
 #[axum::debug_handler]
@@ -85,6 +87,7 @@ async fn get_user_system_info(
     State(deployment): State<DeploymentImpl>,
 ) -> ResponseJson<ApiResponse<UserSystemInfo>> {
     let config = deployment.config().read().await;
+    let config_parse_error = deployment.config_parse_error().read().await.clone();
 
     let user_system_info = UserSystemInfo {
         config: config.clone(),
@@ -101,6 +104,7 @@ async fn get_user_system_info(
             }
             caps
         },
+        config_parse_error,
     };
 
     ResponseJson(ApiResponse::success(user_system_info))
@@ -127,6 +131,11 @@ async fn update_config(
             let mut config = deployment.config().write().await;
             *config = new_config.clone();
             drop(config);
+
+            // Clear any previous parse error since the config was successfully saved
+            let mut parse_error = deployment.config_parse_error().write().await;
+            *parse_error = None;
+            drop(parse_error);
 
             // Track config events when fields transition from false → true and run side effects
             handle_config_events(&deployment, &old_config, &new_config).await;

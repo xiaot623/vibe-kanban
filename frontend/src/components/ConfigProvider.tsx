@@ -5,6 +5,7 @@ import {
   useContext,
   useEffect,
   useMemo,
+  useRef,
 } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import {
@@ -16,6 +17,7 @@ import {
 import type { ExecutorConfig } from 'shared/types';
 import { configApi } from '../lib/api';
 import { updateLanguageFromConfig } from '../i18n/config';
+import { ConfigParseErrorDialog } from '@/components/dialogs/global/ConfigParseErrorDialog';
 
 interface UserSystemState {
   config: Config | null;
@@ -79,6 +81,22 @@ export function UserSystemProvider({ children }: UserSystemProviderProps) {
       string,
       BaseAgentCapability[]
     > | null) || null;
+
+  const configParseError = userSystemInfo?.config_parse_error || null;
+
+  // Track if we've already shown the parse error dialog to avoid showing it multiple times
+  const parseErrorShownRef = useRef<string | null>(null);
+
+  // Show config parse error dialog if there's an error
+  useEffect(() => {
+    if (
+      configParseError &&
+      configParseError !== parseErrorShownRef.current
+    ) {
+      parseErrorShownRef.current = configParseError;
+      ConfigParseErrorDialog.show({ errorMessage: configParseError });
+    }
+  }, [configParseError]);
 
   // Sync language with i18n when config changes
   useEffect(() => {

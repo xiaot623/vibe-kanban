@@ -1,11 +1,21 @@
 use std::path::PathBuf;
 
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
+use ts_rs::TS;
 
 pub mod editor;
 mod versions;
 
 pub use editor::EditorOpenError;
+
+/// Result of loading config - contains the config and optionally a parse error message
+#[derive(Clone, Debug, Serialize, Deserialize, TS)]
+pub struct ConfigLoadResult {
+    pub config: Config,
+    /// If config file exists but failed to parse, this contains the error message
+    pub parse_error: Option<String>,
+}
 
 #[derive(Debug, Error)]
 pub enum ConfigError {
@@ -28,13 +38,51 @@ pub type UiLanguage = versions::v1::UiLanguage;
 pub type ShowcaseState = versions::v1::ShowcaseState;
 pub type ProxyConfig = versions::v1::ProxyConfig;
 
-/// Will always return config, trying old schemas or eventually returning default
-pub async fn load_config_from_file(config_path: &PathBuf) -> Config {
-    match std::fs::read_to_string(config_path) {
-        Ok(raw_config) => Config::from(raw_config),
-        Err(_) => {
-            tracing::info!("No config file found, creating one");
-            Config::default()
+/// Load config from file, creating default if not exists
+/// Returns ConfigLoadResult which includes the config and optionally a parse error
+pub async fn load_config_from_file(config_path: &PathBuf) -> ConfigLoadResult {
+    use versions::v1::ConfigParseResult;
+
+    if config_path.exists() {
+        match std::fs::read_to_string(config_path) {
+            Ok(raw_config) => {
+                tracing::info!("Config file loaded from {:?}", config_path);
+                match Config::try_from_string(&raw_config) {
+                    ConfigParseResult::Ok(config) => ConfigLoadResult {
+                        config,
+                        parse_error: None,
+                    },
+                    ConfigParseResult::ParseError(error) => {
+                        tracing::warn!(
+                            "Config parse failed: {}, using default (file not overwritten)",
+                            error
+                        );
+                        // Return default config but with the parse error
+                        // DO NOT save/overwrite the config file
+                        ConfigLoadResult {
+                            config: Config::default(),
+                            parse_error: Some(error),
+                        }
+                    }
+                }
+            }
+            Err(e) => {
+                tracing::warn!("Failed to read config file: {}, using default", e);
+                ConfigLoadResult {
+                    config: Config::default(),
+                    parse_error: None,
+                }
+            }
+        }
+    } else {
+        tracing::info!("No config file found, creating default at {:?}", config_path);
+        let config = Config::default();
+        if let Err(e) = save_config_to_file(&config, config_path).await {
+            tracing::warn!("Failed to save default config: {}", e);
+        }
+        ConfigLoadResult {
+            config,
+            parse_error: None,
         }
     }
 }

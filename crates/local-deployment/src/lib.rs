@@ -36,6 +36,8 @@ pub mod pty;
 #[derive(Clone)]
 pub struct LocalDeployment {
     config: Arc<RwLock<Config>>,
+    /// If the config file failed to parse, this contains the error message
+    config_parse_error: Arc<RwLock<Option<String>>>,
     user_id: String,
     db: DBService,
     analytics: Option<AnalyticsService>,
@@ -63,7 +65,9 @@ struct PendingHandoff {
 #[async_trait]
 impl Deployment for LocalDeployment {
     async fn new() -> Result<Self, DeploymentError> {
-        let mut raw_config = load_config_from_file(&config_path()).await;
+        let config_load_result = load_config_from_file(&config_path()).await;
+        let mut raw_config = config_load_result.config;
+        let config_parse_error = config_load_result.parse_error;
 
         let profiles = ExecutorConfigs::get_cached();
         if !raw_config.onboarding_acknowledged
@@ -84,10 +88,14 @@ impl Deployment for LocalDeployment {
             }
         }
 
-        // Always save config (may have been migrated or version updated)
-        save_config_to_file(&raw_config, &config_path()).await?;
+        // Only save config if there was no parse error
+        // (don't overwrite a malformed config file - let user fix it manually)
+        if config_parse_error.is_none() {
+            save_config_to_file(&raw_config, &config_path()).await?;
+        }
 
         let config = Arc::new(RwLock::new(raw_config));
+        let config_parse_error = Arc::new(RwLock::new(config_parse_error));
         let user_id = generate_user_id();
         let analytics = AnalyticsConfig::new().map(AnalyticsService::new);
         let git = GitService::new();
@@ -160,6 +168,7 @@ impl Deployment for LocalDeployment {
 
         let deployment = Self {
             config,
+            config_parse_error,
             user_id,
             db,
             analytics,
@@ -187,6 +196,10 @@ impl Deployment for LocalDeployment {
 
     fn config(&self) -> &Arc<RwLock<Config>> {
         &self.config
+    }
+
+    fn config_parse_error(&self) -> &Arc<RwLock<Option<String>>> {
+        &self.config_parse_error
     }
 
     fn db(&self) -> &DBService {

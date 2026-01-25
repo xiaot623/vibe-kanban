@@ -3,28 +3,33 @@
     "CLAUDE_CODE": {
       "DEFAULT": {
         "CLAUDE_CODE": {
+          "model": "sonnet",
           "dangerously_skip_permissions": true
         }
       },
       "PLAN": {
         "CLAUDE_CODE": {
+          "model": "opus",
           "plan": true
+        }
+      },
+      "SONNET": {
+        "CLAUDE_CODE": {
+          "model": "sonnet",
+          "dangerously_skip_permissions": true
         }
       },
       "OPUS": {
         "CLAUDE_CODE": {
-          "model": "opus"
-        }
-      },
-      "APPROVALS": {
-        "CLAUDE_CODE": {
-          "approvals": true
+          "model": "opus",
+          "dangerously_skip_permissions": true
         }
       }
     },
     "GEMINI": {
       "DEFAULT": {
         "GEMINI": {
+          "model": "gemini-3-flash-preview",
           "yolo": true
         }
       },
@@ -42,6 +47,7 @@
       },
       "APPROVALS": {
         "GEMINI": {
+          "model": "gemini-3-pro-preview",
           "yolo": false
         }
       }
@@ -50,7 +56,8 @@
       "DEFAULT": {
         "CODEX": {
           "model": "gpt-5.2",
-          "sandbox": "danger-full-access"
+          "sandbox": "danger-full-access",
+          "model_reasoning_effort": "medium"
         }
       },
       "HIGH": {
@@ -64,19 +71,15 @@
         "CODEX": {
           "model": "gpt-5.2",
           "sandbox": "workspace-write",
-          "ask_for_approval": "unless-trusted"
-        }
-      },
-      "MAX": {
-        "CODEX": {
-          "model": "gpt-5.1-codex-max",
-          "sandbox": "danger-full-access"
+          "ask_for_approval": "unless-trusted",
+          "model_reasoning_effort": "high"
         }
       },
       "CODEX": {
         "CODEX": {
           "model": "gpt-5.2-codex",
-          "sandbox": "danger-full-access"
+          "sandbox": "danger-full-access",
+          "model_reasoning_effort": "high"
         }
       }
     },
@@ -102,48 +105,6 @@
       "DEFAULT": {
         "DROID": {
           "autonomy": "skip-permissions-unsafe"
-        }
-      },
-      "GPT_5_1_CODEX": {
-        "DROID": {
-          "autonomy": "skip-permissions-unsafe",
-          "model": "gpt-5.1-codex"
-        }
-      },
-      "GPT_5_1": {
-        "DROID": {
-          "autonomy": "skip-permissions-unsafe",
-          "model": "gpt-5.1"
-        }
-      },
-      "GEMINI_3_PRO": {
-        "DROID": {
-          "autonomy": "skip-permissions-unsafe",
-          "model": "gemini-3-pro-preview"
-        }
-      },
-      "CLAUDE_SONNET_4_5": {
-        "DROID": {
-          "autonomy": "skip-permissions-unsafe",
-          "model": "claude-sonnet-4-5-20250929"
-        }
-      },
-      "CLAUDE_HAIKU_4_5": {
-        "DROID": {
-          "autonomy": "skip-permissions-unsafe",
-          "model": "claude-haiku-4-5-20251001"
-        }
-      },
-      "CLAUDE_OPUS_4_1": {
-        "DROID": {
-          "autonomy": "skip-permissions-unsafe",
-          "model": "claude-opus-4-1-20250805"
-        }
-      },
-      "GLM_4_6": {
-        "DROID": {
-          "autonomy": "skip-permissions-unsafe",
-          "model": "glm-4.6"
         }
       }
     }

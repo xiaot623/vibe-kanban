@@ -39,3 +39,28 @@ pub struct SoundAssets;
 #[derive(RustEmbed)]
 #[folder = "../../assets/scripts"]
 pub struct ScriptAssets;
+
+#[derive(RustEmbed)]
+#[folder = "../../assets/config"]
+pub struct ConfigAssets;
+
+pub fn default_config() -> Vec<u8> {
+    ConfigAssets::get("default_config.json")
+        .expect("default_config.json not found in embedded assets")
+        .data
+        .into_owned()
+}
+
+pub fn default_profiles() -> Vec<u8> {
+    ConfigAssets::get("default_profiles.json")
+        .expect("default_profiles.json not found in embedded assets")
+        .data
+        .into_owned()
+}
+
+pub fn default_mcp() -> Vec<u8> {
+    ConfigAssets::get("default_mcp.json")
+        .expect("default_mcp.json not found in embedded assets")
+        .data
+        .into_owned()
+}

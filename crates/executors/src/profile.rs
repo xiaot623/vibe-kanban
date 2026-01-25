@@ -51,11 +51,24 @@ pub enum ProfileError {
     NoAvailableExecutorProfile,
 }
 
-static EXECUTOR_PROFILES_CACHE: LazyLock<RwLock<ExecutorConfigs>> =
-    LazyLock::new(|| RwLock::new(ExecutorConfigs::load()));
+/// Result of parsing profiles from a string
+pub enum ProfileParseResult {
+    /// Successfully parsed profiles
+    Ok(ExecutorConfigs),
+    /// Failed to parse, contains the error message
+    ParseError(String),
+}
 
-// New format default profiles (v3 - flattened)
-const DEFAULT_PROFILES_JSON: &str = include_str!("../default_profiles.json");
+/// Result of loading profiles - contains the profiles and optionally a parse error message
+#[derive(Clone, Debug, Serialize, Deserialize, TS)]
+pub struct ProfileLoadResult {
+    pub profiles: ExecutorConfigs,
+    /// If profiles file exists but failed to parse, this contains the error message
+    pub parse_error: Option<String>,
+}
+
+static EXECUTOR_PROFILES_CACHE: LazyLock<RwLock<ExecutorConfigs>> =
+    LazyLock::new(|| RwLock::new(ExecutorConfigs::load().profiles));
 
 // Executor-centric profile identifier
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, TS, Hash, Eq)]
@@ -203,39 +216,72 @@ impl ExecutorConfigs {
     /// Reload executor profiles cache
     pub fn reload() {
         let mut cache = EXECUTOR_PROFILES_CACHE.write().unwrap();
-        *cache = Self::load();
+        *cache = Self::load().profiles;
+    }
+
+    /// Try to parse profiles from a string, returns ParseError if parsing fails
+    pub fn try_from_string(raw_profiles: &str) -> ProfileParseResult {
+        match serde_json::from_str::<ExecutorConfigs>(raw_profiles) {
+            Ok(profiles) => ProfileParseResult::Ok(profiles),
+            Err(e) => ProfileParseResult::ParseError(format!("Failed to parse profiles: {}", e)),
+        }
     }
 
     /// Load executor profiles from file or defaults
-    pub fn load() -> Self {
+    /// Returns ProfileLoadResult which includes the profiles and optionally a parse error
+    pub fn load() -> ProfileLoadResult {
         let profiles_path = workspace_utils::assets::profiles_path();
 
         // Load defaults first
         let mut defaults = Self::from_defaults();
         defaults.canonicalise();
 
-        // Try to load user overrides
-        let content = match fs::read_to_string(&profiles_path) {
-            Ok(content) => content,
-            Err(_) => {
-                tracing::info!("No user profiles.json found, using defaults only");
-                return defaults;
+        // Check if profiles.json exists
+        if profiles_path.exists() {
+            match fs::read_to_string(&profiles_path) {
+                Ok(content) => {
+                    tracing::info!("Profiles file loaded from {:?}", profiles_path);
+                    match Self::try_from_string(&content) {
+                        ProfileParseResult::Ok(mut user_overrides) => {
+                            tracing::info!("Loaded user profile overrides from profiles.json");
+                            user_overrides.canonicalise();
+                            ProfileLoadResult {
+                                profiles: Self::merge_with_defaults(defaults, user_overrides),
+                                parse_error: None,
+                            }
+                        }
+                        ProfileParseResult::ParseError(error) => {
+                            tracing::warn!("Profiles parse failed: {}, using default", error);
+                            // Return default profiles but with the parse error
+                            ProfileLoadResult {
+                                profiles: defaults,
+                                parse_error: Some(error),
+                            }
+                        }
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!("Failed to read profiles file: {}, using default", e);
+                    ProfileLoadResult {
+                        profiles: defaults,
+                        parse_error: None,
+                    }
+                }
             }
-        };
-
-        // Parse user overrides
-        match serde_json::from_str::<Self>(&content) {
-            Ok(mut user_overrides) => {
-                tracing::info!("Loaded user profile overrides from profiles.json");
-                user_overrides.canonicalise();
-                Self::merge_with_defaults(defaults, user_overrides)
+        } else {
+            // No profiles.json found, create it from defaults
+            tracing::info!(
+                "No profiles.json found, creating from defaults at {:?}",
+                profiles_path
+            );
+            let default_content = serde_json::to_string_pretty(&defaults)
+                .expect("Failed to serialize default profiles");
+            if let Err(e) = fs::write(&profiles_path, &default_content) {
+                tracing::warn!("Failed to write default profiles.json: {}", e);
             }
-            Err(e) => {
-                tracing::error!(
-                    "Failed to parse user profiles.json: {}, using defaults only",
-                    e
-                );
-                defaults
+            ProfileLoadResult {
+                profiles: defaults,
+                parse_error: None,
             }
         }
     }
@@ -379,11 +425,14 @@ impl ExecutorConfigs {
         Ok(())
     }
 
-    /// Load from the new v3 defaults
+    /// Load from the embedded default profiles
     pub fn from_defaults() -> Self {
-        serde_json::from_str(DEFAULT_PROFILES_JSON).unwrap_or_else(|e| {
+        let default_profiles_bytes = workspace_utils::assets::default_profiles();
+        let default_profiles_str = String::from_utf8(default_profiles_bytes)
+            .expect("default_profiles.json is not valid UTF-8");
+        serde_json::from_str(&default_profiles_str).unwrap_or_else(|e| {
             tracing::error!("Failed to parse embedded default_profiles.json: {}", e);
-            panic!("Default profiles v3 JSON is invalid")
+            panic!("Default profiles JSON is invalid")
         })
     }
 

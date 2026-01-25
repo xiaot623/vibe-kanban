@@ -1,20 +1,15 @@
 use std::path::PathBuf;
 
-use executors::{executors::BaseCodingAgent, profile::ExecutorProfileId};
+use executors::profile::ExecutorProfileId;
 use serde::{Deserialize, Serialize};
 use strum_macros::EnumString;
 use ts_rs::TS;
-use utils::{assets::SoundAssets, cache_dir};
+use utils::{
+    assets::{default_config, SoundAssets},
+    cache_dir,
+};
 
 pub use crate::services::config::editor::{EditorConfig, EditorType};
-
-fn default_git_branch_prefix() -> String {
-    "vk".to_string()
-}
-
-fn default_pr_auto_description_enabled() -> bool {
-    true
-}
 
 #[derive(Clone, Debug, Serialize, Deserialize, TS, Default)]
 pub struct ProxyConfig {
@@ -202,11 +197,11 @@ pub struct Config {
     pub show_release_notes: bool,
     #[serde(default)]
     pub language: UiLanguage,
-    #[serde(default = "default_git_branch_prefix")]
+    #[serde(default)]
     pub git_branch_prefix: String,
     #[serde(default)]
     pub showcases: ShowcaseState,
-    #[serde(default = "default_pr_auto_description_enabled")]
+    #[serde(default)]
     pub pr_auto_description_enabled: bool,
     #[serde(default)]
     pub pr_auto_description_prompt: Option<String>,
@@ -220,43 +215,43 @@ pub struct Config {
     pub proxy: ProxyConfig,
 }
 
+/// Result of parsing a config from a string
+pub enum ConfigParseResult {
+    /// Successfully parsed config
+    Ok(Config),
+    /// Failed to parse, contains the error message
+    ParseError(String),
+}
+
+impl Config {
+    /// Try to parse a config from a string, returns ParseError if parsing fails
+    pub fn try_from_string(raw_config: &str) -> ConfigParseResult {
+        match serde_json::from_str::<Config>(raw_config) {
+            Ok(config) if config.config_version == "v1" => ConfigParseResult::Ok(config),
+            Ok(_) => ConfigParseResult::ParseError(
+                "Config version mismatch: expected 'v1'".to_string(),
+            ),
+            Err(e) => ConfigParseResult::ParseError(format!("Failed to parse config: {}", e)),
+        }
+    }
+}
+
 impl From<String> for Config {
     fn from(raw_config: String) -> Self {
-        if let Ok(config) = serde_json::from_str::<Config>(&raw_config)
-            && config.config_version == "v1"
-        {
-            return config;
+        match Config::try_from_string(&raw_config) {
+            ConfigParseResult::Ok(config) => config,
+            ConfigParseResult::ParseError(e) => {
+                tracing::warn!("Config parse failed: {}, using default", e);
+                Self::default()
+            }
         }
-
-        tracing::warn!("Config parse failed, using default");
-        Self::default()
     }
 }
 
 impl Default for Config {
     fn default() -> Self {
-        Self {
-            config_version: "v1".to_string(),
-            theme: ThemeMode::System,
-            executor_profile: ExecutorProfileId::new(BaseCodingAgent::ClaudeCode),
-            disclaimer_acknowledged: false,
-            onboarding_acknowledged: false,
-            notifications: NotificationConfig::default(),
-            editor: EditorConfig::default(),
-            github: GitHubConfig::default(),
-            analytics_enabled: true,
-            workspace_dir: None,
-            last_app_version: None,
-            show_release_notes: false,
-            language: UiLanguage::default(),
-            git_branch_prefix: default_git_branch_prefix(),
-            showcases: ShowcaseState::default(),
-            pr_auto_description_enabled: true,
-            pr_auto_description_prompt: None,
-            beta_workspaces: false,
-            beta_workspaces_invitation_sent: false,
-            commit_reminder: false,
-            proxy: ProxyConfig::default(),
-        }
+        let default_bytes = default_config();
+        serde_json::from_slice(&default_bytes)
+            .expect("Failed to parse embedded default_config.json")
     }
 }

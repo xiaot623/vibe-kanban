@@ -1,0 +1,46 @@
+{
+  "config_version": "v1",
+  "theme": "SYSTEM",
+  "executor_profile": {
+    "executor": "CLAUDE_CODE"
+  },
+  "disclaimer_acknowledged": false,
+  "onboarding_acknowledged": false,
+  "notifications": {
+    "sound_enabled": true,
+    "push_enabled": true,
+    "sound_file": "COW_MOOING"
+  },
+  "editor": {
+    "editor_type": "VS_CODE",
+    "custom_command": null,
+    "remote_ssh_host": null,
+    "remote_ssh_user": null
+  },
+  "github": {
+    "pat": null,
+    "oauth_token": null,
+    "username": null,
+    "primary_email": null,
+    "default_pr_base": "main"
+  },
+  "analytics_enabled": true,
+  "workspace_dir": null,
+  "last_app_version": null,
+  "show_release_notes": false,
+  "language": "BROWSER",
+  "git_branch_prefix": "vk",
+  "showcases": {
+    "seen_features": []
+  },
+  "pr_auto_description_enabled": true,
+  "pr_auto_description_prompt": null,
+  "beta_workspaces": false,
+  "beta_workspaces_invitation_sent": false,
+  "commit_reminder": false,
+  "proxy": {
+    "http_proxy": null,
+    "https_proxy": null,
+    "no_proxy": null
+  }
+}
