@@ -8,8 +8,9 @@ import {
 } from 'react-resizable-panels';
 import { AnimatePresence, motion } from 'framer-motion';
 import { cn } from '@/lib/utils';
+import { Maximize2, Minimize2 } from 'lucide-react';
 
-export type LayoutMode = 'preview' | 'diffs' | null;
+export type LayoutMode = 'diffs' | null;
 
 interface TasksLayoutProps {
   kanban: ReactNode;
@@ -19,13 +20,45 @@ interface TasksLayoutProps {
   mode: LayoutMode;
   isMobile?: boolean;
   rightHeader?: ReactNode;
+  isFullscreen?: boolean;
+  onFullscreenChange?: (isFullscreen: boolean) => void;
 }
 
 const MIN_PANEL_SIZE = 20; // percentage (0-100)
 const COLLAPSED_SIZE = 0; // percentage (0-100)
 
 /**
- * AuxRouter - Handles nested AnimatePresence for preview/diffs transitions.
+ * FullscreenToggle - Button to toggle between fullscreen and split view.
+ */
+function FullscreenToggle({
+  isFullscreen,
+  onToggle,
+}: {
+  isFullscreen: boolean;
+  onToggle: () => void;
+}) {
+  return (
+    <button
+      onClick={onToggle}
+      className={cn(
+        'flex items-center justify-center w-8 h-8 rounded',
+        'text-muted-foreground hover:text-foreground hover:bg-muted',
+        'transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-ring'
+      )}
+      aria-label={isFullscreen ? 'Exit fullscreen' : 'Enter fullscreen'}
+      title={isFullscreen ? 'Exit fullscreen' : 'Enter fullscreen'}
+    >
+      {isFullscreen ? (
+        <Minimize2 className="w-4 h-4" />
+      ) : (
+        <Maximize2 className="w-4 h-4" />
+      )}
+    </button>
+  );
+}
+
+/**
+ * AuxRouter - Handles nested AnimatePresence for diffs transitions.
  */
 function AuxRouter({ mode, aux }: { mode: LayoutMode; aux: ReactNode }) {
   return (
@@ -47,6 +80,42 @@ function AuxRouter({ mode, aux }: { mode: LayoutMode; aux: ReactNode }) {
 }
 
 /**
+ * FullscreenView - Mobile-like fullscreen view for desktop.
+ * Shows attempt or aux content one at a time, with a toggle to exit fullscreen.
+ */
+function FullscreenView({
+  attempt,
+  aux,
+  mode,
+  rightHeader,
+  onFullscreenToggle,
+}: {
+  attempt: ReactNode;
+  aux: ReactNode;
+  mode: LayoutMode;
+  rightHeader?: ReactNode;
+  onFullscreenToggle: () => void;
+}) {
+  const showAux = mode !== null;
+
+  return (
+    <div className="h-full min-h-0 flex flex-col">
+      {(rightHeader || true) && (
+        <div className="shrink-0 sticky top-0 z-20 bg-background border-b flex items-center">
+          <div className="flex-1">{rightHeader}</div>
+          <div className="px-2">
+            <FullscreenToggle isFullscreen={true} onToggle={onFullscreenToggle} />
+          </div>
+        </div>
+      )}
+      <div className="flex-1 min-h-0">
+        {showAux ? <AuxRouter mode={mode} aux={aux} /> : attempt}
+      </div>
+    </div>
+  );
+}
+
+/**
  * RightWorkArea - Contains header and Attempt/Aux content.
  * Shows just Attempt when mode === null, or Attempt | Aux split when mode !== null.
  */
@@ -55,11 +124,15 @@ function RightWorkArea({
   aux,
   mode,
   rightHeader,
+  onFullscreenToggle,
+  showFullscreenToggle,
 }: {
   attempt: ReactNode;
   aux: ReactNode;
   mode: LayoutMode;
   rightHeader?: ReactNode;
+  onFullscreenToggle?: () => void;
+  showFullscreenToggle?: boolean;
 }) {
   const { defaultLayout, onLayoutChange } = useDefaultLayout({
     groupId: 'tasksLayout-attemptAux',
@@ -73,9 +146,17 @@ function RightWorkArea({
 
   return (
     <div className="h-full min-h-0 flex flex-col">
-      {rightHeader && (
-        <div className="shrink-0 sticky top-0 z-20 bg-background border-b">
-          {rightHeader}
+      {(rightHeader || showFullscreenToggle) && (
+        <div className="shrink-0 sticky top-0 z-20 bg-background border-b flex items-center">
+          <div className="flex-1">{rightHeader}</div>
+          {showFullscreenToggle && onFullscreenToggle && (
+            <div className="px-2">
+              <FullscreenToggle
+                isFullscreen={false}
+                onToggle={onFullscreenToggle}
+              />
+            </div>
+          )}
         </div>
       )}
       <div className="flex-1 min-h-0">
@@ -127,7 +208,7 @@ function RightWorkArea({
               minSize={MIN_PANEL_SIZE}
               className="min-w-0 min-h-0 overflow-hidden"
               role="region"
-              aria-label={mode === 'preview' ? 'Preview' : 'Diffs'}
+              aria-label="Diffs"
             >
               <AuxRouter mode={mode} aux={aux} />
             </Panel>
@@ -139,9 +220,10 @@ function RightWorkArea({
 }
 
 /**
- * DesktopSimple - Conditionally renders layout based on mode.
- * When mode === null: Shows Kanban | Attempt
- * When mode !== null: Hides Kanban, shows only RightWorkArea with Attempt | Aux
+ * DesktopSimple - Conditionally renders layout based on mode and fullscreen state.
+ * When fullscreen: Shows mobile-like single view (attempt or aux)
+ * When mode !== null: Hides Kanban, shows Attempt | Aux split
+ * Otherwise: Shows Kanban | Attempt split
  */
 function DesktopSimple({
   kanban,
@@ -149,12 +231,16 @@ function DesktopSimple({
   aux,
   mode,
   rightHeader,
+  isFullscreen,
+  onFullscreenToggle,
 }: {
   kanban: ReactNode;
   attempt: ReactNode;
   aux: ReactNode;
   mode: LayoutMode;
   rightHeader?: ReactNode;
+  isFullscreen?: boolean;
+  onFullscreenToggle?: () => void;
 }) {
   const { defaultLayout, onLayoutChange } = useDefaultLayout({
     groupId: 'tasksLayout-kanbanAttempt',
@@ -166,7 +252,20 @@ function DesktopSimple({
     setIsKanbanCollapsed(size.asPercentage === COLLAPSED_SIZE);
   };
 
-  // When preview/diffs is open, hide Kanban entirely and render only RightWorkArea
+  // When in fullscreen mode, render mobile-like single view
+  if (isFullscreen && onFullscreenToggle) {
+    return (
+      <FullscreenView
+        attempt={attempt}
+        aux={aux}
+        mode={mode}
+        rightHeader={rightHeader}
+        onFullscreenToggle={onFullscreenToggle}
+      />
+    );
+  }
+
+  // When diffs is open, hide Kanban entirely and render only RightWorkArea
   if (mode !== null) {
     return (
       <RightWorkArea
@@ -174,6 +273,8 @@ function DesktopSimple({
         aux={aux}
         mode={mode}
         rightHeader={rightHeader}
+        onFullscreenToggle={onFullscreenToggle}
+        showFullscreenToggle={true}
       />
     );
   }
@@ -230,6 +331,8 @@ function DesktopSimple({
           aux={aux}
           mode={mode}
           rightHeader={rightHeader}
+          onFullscreenToggle={onFullscreenToggle}
+          showFullscreenToggle={true}
         />
       </Panel>
     </Group>
@@ -244,11 +347,21 @@ export function TasksLayout({
   mode,
   isMobile = false,
   rightHeader,
+  isFullscreen = false,
+  onFullscreenChange,
 }: TasksLayoutProps) {
-  const desktopKey = isPanelOpen ? 'desktop-with-panel' : 'kanban-only';
+  const desktopKey = isPanelOpen
+    ? isFullscreen
+      ? 'desktop-fullscreen'
+      : 'desktop-with-panel'
+    : 'kanban-only';
+
+  const handleFullscreenToggle = () => {
+    onFullscreenChange?.(!isFullscreen);
+  };
 
   if (isMobile) {
-    // When panel is open and mode is set, show aux content (preview/diffs)
+    // When panel is open and mode is set, show aux content (diffs)
     // Otherwise show attempt content
     const showAux = isPanelOpen && mode !== null;
 
@@ -294,6 +407,8 @@ export function TasksLayout({
         aux={aux}
         mode={mode}
         rightHeader={rightHeader}
+        isFullscreen={isFullscreen}
+        onFullscreenToggle={handleFullscreenToggle}
       />
     );
   }

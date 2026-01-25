@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import { Button } from '@/components/ui/button';
@@ -51,7 +51,6 @@ import {
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
 import { useHotkeysContext } from 'react-hotkeys-hook';
 import { TasksLayout, type LayoutMode } from '@/components/layout/TasksLayout';
-import { PreviewPanel } from '@/components/panels/PreviewPanel';
 import { DiffsPanel } from '@/components/panels/DiffsPanel';
 import TaskAttemptPanel from '@/components/panels/TaskAttemptPanel';
 import TaskPanel from '@/components/panels/TaskPanel';
@@ -140,6 +139,7 @@ export function ProjectTasks() {
   const isXL = useMediaQuery('(min-width: 1280px)');
   const isMobile = !isXL;
   const posthog = usePostHog();
+  const [isFullscreen, setIsFullscreen] = useState(false);
 
   const {
     projectId,
@@ -271,8 +271,7 @@ export function ProjectTasks() {
   );
 
   const rawMode = searchParams.get('view') as LayoutMode;
-  const mode: LayoutMode =
-    rawMode === 'preview' || rawMode === 'diffs' ? rawMode : null;
+  const mode: LayoutMode = rawMode === 'diffs' ? rawMode : null;
 
   // TODO: Remove this redirect after v0.1.0 (legacy URL support for bookmarked links)
   // Migrates old `view=logs` to `view=diffs`
@@ -447,11 +446,11 @@ export function ProjectTasks() {
   /**
    * Cycle the attempt area view.
    * - When panel is closed: opens task details (if a task is selected)
-   * - When panel is open: cycles among [attempt, preview, diffs]
+   * - When panel is open: cycles among [attempt, diffs]
    */
   const cycleView = useCallback(
     (direction: 'forward' | 'backward' = 'forward') => {
-      const order: LayoutMode[] = [null, 'preview', 'diffs'];
+      const order: LayoutMode[] = [null, 'diffs'];
       const idx = order.indexOf(mode);
       const next =
         direction === 'forward'
@@ -475,18 +474,11 @@ export function ProjectTasks() {
     () => {
       if (isPanelOpen) {
         // Track keyboard shortcut before cycling view
-        const order: LayoutMode[] = [null, 'preview', 'diffs'];
+        const order: LayoutMode[] = [null, 'diffs'];
         const idx = order.indexOf(mode);
         const next = order[(idx + 1) % order.length];
 
-        if (next === 'preview') {
-          posthog?.capture('preview_navigated', {
-            trigger: 'keyboard',
-            direction: 'forward',
-            timestamp: new Date().toISOString(),
-            source: 'frontend',
-          });
-        } else if (next === 'diffs') {
+        if (next === 'diffs') {
           posthog?.capture('diffs_navigated', {
             trigger: 'keyboard',
             direction: 'forward',
@@ -508,18 +500,11 @@ export function ProjectTasks() {
     () => {
       if (isPanelOpen) {
         // Track keyboard shortcut before cycling view
-        const order: LayoutMode[] = [null, 'preview', 'diffs'];
+        const order: LayoutMode[] = [null, 'diffs'];
         const idx = order.indexOf(mode);
         const next = order[(idx - 1 + order.length) % order.length];
 
-        if (next === 'preview') {
-          posthog?.capture('preview_navigated', {
-            trigger: 'keyboard',
-            direction: 'backward',
-            timestamp: new Date().toISOString(),
-            source: 'frontend',
-          });
-        } else if (next === 'diffs') {
+        if (next === 'diffs') {
           posthog?.capture('diffs_navigated', {
             trigger: 'keyboard',
             direction: 'backward',
@@ -842,7 +827,6 @@ export function ProjectTasks() {
   const auxContent =
     selectedTask && attempt ? (
       <div className="relative h-full w-full">
-        {mode === 'preview' && <PreviewPanel />}
         {mode === 'diffs' && (
           <DiffsPanelContainer
             attempt={attempt}
@@ -874,6 +858,8 @@ export function ProjectTasks() {
               mode={effectiveMode}
               isMobile={isMobile}
               rightHeader={rightHeader}
+              isFullscreen={isFullscreen}
+              onFullscreenChange={setIsFullscreen}
             />
           </ExecutionProcessesProvider>
         </ReviewProvider>
