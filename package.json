@@ -2,13 +2,6 @@
   "name": "vibe-kanban",
   "version": "0.0.155",
   "private": true,
-  "bin": {
-    "vibe-kanban": "npx-cli/bin/cli.js"
-  },
-  "files": [
-    "npx-cli/bin/cli.js",
-    "npx-cli/dist/**"
-  ],
   "scripts": {
     "lint": "npm run frontend:lint && npm run backend:lint",
     "format": "cargo fmt --all && cd frontend && npm run format",

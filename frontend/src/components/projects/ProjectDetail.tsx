@@ -11,7 +11,7 @@ import {
 } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { Alert, AlertDescription } from '@/components/ui/alert';
-import { projectsApi } from '@/lib/api';
+import { DeleteProjectConfirmationDialog } from '@/components/dialogs/projects/DeleteProjectConfirmationDialog';
 import { useProjects } from '@/hooks/useProjects';
 import {
   AlertCircle,
@@ -39,15 +39,9 @@ export function ProjectDetail({ projectId, onBack }: ProjectDetailProps) {
 
   const handleDelete = async () => {
     if (!project) return;
-    if (
-      !confirm(
-        `Are you sure you want to delete "${project.name}"? This action cannot be undone.`
-      )
-    )
-      return;
 
     try {
-      await projectsApi.delete(projectId);
+      await DeleteProjectConfirmationDialog.show({ project });
       onBack();
     } catch (error) {
       console.error('Failed to delete project:', error);

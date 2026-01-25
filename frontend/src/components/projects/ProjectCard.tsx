@@ -23,7 +23,7 @@ import { Project } from 'shared/types';
 import { useEffect, useRef } from 'react';
 import { useOpenProjectInEditor } from '@/hooks/useOpenProjectInEditor';
 import { useNavigateWithSearch, useProjectRepos } from '@/hooks';
-import { projectsApi } from '@/lib/api';
+import { DeleteProjectConfirmationDialog } from '@/components/dialogs/projects/DeleteProjectConfirmationDialog';
 import { useTranslation } from 'react-i18next';
 
 type Props = {
@@ -49,16 +49,9 @@ function ProjectCard({ project, isFocused, setError, onEdit }: Props) {
     }
   }, [isFocused]);
 
-  const handleDelete = async (id: string, name: string) => {
-    if (
-      !confirm(
-        `Are you sure you want to delete "${name}"? This action cannot be undone.`
-      )
-    )
-      return;
-
+  const handleDelete = async (project: Project) => {
     try {
-      await projectsApi.delete(id);
+      await DeleteProjectConfirmationDialog.show({ project });
     } catch (error) {
       console.error('Failed to delete project:', error);
       setError('Failed to delete project');
@@ -123,7 +116,7 @@ function ProjectCard({ project, isFocused, setError, onEdit }: Props) {
                 <DropdownMenuItem
                   onClick={(e) => {
                     e.stopPropagation();
-                    handleDelete(project.id, project.name);
+                    handleDelete(project);
                   }}
                   className="text-destructive"
                 >
