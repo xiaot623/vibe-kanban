@@ -24,6 +24,7 @@ interface TaskKanbanBoardProps {
   selectedTaskId?: string;
   onCreateTask?: () => void;
   projectId: string;
+  isMobile?: boolean;
 }
 
 function TaskKanbanBoard({
@@ -33,9 +34,10 @@ function TaskKanbanBoard({
   selectedTaskId,
   onCreateTask,
   projectId,
+  isMobile = false,
 }: TaskKanbanBoardProps) {
   return (
-    <KanbanProvider onDragEnd={onDragEnd}>
+    <KanbanProvider onDragEnd={onDragEnd} isMobile={isMobile}>
       {Object.entries(columns).map(([status, items]) => {
         const statusKey = status as TaskStatus;
         return (

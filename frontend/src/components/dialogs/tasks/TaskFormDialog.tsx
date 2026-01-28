@@ -512,7 +512,7 @@ const TaskFormDialogImpl = NiceModal.create<TaskFormDialogProps>((props) => {
                         : 'opacity-0 pointer-events-none'
                     )}
                   >
-                    <div className="flex items-center gap-2">
+                    <div className="flex flex-col sm:flex-row sm:items-center gap-2">
                       <form.Field name="executorProfileId">
                         {(field) => (
                           <ExecutorProfileSelector
@@ -525,7 +525,7 @@ const TaskFormDialogImpl = NiceModal.create<TaskFormDialogProps>((props) => {
                               isSubmitting || !autoStartField.state.value
                             }
                             showLabel={false}
-                            className="flex items-center gap-2 flex-row flex-[2] min-w-0"
+                            className="flex flex-col sm:flex-row gap-2 sm:flex-[2] min-w-0"
                             itemClassName="flex-1 min-w-0"
                           />
                         )}

@@ -29,3 +29,4 @@ export { useCurrentUser } from './auth/useCurrentUser';
 export { useVariant } from './useVariant';
 export { useRetryProcess } from './useRetryProcess';
 export { useNotifications } from './useNotifications';
+export { usePortraitMode } from './usePortraitMode';

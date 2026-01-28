@@ -18,6 +18,7 @@ import { useProject } from '@/contexts/ProjectContext';
 import { useTaskAttempts } from '@/hooks/useTaskAttempts';
 import { useTaskAttemptWithSession } from '@/hooks/useTaskAttempt';
 import { useMediaQuery } from '@/hooks/useMediaQuery';
+import { usePortraitMode } from '@/hooks/usePortraitMode';
 import { useBranchStatus, useAttemptExecution } from '@/hooks';
 import { paths } from '@/lib/paths';
 import { ExecutionProcessesProvider } from '@/contexts/ExecutionProcessesContext';
@@ -137,7 +138,9 @@ export function ProjectTasks() {
   const { enableScope, disableScope, activeScopes } = useHotkeysContext();
   const [searchParams, setSearchParams] = useSearchParams();
   const isXL = useMediaQuery('(min-width: 1280px)');
-  const isMobile = !isXL;
+  const isPortrait = usePortraitMode();
+  // Use portrait mode (width < height) as the default mobile detection condition
+  const isMobile = isPortrait || !isXL;
   const posthog = usePostHog();
   const [isFullscreen, setIsFullscreen] = useState(false);
 
@@ -730,6 +733,7 @@ export function ProjectTasks() {
           selectedTaskId={selectedTask?.id}
           onCreateTask={handleCreateNewTask}
           projectId={projectId!}
+          isMobile={isMobile}
         />
       </div>
     );

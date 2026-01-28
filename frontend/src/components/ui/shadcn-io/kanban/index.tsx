@@ -263,12 +263,14 @@ export type KanbanProviderProps = {
   children: ReactNode;
   onDragEnd: (event: DragEndEvent) => void;
   className?: string;
+  isMobile?: boolean;
 };
 
 export const KanbanProvider = ({
   children,
   onDragEnd,
   className,
+  isMobile = false,
 }: KanbanProviderProps) => {
   const sensors = useSensors(
     useSensor(PointerSensor, {
@@ -285,7 +287,9 @@ export const KanbanProvider = ({
     >
       <div
         className={cn(
-          'inline-grid grid-flow-col auto-cols-[minmax(200px,400px)] divide-x border-x items-stretch min-h-full',
+          isMobile
+            ? 'flex flex-col divide-y border-y items-stretch min-w-full'
+            : 'inline-grid grid-flow-col auto-cols-[minmax(200px,400px)] divide-x border-x items-stretch min-h-full',
           className
         )}
       >
