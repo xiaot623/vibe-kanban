@@ -29,15 +29,6 @@ pub fn canonical_variant_key<S: AsRef<str>>(raw: S) -> String {
 
 #[derive(Error, Debug)]
 pub enum ProfileError {
-    #[error("Built-in executor '{executor}' cannot be deleted")]
-    CannotDeleteExecutor { executor: BaseCodingAgent },
-
-    #[error("Built-in configuration '{executor}:{variant}' cannot be deleted")]
-    CannotDeleteBuiltInConfig {
-        executor: BaseCodingAgent,
-        variant: String,
-    },
-
     #[error("Validation error: {0}")]
     Validation(String),
 
@@ -49,14 +40,6 @@ pub enum ProfileError {
 
     #[error("No available executor profile")]
     NoAvailableExecutorProfile,
-}
-
-/// Result of parsing profiles from a string
-pub enum ProfileParseResult {
-    /// Successfully parsed profiles
-    Ok(ExecutorConfigs),
-    /// Failed to parse, contains the error message
-    ParseError(String),
 }
 
 /// Result of loading profiles - contains the profiles and optionally a parse error message
@@ -219,40 +202,28 @@ impl ExecutorConfigs {
         *cache = Self::load().profiles;
     }
 
-    /// Try to parse profiles from a string, returns ParseError if parsing fails
-    pub fn try_from_string(raw_profiles: &str) -> ProfileParseResult {
-        match serde_json::from_str::<ExecutorConfigs>(raw_profiles) {
-            Ok(profiles) => ProfileParseResult::Ok(profiles),
-            Err(e) => ProfileParseResult::ParseError(format!("Failed to parse profiles: {}", e)),
-        }
-    }
-
-    /// Load executor profiles from file or defaults
-    /// Returns ProfileLoadResult which includes the profiles and optionally a parse error
+    /// Load executor profiles from file or defaults.
+    /// If profiles.json exists, reads it directly; otherwise creates it from defaults.
     pub fn load() -> ProfileLoadResult {
         let profiles_path = workspace_utils::assets::profiles_path();
 
-        // Load defaults first
-        let mut defaults = Self::from_defaults();
-        defaults.canonicalise();
-
-        // Check if profiles.json exists
         if profiles_path.exists() {
             match fs::read_to_string(&profiles_path) {
                 Ok(content) => {
                     tracing::info!("Profiles file loaded from {:?}", profiles_path);
-                    match Self::try_from_string(&content) {
-                        ProfileParseResult::Ok(mut user_overrides) => {
-                            tracing::info!("Loaded user profile overrides from profiles.json");
-                            user_overrides.canonicalise();
+                    match serde_json::from_str::<ExecutorConfigs>(&content) {
+                        Ok(mut profiles) => {
+                            profiles.canonicalise();
                             ProfileLoadResult {
-                                profiles: Self::merge_with_defaults(defaults, user_overrides),
+                                profiles,
                                 parse_error: None,
                             }
                         }
-                        ProfileParseResult::ParseError(error) => {
+                        Err(e) => {
+                            let error = format!("Failed to parse profiles: {}", e);
                             tracing::warn!("Profiles parse failed: {}, using default", error);
-                            // Return default profiles but with the parse error
+                            let mut defaults = Self::from_defaults();
+                            defaults.canonicalise();
                             ProfileLoadResult {
                                 profiles: defaults,
                                 parse_error: Some(error),
@@ -262,6 +233,8 @@ impl ExecutorConfigs {
                 }
                 Err(e) => {
                     tracing::warn!("Failed to read profiles file: {}, using default", e);
+                    let mut defaults = Self::from_defaults();
+                    defaults.canonicalise();
                     ProfileLoadResult {
                         profiles: defaults,
                         parse_error: None,
@@ -274,6 +247,8 @@ impl ExecutorConfigs {
                 "No profiles.json found, creating from defaults at {:?}",
                 profiles_path
             );
+            let mut defaults = Self::from_defaults();
+            defaults.canonicalise();
             let default_content = serde_json::to_string_pretty(&defaults)
                 .expect("Failed to serialize default profiles");
             if let Err(e) = fs::write(&profiles_path, &default_content) {
@@ -286,117 +261,25 @@ impl ExecutorConfigs {
         }
     }
 
-    /// Save user profile overrides to file (only saves what differs from defaults)
-    pub fn save_overrides(&self) -> Result<(), ProfileError> {
+    /// Save user profile to file (saves the complete configuration)
+    pub fn save(&mut self) -> Result<(), ProfileError> {
         let profiles_path = workspace_utils::assets::profiles_path();
-        let mut defaults = Self::from_defaults();
-        defaults.canonicalise();
 
-        // Canonicalise current config before computing overrides
-        let mut self_clone = self.clone();
-        self_clone.canonicalise();
+        // Canonicalise keys
+        self.canonicalise();
 
-        // Compute differences from defaults
-        let overrides = Self::compute_overrides(&defaults, &self_clone)?;
+        // Validate the result
+        Self::validate_merged(self)?;
 
-        // Validate the merged result would be valid
-        let merged = Self::merge_with_defaults(defaults, overrides.clone());
-        Self::validate_merged(&merged)?;
-
-        // Write overrides directly to file
-        let content = serde_json::to_string_pretty(&overrides)?;
+        // Write directly to file
+        let content = serde_json::to_string_pretty(self)?;
         fs::write(&profiles_path, content)?;
 
-        tracing::info!("Saved profile overrides to {:?}", profiles_path);
+        tracing::info!("Saved profiles to {:?}", profiles_path);
         Ok(())
     }
 
-    /// Deep merge defaults with user overrides
-    fn merge_with_defaults(mut defaults: Self, overrides: Self) -> Self {
-        for (executor_key, override_profile) in overrides.executors {
-            match defaults.executors.get_mut(&executor_key) {
-                Some(default_profile) => {
-                    // Merge configurations (user configs override defaults, new ones are added)
-                    for (config_name, config) in override_profile.configurations {
-                        default_profile.configurations.insert(config_name, config);
-                    }
-                }
-                None => {
-                    // New executor, add completely
-                    defaults.executors.insert(executor_key, override_profile);
-                }
-            }
-        }
-        defaults
-    }
-
-    /// Compute what overrides are needed to transform defaults into current config
-    fn compute_overrides(defaults: &Self, current: &Self) -> Result<Self, ProfileError> {
-        let mut overrides = Self {
-            executors: HashMap::new(),
-        };
-
-        // Fast scan for any illegal deletions BEFORE allocating/cloning
-        for (executor_key, default_profile) in &defaults.executors {
-            // Check if executor was removed entirely
-            if !current.executors.contains_key(executor_key) {
-                return Err(ProfileError::CannotDeleteExecutor {
-                    executor: *executor_key,
-                });
-            }
-
-            let current_profile = &current.executors[executor_key];
-
-            // Check if ANY built-in configuration was removed
-            for config_name in default_profile.configurations.keys() {
-                if !current_profile.configurations.contains_key(config_name) {
-                    return Err(ProfileError::CannotDeleteBuiltInConfig {
-                        executor: *executor_key,
-                        variant: config_name.clone(),
-                    });
-                }
-            }
-        }
-
-        for (executor_key, current_profile) in &current.executors {
-            if let Some(default_profile) = defaults.executors.get(executor_key) {
-                let mut override_configurations = HashMap::new();
-
-                // Check each configuration in current profile
-                for (config_name, current_config) in &current_profile.configurations {
-                    if let Some(default_config) = default_profile.configurations.get(config_name) {
-                        // Only include if different from default
-                        if current_config != default_config {
-                            override_configurations
-                                .insert(config_name.clone(), current_config.clone());
-                        }
-                    } else {
-                        // New configuration, always include
-                        override_configurations.insert(config_name.clone(), current_config.clone());
-                    }
-                }
-
-                // Only include executor if there are actual differences
-                if !override_configurations.is_empty() {
-                    overrides.executors.insert(
-                        *executor_key,
-                        ExecutorConfig {
-                            configurations: override_configurations,
-                        },
-                    );
-                }
-            } else {
-                // New executor, include completely
-                overrides
-                    .executors
-                    .insert(*executor_key, current_profile.clone());
-            }
-        }
-
-        Ok(overrides)
-    }
-
-    /// Validate that merged profiles are consistent and valid
+    /// Validate that profiles are consistent and valid
     fn validate_merged(merged: &Self) -> Result<(), ProfileError> {
         for (executor_key, profile) in &merged.executors {
             // Ensure default configuration exists
