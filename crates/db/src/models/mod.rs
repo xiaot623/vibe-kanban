@@ -8,6 +8,7 @@ pub mod project;
 pub mod project_repo;
 pub mod repo;
 pub mod scratch;
+pub mod short_id_mapping;
 pub mod session;
 pub mod tag;
 pub mod task;

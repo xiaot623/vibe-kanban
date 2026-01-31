@@ -37,6 +37,7 @@ pub type GitHubConfig = versions::v1::GitHubConfig;
 pub type UiLanguage = versions::v1::UiLanguage;
 pub type ShowcaseState = versions::v1::ShowcaseState;
 pub type ProxyConfig = versions::v1::ProxyConfig;
+pub type TelegramConfig = versions::v1::TelegramConfig;
 
 /// Load config from file, creating default if not exists
 /// Returns ConfigLoadResult which includes the config and optionally a parse error

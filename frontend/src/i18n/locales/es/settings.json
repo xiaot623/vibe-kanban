@@ -183,6 +183,29 @@
           "helper": "Muestra notificaciones del sistema cuando las tareas terminan de ejecutarse."
         }
       },
+      "telegram": {
+        "title": "Telegram Bot",
+        "description": "Configura notificaciones y comandos del bot de Telegram.",
+        "enabled": {
+          "label": "Habilitar bot de Telegram",
+          "helper": "Envía actualizaciones de tareas y acepta comandos en Telegram."
+        },
+        "botToken": {
+          "label": "Token del bot",
+          "placeholder": "123456:ABCDEF...",
+          "helper": "Token proporcionado por BotFather para tu bot."
+        },
+        "chatId": {
+          "label": "ID del chat",
+          "placeholder": "123456789",
+          "helper": "ID del chat para enviar notificaciones."
+        },
+        "defaultExecutor": {
+          "label": "Ejecutor predeterminado",
+          "placeholder": "Selecciona ejecutor",
+          "helper": "Ejecutor usado cuando /run no especifica uno."
+        }
+      },
       "privacy": {
         "title": "Privacidad",
         "description": "Ayuda a mejorar Vibe-Kanban compartiendo datos de uso anónimos.",

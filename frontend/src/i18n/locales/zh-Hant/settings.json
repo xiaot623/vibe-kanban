@@ -183,6 +183,29 @@
           "helper": "任務嘗試完成執行時顯示系統通知。"
         }
       },
+      "telegram": {
+        "title": "Telegram Bot",
+        "description": "設定 Telegram 機器人通知與指令。",
+        "enabled": {
+          "label": "啟用 Telegram 機器人",
+          "helper": "在 Telegram 中傳送任務更新並接收指令。"
+        },
+        "botToken": {
+          "label": "機器人 Token",
+          "placeholder": "123456:ABCDEF...",
+          "helper": "BotFather 提供的機器人 Token。"
+        },
+        "chatId": {
+          "label": "聊天 ID",
+          "placeholder": "123456789",
+          "helper": "要接收通知的聊天 ID。"
+        },
+        "defaultExecutor": {
+          "label": "預設執行器",
+          "placeholder": "選擇執行器",
+          "helper": "/run 未指定時使用的執行器。"
+        }
+      },
       "privacy": {
         "title": "隱私",
         "description": "透過分享匿名使用資料來協助改善 Vibe Kanban。",

@@ -50,6 +50,7 @@ export function GeneralSettings() {
   const {
     config,
     loading,
+    profiles,
     updateAndSaveConfig, // Use this on Save
   } = useUserSystem();
 
@@ -360,58 +361,58 @@ export function GeneralSettings() {
             draft?.editor.editor_type === EditorType.GOOGLE_ANTIGRAVITY ||
             draft?.editor.editor_type === EditorType.ZED ||
             draft?.editor.editor_type === EditorType.TRAE) && (
-            <>
-              <div className="space-y-2">
-                <Label htmlFor="remote-ssh-host">
-                  {t('settings.general.editor.remoteSsh.host.label')}
-                </Label>
-                <Input
-                  id="remote-ssh-host"
-                  placeholder={t(
-                    'settings.general.editor.remoteSsh.host.placeholder'
-                  )}
-                  value={draft?.editor.remote_ssh_host || ''}
-                  onChange={(e) =>
-                    updateDraft({
-                      editor: {
-                        ...draft!.editor,
-                        remote_ssh_host: e.target.value || null,
-                      },
-                    })
-                  }
-                />
-                <p className="text-sm text-muted-foreground">
-                  {t('settings.general.editor.remoteSsh.host.helper')}
-                </p>
-              </div>
-
-              {draft?.editor.remote_ssh_host && (
+              <>
                 <div className="space-y-2">
-                  <Label htmlFor="remote-ssh-user">
-                    {t('settings.general.editor.remoteSsh.user.label')}
+                  <Label htmlFor="remote-ssh-host">
+                    {t('settings.general.editor.remoteSsh.host.label')}
                   </Label>
                   <Input
-                    id="remote-ssh-user"
+                    id="remote-ssh-host"
                     placeholder={t(
-                      'settings.general.editor.remoteSsh.user.placeholder'
+                      'settings.general.editor.remoteSsh.host.placeholder'
                     )}
-                    value={draft?.editor.remote_ssh_user || ''}
+                    value={draft?.editor.remote_ssh_host || ''}
                     onChange={(e) =>
                       updateDraft({
                         editor: {
                           ...draft!.editor,
-                          remote_ssh_user: e.target.value || null,
+                          remote_ssh_host: e.target.value || null,
                         },
                       })
                     }
                   />
                   <p className="text-sm text-muted-foreground">
-                    {t('settings.general.editor.remoteSsh.user.helper')}
+                    {t('settings.general.editor.remoteSsh.host.helper')}
                   </p>
                 </div>
-              )}
-            </>
-          )}
+
+                {draft?.editor.remote_ssh_host && (
+                  <div className="space-y-2">
+                    <Label htmlFor="remote-ssh-user">
+                      {t('settings.general.editor.remoteSsh.user.label')}
+                    </Label>
+                    <Input
+                      id="remote-ssh-user"
+                      placeholder={t(
+                        'settings.general.editor.remoteSsh.user.placeholder'
+                      )}
+                      value={draft?.editor.remote_ssh_user || ''}
+                      onChange={(e) =>
+                        updateDraft({
+                          editor: {
+                            ...draft!.editor,
+                            remote_ssh_user: e.target.value || null,
+                          },
+                        })
+                      }
+                    />
+                    <p className="text-sm text-muted-foreground">
+                      {t('settings.general.editor.remoteSsh.user.helper')}
+                    </p>
+                  </div>
+                )}
+              </>
+            )}
         </CardContent>
       </Card>
 
@@ -590,11 +591,10 @@ export function GeneralSettings() {
           <div className="space-y-2">
             <textarea
               id="pr-custom-prompt"
-              className={`flex min-h-[100px] w-full rounded-md border border-input bg-background px-3 py-2 text-sm ring-offset-background placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 ${
-                draft?.pr_auto_description_prompt == null
+              className={`flex min-h-[100px] w-full rounded-md border border-input bg-background px-3 py-2 text-sm ring-offset-background placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 ${draft?.pr_auto_description_prompt == null
                   ? 'opacity-50 cursor-not-allowed'
                   : ''
-              }`}
+                }`}
               value={
                 draft?.pr_auto_description_prompt ??
                 DEFAULT_PR_DESCRIPTION_PROMPT
@@ -816,6 +816,143 @@ export function GeneralSettings() {
               </p>
             </div>
           </div>
+
+          <div className="flex items-center space-x-2">
+            <Checkbox
+              id="telegram-enabled"
+              checked={draft?.telegram?.enabled ?? false}
+              onCheckedChange={(checked: boolean) =>
+                updateDraft({
+                  telegram: {
+                    ...draft!.telegram,
+                    enabled: checked,
+                  },
+                })
+              }
+            />
+            <div className="space-y-0.5">
+              <Label htmlFor="telegram-enabled" className="cursor-pointer">
+                {t('settings.general.telegram.enabled.label')}
+              </Label>
+              <p className="text-sm text-muted-foreground">
+                {t('settings.general.telegram.enabled.helper')}
+              </p>
+            </div>
+          </div>
+
+          {draft?.telegram?.enabled && (
+            <>
+              <div className="ml-6 space-y-2">
+                <Label htmlFor="telegram-bot-token">
+                  {t('settings.general.telegram.botToken.label')}
+                </Label>
+                <Input
+                  id="telegram-bot-token"
+                  type="password"
+                  value={draft?.telegram?.bot_token ?? ''}
+                  onChange={(e) =>
+                    updateDraft({
+                      telegram: {
+                        ...draft!.telegram,
+                        bot_token: e.target.value.trim() || null,
+                      },
+                    })
+                  }
+                  placeholder={t('settings.general.telegram.botToken.placeholder')}
+                />
+                <p className="text-sm text-muted-foreground">
+                  {t('settings.general.telegram.botToken.helper')}
+                </p>
+              </div>
+
+              <div className="ml-6 space-y-2">
+                <Label htmlFor="telegram-chat-id">
+                  {t('settings.general.telegram.chatId.label')}
+                </Label>
+                <Input
+                  id="telegram-chat-id"
+                  type="number"
+                  value={draft?.telegram?.chat_id?.toString() ?? ''}
+                  onChange={(e) => {
+                    const nextValue = e.target.value.trim();
+                    let chatId: bigint | null = null;
+                    if (nextValue !== '') {
+                      try {
+                        chatId = BigInt(nextValue);
+                      } catch {
+                        // Invalid bigint, keep null
+                      }
+                    }
+                    updateDraft({
+                      telegram: {
+                        ...draft!.telegram,
+                        chat_id: chatId,
+                      },
+                    });
+                  }}
+                  placeholder={t('settings.general.telegram.chatId.placeholder')}
+                />
+                <p className="text-sm text-muted-foreground">
+                  {t('settings.general.telegram.chatId.helper')}
+                </p>
+              </div>
+
+              <div className="ml-6 space-y-2">
+                <Label htmlFor="telegram-default-executor">
+                  {t('settings.general.telegram.defaultExecutor.label')}
+                </Label>
+                {profiles ? (
+                  <Select
+                    value={draft?.telegram?.default_executor ?? ''}
+                    onValueChange={(value: string) =>
+                      updateDraft({
+                        telegram: {
+                          ...draft!.telegram,
+                          default_executor: value,
+                        },
+                      })
+                    }
+                  >
+                    <SelectTrigger id="telegram-default-executor">
+                      <SelectValue
+                        placeholder={t(
+                          'settings.general.telegram.defaultExecutor.placeholder'
+                        )}
+                      />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {Object.keys(profiles)
+                        .sort((a, b) => a.localeCompare(b))
+                        .map((executor) => (
+                          <SelectItem key={executor} value={executor}>
+                            {executor}
+                          </SelectItem>
+                        ))}
+                    </SelectContent>
+                  </Select>
+                ) : (
+                  <Input
+                    id="telegram-default-executor"
+                    value={draft?.telegram?.default_executor ?? ''}
+                    onChange={(e) =>
+                      updateDraft({
+                        telegram: {
+                          ...draft!.telegram,
+                          default_executor: e.target.value,
+                        },
+                      })
+                    }
+                    placeholder={t(
+                      'settings.general.telegram.defaultExecutor.placeholder'
+                    )}
+                  />
+                )}
+                <p className="text-sm text-muted-foreground">
+                  {t('settings.general.telegram.defaultExecutor.helper')}
+                </p>
+              </div>
+            </>
+          )}
         </CardContent>
       </Card>
 

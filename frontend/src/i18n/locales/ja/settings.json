@@ -183,6 +183,29 @@
           "helper": "タスク試行の実行が完了したときにシステム通知を表示します。"
         }
       },
+      "telegram": {
+        "title": "Telegram Bot",
+        "description": "Telegramボットの通知とコマンドを設定します。",
+        "enabled": {
+          "label": "Telegramボットを有効にする",
+          "helper": "Telegramでタスク更新を送信し、コマンドを受け付けます。"
+        },
+        "botToken": {
+          "label": "ボットトークン",
+          "placeholder": "123456:ABCDEF...",
+          "helper": "BotFatherから提供されるボットトークン。"
+        },
+        "chatId": {
+          "label": "チャットID",
+          "placeholder": "123456789",
+          "helper": "通知を送信するチャットID。"
+        },
+        "defaultExecutor": {
+          "label": "デフォルト実行者",
+          "placeholder": "実行者を選択",
+          "helper": "/runで指定がない場合に使用する実行者。"
+        }
+      },
       "privacy": {
         "title": "プライバシー",
         "description": "匿名の使用データを共有してVibe-Kanbanの改善にご協力ください。",

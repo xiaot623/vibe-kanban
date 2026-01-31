@@ -20,5 +20,6 @@ pub mod project;
 pub mod qa_repos;
 pub mod queued_message;
 pub mod repo;
+pub mod telegram_bot;
 pub mod workspace_manager;
 pub mod worktree_manager;

@@ -31,6 +31,7 @@ use services::services::{
     project::ProjectService,
     queued_message::QueuedMessageService,
     repo::RepoService,
+    telegram_bot::TelegramBotService,
     worktree_manager::WorktreeError,
 };
 use sqlx::Error as SqlxError;
@@ -127,6 +128,16 @@ pub trait Deployment: Clone + Send + Sync + 'static {
                 analytics_service: analytics_service.clone(),
             });
         PrMonitorService::spawn(db, analytics).await
+    }
+
+    async fn spawn_telegram_bot_service(&self) -> Option<tokio::task::JoinHandle<()>> {
+        TelegramBotService::spawn(
+            self.db().clone(),
+            self.git().clone(),
+            self.config().clone(),
+            self.events().msg_store().clone(),
+        )
+        .await
     }
 
     async fn track_if_analytics_allowed(&self, event_name: &str, properties: Value) {

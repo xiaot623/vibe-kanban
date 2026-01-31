@@ -186,6 +186,22 @@ impl Project {
         .await
     }
 
+    pub async fn find_by_name(pool: &SqlitePool, name: &str) -> Result<Vec<Self>, sqlx::Error> {
+        sqlx::query_as!(
+            Project,
+            r#"SELECT id as "id!: Uuid",
+                      name,
+                      default_agent_working_dir,
+                      created_at as "created_at!: DateTime<Utc>",
+                      updated_at as "updated_at!: DateTime<Utc>"
+               FROM projects
+               WHERE LOWER(name) = LOWER($1)"#,
+            name
+        )
+        .fetch_all(pool)
+        .await
+    }
+
     pub async fn delete(pool: &SqlitePool, id: Uuid) -> Result<u64, sqlx::Error> {
         let result = sqlx::query!("DELETE FROM projects WHERE id = $1", id)
             .execute(pool)

@@ -183,6 +183,29 @@
           "helper": "Show system notifications when task attempts finish running."
         }
       },
+      "telegram": {
+        "title": "Telegram Bot",
+        "description": "Configure Telegram bot notifications and commands.",
+        "enabled": {
+          "label": "Enable Telegram bot",
+          "helper": "Send task updates and accept commands in Telegram."
+        },
+        "botToken": {
+          "label": "Bot Token",
+          "placeholder": "123456:ABCDEF...",
+          "helper": "Token provided by BotFather for your bot."
+        },
+        "chatId": {
+          "label": "Chat ID",
+          "placeholder": "123456789",
+          "helper": "Chat ID to send notifications to."
+        },
+        "defaultExecutor": {
+          "label": "Default Executor",
+          "placeholder": "Select executor",
+          "helper": "Executor used when /run doesn't specify one."
+        }
+      },
       "privacy": {
         "title": "Privacy",
         "description": "Help improve Vibe-Kanban by sharing anonymous usage data.",

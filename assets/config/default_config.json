@@ -42,5 +42,11 @@
     "http_proxy": null,
     "https_proxy": null,
     "no_proxy": null
+  },
+  "telegram": {
+    "enabled": false,
+    "bot_token": null,
+    "chat_id": null,
+    "default_executor": "CLAUDE_CODE"
   }
 }

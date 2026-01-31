@@ -18,6 +18,30 @@ pub struct ProxyConfig {
     pub no_proxy: Option<String>,
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize, TS)]
+pub struct TelegramConfig {
+    pub enabled: bool,
+    pub bot_token: Option<String>,
+    pub chat_id: Option<i64>,
+    #[serde(default = "default_telegram_executor")]
+    pub default_executor: String,
+}
+
+fn default_telegram_executor() -> String {
+    "CLAUDE_CODE".to_string()
+}
+
+impl Default for TelegramConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            bot_token: None,
+            chat_id: None,
+            default_executor: default_telegram_executor(),
+        }
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, TS, Default)]
 pub struct ShowcaseState {
     #[serde(default)]
@@ -213,6 +237,8 @@ pub struct Config {
     pub commit_reminder: bool,
     #[serde(default)]
     pub proxy: ProxyConfig,
+    #[serde(default)]
+    pub telegram: TelegramConfig,
 }
 
 /// Result of parsing a config from a string

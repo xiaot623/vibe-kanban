@@ -183,6 +183,29 @@
           "helper": "작업 시도가 완료되면 시스템 알림을 표시합니다."
         }
       },
+      "telegram": {
+        "title": "Telegram Bot",
+        "description": "Telegram 봇 알림과 명령을 설정합니다.",
+        "enabled": {
+          "label": "Telegram 봇 활성화",
+          "helper": "Telegram에서 작업 업데이트를 보내고 명령을 받습니다."
+        },
+        "botToken": {
+          "label": "봇 토큰",
+          "placeholder": "123456:ABCDEF...",
+          "helper": "BotFather에서 제공하는 봇 토큰."
+        },
+        "chatId": {
+          "label": "채팅 ID",
+          "placeholder": "123456789",
+          "helper": "알림을 보낼 채팅 ID."
+        },
+        "defaultExecutor": {
+          "label": "기본 실행기",
+          "placeholder": "실행기 선택",
+          "helper": "/run에 지정이 없을 때 사용하는 실행기."
+        }
+      },
       "privacy": {
         "title": "개인정보 보호",
         "description": "익명 사용 데이터를 공유하여 Vibe-Kanban 개선에 도움을 주세요.",
