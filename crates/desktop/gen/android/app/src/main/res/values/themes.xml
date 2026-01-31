@@ -1,0 +1,8 @@
+<resources xmlns:tools="http://schemas.android.com/tools">
+    <!-- Base application theme. -->
+    <style name="Theme.vibe_kanban_desktop" parent="Theme.MaterialComponents.DayNight.NoActionBar">
+        <!-- Status bar configuration -->
+        <item name="android:statusBarColor">@color/bg_primary_light</item>
+        <item name="android:windowLightStatusBar">true</item>
+    </style>
+</resources>

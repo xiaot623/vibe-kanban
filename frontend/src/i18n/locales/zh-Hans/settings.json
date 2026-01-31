@@ -278,6 +278,17 @@
       "beta": {
         "title": "Beta 功能",
         "description": "在正式发布前试用实验性功能。",
+        "localNetworkAccess": {
+          "label": "本地网络访问",
+          "helper": "允许局域网内其他设备通过密码访问此应用。",
+          "password": {
+            "label": "访问密码",
+            "placeholder": "输入或生成密码",
+            "helper": "在其他设备连接时使用此密码。",
+            "generate": "生成",
+            "error": "本地网络访问需要密码。"
+          }
+        },
         "commitReminder": {
           "label": "提交提醒",
           "helper": "提示支持的代理在停止前提交更改。"

@@ -1,6 +1,6 @@
 {
   "name": "vibe-kanban",
-  "version": "0.0.1",
+  "version": "0.1.0",
   "private": true,
   "scripts": {
     "frontend:lint": "cd frontend && npm run lint",
@@ -9,14 +9,15 @@
     "backend:format": "cargo fmt --all",
     "frontend:check": "cd frontend && npm run check",
     "backend:check": "cargo check",
-    "frontend:dev": "PORT=$(node scripts/setup-dev-environment.js frontend) cd frontend && npm run dev -- --port ${PORT:-} --host",
+    "frontend:dev": "cd frontend && PORT=$(node scripts/setup-dev-environment.js frontend) npm run dev -- --port ${PORT:-} --host",
     "backend:dev": "BACKEND_PORT=$(node scripts/setup-dev-environment.js backend) DISABLE_WORKTREE_ORPHAN_CLEANUP=1 RUST_LOG=debug cargo watch -w crates -x 'run --bin server'",
+    "mobile:dev": "cd frontend/mobile-ui && export PORT=$(node ../../scripts/setup-dev-environment.js mobile-ui) && pnpm install && pnpm run dev --port ${PORT:-} --host 0.0.0.0",
     "lint": "npm run frontend:lint && npm run backend:lint",
     "format": "npm run frontend:format && npm run backend:format",
     "check": "npm run frontend:check && npm run backend:check",
     "dev": "npm run backend:dev & npm run frontend:dev",
-    "desktop:dev": "npm run frontend:build && cd crates/desktop && pnpm exec tauri dev",
     "frontend:build": "cd frontend && npm run build",
+    "mobile:build": "cd frontend/mobile-ui && pnpm run build",
     "test:npm": "./test-npm-package.sh",
     "dev:qa": "export FRONTEND_PORT=$(node scripts/setup-dev-environment.js frontend) && export BACKEND_PORT=$(node scripts/setup-dev-environment.js backend) && concurrently \"npm run backend:dev:watch:qa\" \"npm run frontend:dev\"",
     "generate-types": "cargo run --bin generate_types",
@@ -28,8 +29,12 @@
     "version:bump": "node scripts/sync-version.js bump",
     "build:npx": "bash ./local-build.sh",
     "prepack": "npm run build:npx",
+    "desktop:dev": "npm run frontend:build && cd crates/desktop && pnpm exec tauri dev",
     "desktop:build": "npm run frontend:build && cd crates/desktop && pnpm exec tauri build",
-    "desktop:build:debug": "npm run frontend:build && cd crates/desktop && pnpm exec tauri build --debug"
+    "desktop:build:debug": "npm run frontend:build && cd crates/desktop && pnpm exec tauri build --debug",
+    "android:dev": "npm run mobile:build && cd crates/desktop && pnpm exec tauri android dev",
+    "android:build": "npm run mobile:build && cd crates/desktop && pnpm exec tauri android build --target aarch64",
+    "android:build:debug": "npm run mobile:build && cd crates/desktop && pnpm exec tauri android build --target aarch64 --debug"
   },
   "devDependencies": {
     "@tauri-apps/cli": "^2.2.0",

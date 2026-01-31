@@ -67,28 +67,32 @@ function savePorts(ports) {
 async function verifyPorts(ports) {
   const frontendAvailable = await isPortAvailable(ports.frontend);
   const backendAvailable = await isPortAvailable(ports.backend);
+  const mobilePort = ports.mobile || ports.frontend + 2;
+  const mobileAvailable = await isPortAvailable(mobilePort);
 
-  if (process.argv[2] === "get" && (!frontendAvailable || !backendAvailable)) {
+  if (process.argv[2] === "get" && (!frontendAvailable || !backendAvailable || !mobileAvailable)) {
     console.log(
-      `Port availability check failed: frontend:${ports.frontend}=${frontendAvailable}, backend:${ports.backend}=${backendAvailable}`
+      `Port availability check failed: frontend:${ports.frontend}=${frontendAvailable}, backend:${ports.backend}=${backendAvailable}, mobile:${mobilePort}=${mobileAvailable}`
     );
   }
 
-  return frontendAvailable && backendAvailable;
+  return frontendAvailable && backendAvailable && mobileAvailable;
 }
 
 /**
  * Allocate ports for development
  */
 async function allocatePorts() {
-  // If PORT env is set, use it for frontend and PORT+1 for backend
+  // If PORT env is set, use it for frontend, PORT+1 for backend, and PORT+2 for mobile-ui
   if (process.env.PORT) {
     const frontendPort = parseInt(process.env.PORT, 10);
     const backendPort = frontendPort + 1;
+    const mobilePort = frontendPort + 2;
 
     const ports = {
       frontend: frontendPort,
       backend: backendPort,
+      mobile: mobilePort,
       timestamp: new Date().toISOString(),
     };
 
@@ -96,6 +100,7 @@ async function allocatePorts() {
       console.log("Using PORT environment variable:");
       console.log(`Frontend: ${ports.frontend}`);
       console.log(`Backend: ${ports.backend}`);
+      console.log(`Mobile-UI: ${ports.mobile}`);
     }
 
     return ports;
@@ -105,12 +110,19 @@ async function allocatePorts() {
   const existingPorts = loadPorts();
 
   if (existingPorts) {
+    // Add mobile port if missing
+    if (!existingPorts.mobile) {
+      existingPorts.mobile = existingPorts.frontend + 2;
+      savePorts(existingPorts);
+    }
+
     // Verify existing ports are still available
     if (await verifyPorts(existingPorts)) {
       if (process.argv[2] === "get") {
         console.log("Reusing existing dev ports:");
         console.log(`Frontend: ${existingPorts.frontend}`);
         console.log(`Backend: ${existingPorts.backend}`);
+        console.log(`Mobile-UI: ${existingPorts.mobile}`);
       }
       return existingPorts;
     } else {
@@ -125,10 +137,12 @@ async function allocatePorts() {
   // Find new free ports
   const frontendPort = await findFreePort(3000);
   const backendPort = await findFreePort(frontendPort + 1);
+  const mobilePort = await findFreePort(frontendPort + 2);
 
   const ports = {
     frontend: frontendPort,
     backend: backendPort,
+    mobile: mobilePort,
     timestamp: new Date().toISOString(),
   };
 
@@ -138,6 +152,7 @@ async function allocatePorts() {
     console.log("Allocated new dev ports:");
     console.log(`Frontend: ${ports.frontend}`);
     console.log(`Backend: ${ports.backend}`);
+    console.log(`Mobile-UI: ${ports.mobile}`);
   }
 
   return ports;
@@ -199,6 +214,14 @@ if (require.main === module) {
         .catch(console.error);
       break;
 
+    case "mobile-ui":
+      getPorts()
+        .then((ports) => {
+          console.log(JSON.stringify(ports.mobile, null, 2));
+        })
+        .catch(console.error);
+      break;
+
     default:
       console.log("Usage:");
       console.log(
@@ -209,6 +232,9 @@ if (require.main === module) {
       );
       console.log(
         "  node setup-dev-environment.js backend  - Get backend port only"
+      );
+      console.log(
+        "  node setup-dev-environment.js mobile-ui - Get mobile-ui port only"
       );
       console.log(
         "  node setup-dev-environment.js clear    - Clear saved ports"

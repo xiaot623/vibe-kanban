@@ -18,6 +18,7 @@ async fn main() -> Result<(), StartupError> {
         host: resolve_host(),
         open_browser: !cfg!(debug_assertions),
         write_port_file: true,
+        local_network_auth: false,
     };
 
     let (_port, server_handle) = startup::start_server(deployment.clone(), config).await?;

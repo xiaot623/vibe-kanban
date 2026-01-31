@@ -6,12 +6,22 @@ use sqlx::Error as SqlxError;
 use thiserror::Error;
 use tokio::task::JoinHandle;
 use tracing_subscriber::{EnvFilter, prelude::*};
+use axum::{
+    ServiceExt,
+    body::Body,
+    extract::{ConnectInfo, State},
+    http::{HeaderMap, HeaderValue, StatusCode, header},
+    middleware::{self, Next},
+    response::Response,
+};
+use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
 use utils::{
     assets::asset_dir,
     browser::open_browser,
     port_file::write_port_file,
     sentry::{self as sentry_utils, SentrySource, sentry_layer},
 };
+use std::net::SocketAddr;
 
 #[derive(Debug, Error)]
 pub enum StartupError {
@@ -35,6 +45,8 @@ pub struct ServerConfig {
     pub open_browser: bool,
     /// Whether to write the port file for discovery
     pub write_port_file: bool,
+    /// Require password auth for non-loopback requests (local network access)
+    pub local_network_auth: bool,
 }
 
 impl Default for ServerConfig {
@@ -44,6 +56,7 @@ impl Default for ServerConfig {
             host: "127.0.0.1".to_string(),
             open_browser: false,
             write_port_file: true,
+            local_network_auth: false,
         }
     }
 }
@@ -138,6 +151,19 @@ pub async fn start_server(
 ) -> Result<(u16, JoinHandle<()>), StartupError> {
     let app_router = routes::router(deployment.clone());
 
+    let app_router = if config.local_network_auth {
+        app_router.layer(middleware::from_fn_with_state(
+            deployment.clone(),
+            local_network_auth,
+        ))
+    } else {
+        app_router
+    };
+
+    let make_service = app_router
+        .into_service::<Body>()
+        .into_make_service_with_connect_info::<SocketAddr>();
+
     let listener =
         tokio::net::TcpListener::bind(format!("{}:{}", config.host, config.port)).await?;
     let actual_port = listener.local_addr()?.port();
@@ -165,12 +191,68 @@ pub async fn start_server(
     }
 
     let handle = tokio::spawn(async move {
-        if let Err(e) = axum::serve(listener, app_router).await {
+        if let Err(e) = axum::serve(listener, make_service).await {
             tracing::error!("Server error: {}", e);
         }
     });
 
     Ok((actual_port, handle))
+}
+
+async fn local_network_auth(
+    State(deployment): State<DeploymentImpl>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    request: axum::http::Request<Body>,
+    next: Next,
+) -> Response {
+    if addr.ip().is_loopback() {
+        return next.run(request).await;
+    }
+
+    let config = deployment.config().read().await;
+    if !config.local_network_access {
+        return forbidden_response();
+    }
+
+    let password = match config.local_network_password.as_deref() {
+        Some(value) if !value.is_empty() => value,
+        _ => return forbidden_response(),
+    };
+
+    if let Some(provided) = extract_basic_password(request.headers()) {
+        if provided == password {
+            return next.run(request).await;
+        }
+    }
+
+    unauthorized_response()
+}
+
+fn extract_basic_password(headers: &HeaderMap) -> Option<String> {
+    let value = headers.get(header::AUTHORIZATION)?.to_str().ok()?;
+    let encoded = value.strip_prefix("Basic ")?;
+    let decoded = BASE64.decode(encoded).ok()?;
+    let decoded = String::from_utf8(decoded).ok()?;
+    let mut parts = decoded.splitn(2, ':');
+    let _username = parts.next()?;
+    let password = parts.next().unwrap_or_default();
+    Some(password.to_string())
+}
+
+fn unauthorized_response() -> Response {
+    let mut response = Response::new(Body::from("Unauthorized"));
+    *response.status_mut() = StatusCode::UNAUTHORIZED;
+    response.headers_mut().insert(
+        header::WWW_AUTHENTICATE,
+        HeaderValue::from_static("Basic realm=\"Vibe Kanban\""),
+    );
+    response
+}
+
+fn forbidden_response() -> Response {
+    let mut response = Response::new(Body::from("Forbidden"));
+    *response.status_mut() = StatusCode::FORBIDDEN;
+    response
 }
 
 /// Perform cleanup actions (kill running processes)

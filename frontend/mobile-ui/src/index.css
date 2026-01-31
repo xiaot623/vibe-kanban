@@ -1,0 +1,100 @@
+@import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:ital,wght@0,100..700;1,100..700&display=swap');
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Theme tokens scoped to .new-design */
+@layer base {
+  /* Light defaults */
+  .new-design {
+    color-scheme: light;
+
+    /* Text (light) */
+    --text-high: 0 0% 5%;
+    --text-normal: 0 0% 20%;
+    --text-low: 0 0% 39%;
+
+    /* Background (light) */
+    --bg-primary: 0 0% 100%;
+    --bg-secondary: 0 0% 95%;
+    --bg-panel: 0 0% 89%;
+
+    /* Accent (light) */
+    --brand: 25 82% 54%;
+    --brand-hover: 25 75% 62%;
+    --brand-secondary: 25 82% 37%;
+    --error: 0 59% 57%;
+    --success: 117 38% 50%;
+
+    /* Text on accent */
+    --text-on-brand: 0 0% 100%;
+
+    /* Border */
+    --border: 0 0% 85%;
+  }
+
+  /* Dark mode */
+  .new-design.dark {
+    color-scheme: dark;
+
+    /* Text (dark) */
+    --text-high: 0 0% 96%;
+    --text-normal: 0 0% 77%;
+    --text-low: 0 0% 56%;
+
+    /* Background (dark) */
+    --bg-primary: 0 0% 13%;
+    --bg-secondary: 0 0% 11%;
+    --bg-panel: 0 0% 16%;
+
+    /* Accent (dark) */
+    --brand: 25 82% 54%;
+    --brand-hover: 25 75% 62%;
+    --brand-secondary: 25 82% 37%;
+    --error: 0 59% 57%;
+    --success: 117 38% 50%;
+
+    /* Text on accent */
+    --text-on-brand: 0 0% 100%;
+
+    /* Border */
+    --border: 0 0% 20%;
+  }
+}
+
+/* Base styles */
+@layer base {
+  .new-design *,
+  .new-design *::before,
+  .new-design *::after {
+    @apply border-border;
+  }
+
+  html,
+  body,
+  #root {
+    @apply min-h-screen;
+  }
+
+  /* Safe area support for Android status bar */
+  body {
+    padding-top: env(safe-area-inset-top);
+    padding-bottom: env(safe-area-inset-bottom);
+    padding-left: env(safe-area-inset-left);
+    padding-right: env(safe-area-inset-right);
+    /* Light mode background (matches --bg-primary light: 0 0% 100%) */
+    background-color: hsl(0, 0%, 100%);
+  }
+
+  @media (prefers-color-scheme: dark) {
+    body {
+      /* Dark mode background (matches --bg-primary dark: 0 0% 13%) */
+      background-color: hsl(0, 0%, 13%);
+    }
+  }
+
+  .new-design {
+    @apply font-ibm-plex-sans;
+  }
+}

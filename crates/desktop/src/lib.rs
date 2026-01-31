@@ -1,10 +1,43 @@
-use std::sync::Arc;
+//! Vibe Kanban Desktop Application
+//!
+//! This crate provides the Tauri-based desktop and mobile application.
+//! Platform-specific code is split into separate modules:
+//! - `desktop`: Embedded server, LAN server, and discovery multicast (non-Android)
+//! - `android`: Server discovery via multicast (Android only)
 
-use server::startup::{self, ServerConfig};
-use tauri::{Manager, WebviewUrl, WebviewWindowBuilder};
-use tokio::sync::Mutex;
+#[cfg(target_os = "android")]
+mod android;
+#[cfg(not(target_os = "android"))]
+mod desktop;
+
+use serde::{Deserialize, Serialize};
 use tracing_subscriber::{prelude::*, EnvFilter};
 
+/// Port used for server discovery multicast.
+pub(crate) const DISCOVERY_PORT: u16 = 57810;
+
+/// Multicast address for server discovery.
+pub(crate) const DISCOVERY_MULTICAST_ADDR: &str = "224.0.0.167";
+
+/// Service identifier for discovery beacons.
+pub(crate) const DISCOVERY_SERVICE: &str = "vibe-kanban";
+
+/// Beacon payload broadcast by desktop servers for discovery.
+#[derive(Serialize, Deserialize)]
+pub(crate) struct DiscoveryBeacon {
+    pub service: String,
+    pub version: u8,
+    pub port: u16,
+    pub hostname: String,
+    pub requires_auth: bool,
+    pub fingerprint: String,
+}
+
+/// Entry point for the Tauri application.
+#[cfg_attr(
+    any(target_os = "android", target_os = "ios"),
+    tauri::mobile_entry_point
+)]
 pub fn run() {
     // Install rustls crypto provider before any TLS operations
     rustls::crypto::aws_lc_rs::default_provider()
@@ -14,28 +47,37 @@ pub fn run() {
     // Initialize logging
     init_logging();
 
-    tauri::Builder::default()
-        .setup(|app| {
-            let app_handle = app.handle().clone();
+    let builder = tauri::Builder::default();
 
-            // Spawn the embedded server
-            tauri::async_runtime::spawn(async move {
-                match start_embedded_server(&app_handle).await {
-                    Ok(()) => {
-                        tracing::info!("Embedded server started successfully");
-                    }
-                    Err(e) => {
-                        tracing::error!("Failed to start embedded server: {}", e);
-                    }
-                }
-            });
+    #[cfg(target_os = "android")]
+    let builder = builder.invoke_handler(tauri::generate_handler![android::discover_servers]);
 
+    builder
+        .setup(|_app| {
+            #[cfg(not(target_os = "android"))]
+            {
+                let app_handle = _app.handle().clone();
+                // Spawn the embedded server
+                tauri::async_runtime::spawn(async move {
+                    match desktop::start_embedded_server(&app_handle).await {
+                        Ok(()) => {
+                            tracing::info!("Embedded server started successfully");
+                        }
+                        Err(e) => {
+                            tracing::error!("Failed to start embedded server: {}", e);
+                        }
+                    }
+                });
+            }
+
+            // Android: No server needed, mobile-ui handles connection to remote server
             Ok(())
         })
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
 
+/// Initialize the logging/tracing subsystem.
 fn init_logging() {
     let log_level = std::env::var("RUST_LOG").unwrap_or_else(|_| "info".to_string());
     let filter_string = format!(
@@ -46,43 +88,4 @@ fn init_logging() {
     tracing_subscriber::registry()
         .with(tracing_subscriber::fmt::layer().with_filter(env_filter))
         .init();
-}
-
-async fn start_embedded_server(app_handle: &tauri::AppHandle) -> anyhow::Result<()> {
-    // Initialize deployment
-    let deployment = startup::initialize_deployment().await?;
-    startup::spawn_background_services(&deployment, "desktop").await;
-
-    // Start embedded server (no browser open, no port file in desktop mode)
-    let config = ServerConfig {
-        port: 0, // auto-assign
-        host: "127.0.0.1".to_string(),
-        open_browser: false,
-        write_port_file: false,
-    };
-
-    let (port, _server_handle) = startup::start_server(deployment.clone(), config).await?;
-
-    tracing::info!("Embedded server running on port {}", port);
-
-    // Navigate the existing window to the embedded server
-    let url = format!("http://127.0.0.1:{}", port);
-    if let Some(window) = app_handle.get_webview_window("main") {
-        window.navigate(url.parse()?)?;
-        window.show()?;
-    } else {
-        // Fallback: create window if it doesn't exist
-        WebviewWindowBuilder::new(app_handle, "main", WebviewUrl::External(url.parse()?))
-            .title("Vibe Kanban")
-            .inner_size(1400.0, 900.0)
-            .min_inner_size(800.0, 600.0)
-            .center()
-            .visible(true)
-            .build()?;
-    }
-
-    // Store deployment for cleanup on exit
-    app_handle.manage(Arc::new(Mutex::new(Some(deployment))));
-
-    Ok(())
 }

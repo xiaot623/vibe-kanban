@@ -143,6 +143,23 @@ export function GeneralSettings() {
     }
   };
 
+  const generateLocalNetworkPassword = useCallback(() => {
+    const bytes = new Uint8Array(12);
+    crypto.getRandomValues(bytes);
+    return Array.from(bytes, (byte) => byte.toString(16).padStart(2, '0')).join(
+      ''
+    );
+  }, []);
+
+  const localNetworkPasswordError = useMemo(() => {
+    if (!draft?.local_network_access) return null;
+    const password = draft.local_network_password?.trim() ?? '';
+    if (!password) {
+      return t('settings.general.beta.localNetworkAccess.password.error');
+    }
+    return null;
+  }, [draft, t]);
+
   const handleSave = async () => {
     if (!draft) return;
 
@@ -799,6 +816,83 @@ export function GeneralSettings() {
           </CardDescription>
         </CardHeader>
         <CardContent className="space-y-4">
+          <div className="space-y-3">
+            <div className="flex items-center space-x-2">
+              <Checkbox
+                id="local-network-access"
+                checked={draft?.local_network_access ?? false}
+                onCheckedChange={(checked: boolean) => {
+                  if (checked) {
+                    const existingPassword =
+                      draft?.local_network_password?.trim();
+                    updateDraft({
+                      local_network_access: true,
+                      local_network_password:
+                        existingPassword || generateLocalNetworkPassword(),
+                    });
+                  } else {
+                    updateDraft({ local_network_access: false });
+                  }
+                }}
+              />
+              <div className="space-y-0.5">
+                <Label
+                  htmlFor="local-network-access"
+                  className="cursor-pointer"
+                >
+                  {t('settings.general.beta.localNetworkAccess.label')}
+                </Label>
+                <p className="text-sm text-muted-foreground">
+                  {t('settings.general.beta.localNetworkAccess.helper')}
+                </p>
+              </div>
+            </div>
+
+            {draft?.local_network_access && (
+              <div className="ml-6 space-y-2">
+                <Label htmlFor="local-network-password">
+                  {t('settings.general.beta.localNetworkAccess.password.label')}
+                </Label>
+                <div className="flex gap-2">
+                  <Input
+                    id="local-network-password"
+                    type="text"
+                    placeholder={t(
+                      'settings.general.beta.localNetworkAccess.password.placeholder'
+                    )}
+                    value={draft?.local_network_password ?? ''}
+                    onChange={(e) =>
+                      updateDraft({
+                        local_network_password: e.target.value || null,
+                      })
+                    }
+                  />
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() =>
+                      updateDraft({
+                        local_network_password: generateLocalNetworkPassword(),
+                      })
+                    }
+                  >
+                    {t(
+                      'settings.general.beta.localNetworkAccess.password.generate'
+                    )}
+                  </Button>
+                </div>
+                {localNetworkPasswordError && (
+                  <p className="text-sm text-destructive">
+                    {localNetworkPasswordError}
+                  </p>
+                )}
+                <p className="text-sm text-muted-foreground">
+                  {t('settings.general.beta.localNetworkAccess.password.helper')}
+                </p>
+              </div>
+            )}
+          </div>
+
           <div className="flex items-center space-x-2">
             <Checkbox
               id="commit-reminder"
@@ -976,7 +1070,12 @@ export function GeneralSettings() {
             </Button>
             <Button
               onClick={handleSave}
-              disabled={!hasUnsavedChanges || saving || !!branchPrefixError}
+              disabled={
+                !hasUnsavedChanges ||
+                saving ||
+                !!branchPrefixError ||
+                !!localNetworkPasswordError
+              }
             >
               {saving && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
               {t('settings.general.save.button')}

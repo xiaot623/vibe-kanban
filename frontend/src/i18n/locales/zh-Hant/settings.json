@@ -278,6 +278,17 @@
       "beta": {
         "title": "Beta 功能",
         "description": "在正式發布前試用實驗性功能。",
+        "localNetworkAccess": {
+          "label": "本地網路存取",
+          "helper": "允許區域網路內的其他裝置透過密碼存取此應用。",
+          "password": {
+            "label": "存取密碼",
+            "placeholder": "輸入或產生密碼",
+            "helper": "在其他裝置連線時使用此密碼。",
+            "generate": "產生",
+            "error": "本地網路存取需要密碼。"
+          }
+        },
         "commitReminder": {
           "label": "提交提醒",
           "helper": "提示支援的代理在停止前提交變更。"

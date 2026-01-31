@@ -834,9 +834,13 @@ export const configApi = {
     return handleApiResponse<UserSystemInfo>(response);
   },
   saveConfig: async (config: Config): Promise<Config> => {
+    // Use custom replacer to handle bigint values (e.g., telegram.chat_id)
+    const body = JSON.stringify(config, (_key, value) =>
+      typeof value === 'bigint' ? Number(value) : value
+    );
     const response = await makeRequest('/api/config', {
       method: 'PUT',
-      body: JSON.stringify(config),
+      body,
     });
     return handleApiResponse<Config>(response);
   },

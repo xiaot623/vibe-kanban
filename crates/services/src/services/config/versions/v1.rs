@@ -4,42 +4,16 @@ use executors::profile::ExecutorProfileId;
 use serde::{Deserialize, Serialize};
 use strum_macros::EnumString;
 use ts_rs::TS;
-use utils::{
-    assets::{default_config, SoundAssets},
-    cache_dir,
-};
+use utils::assets::SoundAssets;
+use utils::cache_dir;
 
-pub use crate::services::config::editor::{EditorConfig, EditorType};
+pub use crate::services::config::editor::EditorConfig;
 
 #[derive(Clone, Debug, Serialize, Deserialize, TS, Default)]
 pub struct ProxyConfig {
     pub http_proxy: Option<String>,
     pub https_proxy: Option<String>,
     pub no_proxy: Option<String>,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, TS)]
-pub struct TelegramConfig {
-    pub enabled: bool,
-    pub bot_token: Option<String>,
-    pub chat_id: Option<i64>,
-    #[serde(default = "default_telegram_executor")]
-    pub default_executor: String,
-}
-
-fn default_telegram_executor() -> String {
-    "CLAUDE_CODE".to_string()
-}
-
-impl Default for TelegramConfig {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            bot_token: None,
-            chat_id: None,
-            default_executor: default_telegram_executor(),
-        }
-    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, TS, Default)]
@@ -205,6 +179,7 @@ impl SoundFile {
     }
 }
 
+/// V1 Config - original config format without local_network and telegram fields
 #[derive(Clone, Debug, Serialize, Deserialize, TS)]
 pub struct Config {
     pub config_version: String,
@@ -237,47 +212,4 @@ pub struct Config {
     pub commit_reminder: bool,
     #[serde(default)]
     pub proxy: ProxyConfig,
-    #[serde(default)]
-    pub telegram: TelegramConfig,
-}
-
-/// Result of parsing a config from a string
-pub enum ConfigParseResult {
-    /// Successfully parsed config
-    Ok(Config),
-    /// Failed to parse, contains the error message
-    ParseError(String),
-}
-
-impl Config {
-    /// Try to parse a config from a string, returns ParseError if parsing fails
-    pub fn try_from_string(raw_config: &str) -> ConfigParseResult {
-        match serde_json::from_str::<Config>(raw_config) {
-            Ok(config) if config.config_version == "v1" => ConfigParseResult::Ok(config),
-            Ok(_) => ConfigParseResult::ParseError(
-                "Config version mismatch: expected 'v1'".to_string(),
-            ),
-            Err(e) => ConfigParseResult::ParseError(format!("Failed to parse config: {}", e)),
-        }
-    }
-}
-
-impl From<String> for Config {
-    fn from(raw_config: String) -> Self {
-        match Config::try_from_string(&raw_config) {
-            ConfigParseResult::Ok(config) => config,
-            ConfigParseResult::ParseError(e) => {
-                tracing::warn!("Config parse failed: {}, using default", e);
-                Self::default()
-            }
-        }
-    }
-}
-
-impl Default for Config {
-    fn default() -> Self {
-        let default_bytes = default_config();
-        serde_json::from_slice(&default_bytes)
-            .expect("Failed to parse embedded default_config.json")
-    }
 }

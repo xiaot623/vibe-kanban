@@ -1,0 +1,21 @@
+{
+  "build": {
+    "frontendDist": "../../frontend/mobile-ui/dist"
+  },
+  "bundle": {
+    "android": {
+      "minSdkVersion": 24
+    }
+  },
+  "app": {
+    "windows": [
+      {
+        "title": "Vibe Kanban",
+        "fullscreen": false
+      }
+    ],
+    "security": {
+      "csp": "default-src 'self'; connect-src 'self' http://* https://* ws://* wss://*; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com"
+    }
+  }
+}

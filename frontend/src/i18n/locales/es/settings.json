@@ -278,6 +278,17 @@
       "beta": {
         "title": "Funciones Beta",
         "description": "Prueba funciones experimentales antes de su lanzamiento.",
+        "localNetworkAccess": {
+          "label": "Acceso a la red local",
+          "helper": "Permite que otros dispositivos en tu LAN accedan a esta app con una contraseña.",
+          "password": {
+            "label": "Contraseña de acceso",
+            "placeholder": "Introduce o genera una contraseña",
+            "helper": "Usa esta contraseña al conectarte desde otro dispositivo.",
+            "generate": "Generar",
+            "error": "Se requiere una contraseña para el acceso por red local."
+          }
+        },
         "commitReminder": {
           "label": "Recordatorio de commit",
           "helper": "Solicitar a los agentes compatibles que confirmen los cambios antes de detenerse."

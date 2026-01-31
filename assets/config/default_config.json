@@ -1,5 +1,5 @@
 {
-  "config_version": "v1",
+  "config_version": "v2",
   "theme": "SYSTEM",
   "executor_profile": {
     "executor": "CLAUDE_CODE"
@@ -37,6 +37,8 @@
   "pr_auto_description_prompt": null,
   "beta_workspaces": false,
   "beta_workspaces_invitation_sent": false,
+  "local_network_access": false,
+  "local_network_password": null,
   "commit_reminder": false,
   "proxy": {
     "http_proxy": null,

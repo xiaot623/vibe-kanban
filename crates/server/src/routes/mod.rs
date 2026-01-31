@@ -1,7 +1,4 @@
-use axum::{
-    Router,
-    routing::{IntoMakeService, get},
-};
+use axum::{Router, routing::get};
 
 use crate::DeploymentImpl;
 
@@ -25,7 +22,7 @@ pub mod task_attempts;
 pub mod tasks;
 pub mod terminal;
 
-pub fn router(deployment: DeploymentImpl) -> IntoMakeService<Router> {
+pub fn router(deployment: DeploymentImpl) -> Router {
     // Create routers with different middleware layers
     let base_routes = Router::new()
         .route("/health", get(health::health_check))
@@ -44,12 +41,11 @@ pub fn router(deployment: DeploymentImpl) -> IntoMakeService<Router> {
         .merge(scratch::router(&deployment))
         .merge(sessions::router(&deployment))
         .merge(terminal::router())
-        .nest("/images", images::routes())
-        .with_state(deployment);
+        .nest("/images", images::routes());
 
     Router::new()
         .route("/", get(frontend::serve_frontend_root))
         .route("/{*path}", get(frontend::serve_frontend))
         .nest("/api", base_routes)
-        .into_make_service()
+        .with_state(deployment)
 }

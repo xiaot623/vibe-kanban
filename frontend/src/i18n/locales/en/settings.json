@@ -278,6 +278,17 @@
       "beta": {
         "title": "Beta Features",
         "description": "Try out experimental features before they're released.",
+        "localNetworkAccess": {
+          "label": "Local network access",
+          "helper": "Allow other devices on your LAN to access this app with a password.",
+          "password": {
+            "label": "Access password",
+            "placeholder": "Enter or generate a password",
+            "helper": "Use this password when connecting from another device.",
+            "generate": "Generate",
+            "error": "Password is required for local network access."
+          }
+        },
         "commitReminder": {
           "label": "Commit reminder",
           "helper": "Prompt supported agents to commit changes before stopping."
