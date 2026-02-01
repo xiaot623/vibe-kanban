@@ -1,13 +1,15 @@
-use std::{collections::HashMap, str::FromStr, sync::Arc};
+use std::{collections::HashMap, path::PathBuf, str::FromStr, sync::Arc};
 
 use db::{
     DBService,
     models::{
         project::Project,
         project_repo::ProjectRepo,
+        session::Session,
         short_id_mapping::ShortIdMapping,
         task::{CreateTask, Task, TaskStatus, TaskWithAttemptStatus},
         workspace::Workspace,
+        workspace_repo::WorkspaceRepo,
     },
 };
 use executors::{
@@ -15,7 +17,7 @@ use executors::{
     profile::{ExecutorProfileId, canonical_variant_key},
 };
 use json_patch::PatchOperation;
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use sqlx::Row;
 use teloxide::{prelude::*, types::ParseMode, utils::command::BotCommands};
 use tokio::{sync::RwLock, task::JoinHandle};
@@ -27,7 +29,7 @@ use uuid::Uuid;
 use crate::services::{
     config::Config,
     events::EventPatch,
-    git::{GitBranch, GitService},
+    git::{DiffTarget, GitBranch, GitService},
 };
 
 #[derive(BotCommands, Clone)]
@@ -346,41 +348,6 @@ impl TelegramBotService {
         }
     }
 
-    async fn fetch_diff_summary(&self, task_id: Uuid) -> Option<String> {
-        let workspaces = Workspace::fetch_all(&self.db.pool, Some(task_id))
-            .await
-            .ok()?;
-        let workspace = workspaces.first()?;
-
-        let base_url = api_base_url().await.ok()?;
-        let request = WorkspaceSummaryRequest {
-            archived: workspace.archived,
-        };
-
-        let client = reqwest::Client::new();
-        let response = client
-            .post(format!("{base_url}/task-attempts/summary"))
-            .json(&request)
-            .send()
-            .await
-            .ok()?;
-
-        let api_response: ApiResponse<WorkspaceSummaryResponse> = response.json().await.ok()?;
-        let summaries = api_response.into_data()?;
-        let summary = summaries
-            .summaries
-            .into_iter()
-            .find(|entry| entry.workspace_id == workspace.id)?;
-
-        let files_changed = summary.files_changed?;
-        let lines_added = summary.lines_added?;
-        let lines_removed = summary.lines_removed?;
-
-        Some(format!(
-            "+{lines_added} / -{lines_removed} lines | {files_changed} files"
-        ))
-    }
-
     async fn load_task_statuses(&self) -> Result<HashMap<Uuid, TaskStatus>, sqlx::Error> {
         let records = sqlx::query("SELECT id, status FROM tasks")
             .fetch_all(&self.db.pool)
@@ -468,9 +435,16 @@ impl TelegramBotService {
                 Err(e) => return format!("Failed to load tasks: {e}"),
             };
 
+        // Filter tasks: if status filter provided use it, otherwise default to InReview/Done only
         let tasks: Vec<_> = tasks
             .into_iter()
-            .filter(|task| status_filter.as_ref().map_or(true, |s| &task.status == s))
+            .filter(|task| {
+                if let Some(ref s) = status_filter {
+                    &task.status == s
+                } else {
+                    matches!(task.status, TaskStatus::InReview | TaskStatus::Done)
+                }
+            })
             .collect();
 
         let mut result = format_task_list(&self.db.pool, &tasks, Some(&project.name)).await;
@@ -490,6 +464,14 @@ impl TelegramBotService {
             Ok(None) => return format!("Task not found: task{task_id}"),
             Err(e) => return format!("Failed to load task: {e}"),
         };
+
+        // Only allow viewing tasks in InReview or Done status
+        if !matches!(task.status, TaskStatus::InReview | TaskStatus::Done) {
+            return format!(
+                "Task is not available for review (status: {:?}). Only InReview and Done tasks can be viewed.",
+                task.status
+            );
+        }
 
         let project_name = match Project::find_by_id(&self.db.pool, task.project_id).await {
             Ok(Some(project)) => project.name,
@@ -516,11 +498,111 @@ impl TelegramBotService {
             truncate_text(&description, 500)
         );
 
-        if let Some(diff_summary) = self.fetch_diff_summary(task_id).await {
-            message.push_str(&format!("\nRunning Result: {}", diff_summary));
+        // Fetch all attempts (workspaces) for this task with their status and diff stats
+        if let Some(attempts_info) = self.fetch_attempts_info(task_id).await {
+            if !attempts_info.is_empty() {
+                message.push_str(&format!("\n\nAttempts ({}):", attempts_info.len()));
+                for attempt in attempts_info {
+                    message.push_str(&format!("\n  • {}", attempt));
+                }
+            }
         }
 
         message
+    }
+
+    async fn fetch_attempts_info(&self, task_id: Uuid) -> Option<Vec<String>> {
+        let workspaces = Workspace::fetch_all(&self.db.pool, Some(task_id))
+            .await
+            .ok()?;
+
+        if workspaces.is_empty() {
+            return Some(vec![]);
+        }
+
+        let mut attempts_info = Vec::new();
+        for workspace in workspaces {
+            let mut status_parts = Vec::new();
+
+            // Get executor name from the latest session
+            if let Ok(Some(session)) =
+                Session::find_latest_by_workspace_id(&self.db.pool, workspace.id).await
+            {
+                if let Some(executor) = session.executor {
+                    status_parts.push(executor);
+                }
+            }
+
+            // Get workspace status (running/errored/idle)
+            if let Ok(Some(ws_with_status)) =
+                Workspace::find_by_id_with_status(&self.db.pool, workspace.id).await
+            {
+                if ws_with_status.is_running {
+                    status_parts.push("running".to_string());
+                } else if ws_with_status.is_errored {
+                    status_parts.push("errored".to_string());
+                } else {
+                    status_parts.push("idle".to_string());
+                }
+            }
+
+            if workspace.archived {
+                status_parts.push("archived".to_string());
+            }
+
+            // Compute diff stats directly using git
+            if let Some((added, removed)) = self.compute_workspace_diff_stats(&workspace).await {
+                status_parts.push(format!("+{} / -{}", added, removed));
+            }
+
+            attempts_info.push(format!("[{}]", status_parts.join(", ")));
+        }
+
+        Some(attempts_info)
+    }
+
+    async fn compute_workspace_diff_stats(&self, workspace: &Workspace) -> Option<(usize, usize)> {
+        let container_ref = workspace.container_ref.as_ref()?;
+
+        let workspace_repos =
+            WorkspaceRepo::find_repos_with_target_branch_for_workspace(&self.db.pool, workspace.id)
+                .await
+                .ok()?;
+
+        let mut total_added = 0usize;
+        let mut total_removed = 0usize;
+
+        for repo_with_branch in workspace_repos {
+            let worktree_path = PathBuf::from(container_ref).join(&repo_with_branch.repo.name);
+            let repo_path = repo_with_branch.repo.path.clone();
+            let workspace_branch = workspace.branch.clone();
+            let target_branch = repo_with_branch.target_branch.clone();
+
+            // Get base commit
+            let base_commit = self
+                .git
+                .get_base_commit(&repo_path, &workspace_branch, &target_branch)
+                .ok()?;
+
+            // Get diffs
+            let diffs = self
+                .git
+                .get_diffs(
+                    DiffTarget::Worktree {
+                        worktree_path: &worktree_path,
+                        base_commit: &base_commit,
+                    },
+                    None,
+                )
+                .ok()?;
+
+            for diff in diffs {
+                total_added += diff.additions.unwrap_or(0);
+                total_removed += diff.deletions.unwrap_or(0);
+            }
+        }
+
+        Some((total_added, total_removed))
     }
 
     async fn create_task_from_command(&self, payload: &str) -> String {
@@ -769,24 +851,6 @@ struct CreateTaskAttemptBody {
 struct WorkspaceRepoInput {
     repo_id: Uuid,
     target_branch: String,
-}
-
-#[derive(Debug, Serialize)]
-struct WorkspaceSummaryRequest {
-    archived: bool,
-}
-
-#[derive(Debug, Deserialize)]
-struct WorkspaceSummaryResponse {
-    summaries: Vec<WorkspaceSummary>,
-}
-
-#[derive(Debug, Deserialize)]
-struct WorkspaceSummary {
-    workspace_id: Uuid,
-    files_changed: Option<usize>,
-    lines_added: Option<usize>,
-    lines_removed: Option<usize>,
 }
 
 async fn format_task_list(
