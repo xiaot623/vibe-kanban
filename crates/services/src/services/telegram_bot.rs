@@ -3,6 +3,7 @@ use std::{collections::HashMap, path::PathBuf, str::FromStr, sync::Arc};
 use db::{
     DBService,
     models::{
+        execution_process::ExecutionProcess,
         project::Project,
         project_repo::ProjectRepo,
         session::Session,
@@ -21,10 +22,16 @@ use serde::Serialize;
 use sqlx::Row;
 use teloxide::{prelude::*, types::ParseMode, utils::command::BotCommands};
 use tokio::{sync::RwLock, task::JoinHandle};
-use utils::{log_msg::LogMsg, msg_store::MsgStore, response::ApiResponse};
+use utils::{
+    approvals::{ApprovalResponse, ApprovalStatus},
+    log_msg::LogMsg,
+    msg_store::MsgStore,
+    response::ApiResponse,
+};
 use uuid::Uuid;
 
 use crate::services::{
+    approvals::Approvals,
     config::Config,
     events::EventPatch,
     git::{DiffTarget, GitBranch, GitService},
@@ -45,13 +52,21 @@ pub enum Command {
     Add(String),
     #[command(description = "/run <uuid> [executor] [mode] [branch]")]
     Run(String),
+    #[command(description = "/approve <task_id>")]
+    Approve(String),
+    #[command(description = "/reject <task_id> [reason]")]
+    Reject(String),
 }
+
+const EXIT_PLAN_MODE_NAME: &str = "ExitPlanMode";
+const TELEGRAM_MESSAGE_SAFE_LIMIT: usize = 3800;
 
 pub struct TelegramBotService {
     db: DBService,
     git: GitService,
     config: Arc<RwLock<Config>>,
     events_msg_store: Arc<MsgStore>,
+    approvals: Approvals,
 }
 
 impl TelegramBotService {
@@ -60,6 +75,7 @@ impl TelegramBotService {
         git: GitService,
         config: Arc<RwLock<Config>>,
         events_msg_store: Arc<MsgStore>,
+        approvals: Approvals,
     ) -> Option<JoinHandle<()>> {
         let telegram_config = config.read().await.telegram.clone();
 
@@ -83,6 +99,7 @@ impl TelegramBotService {
             git,
             config,
             events_msg_store,
+            approvals,
         };
 
         Some(tokio::spawn(async move {
@@ -165,6 +182,14 @@ impl TelegramBotService {
             }
             Command::Run(payload) => {
                 let response = self.run_task_from_command(&payload).await;
+                bot.send_message(msg.chat.id, response).await?;
+            }
+            Command::Approve(payload) => {
+                let response = self.approve_plan_from_command(&payload).await;
+                bot.send_message(msg.chat.id, response).await?;
+            }
+            Command::Reject(payload) => {
+                let response = self.reject_plan_from_command(&payload).await;
                 bot.send_message(msg.chat.id, response).await?;
             }
         }
@@ -323,9 +348,14 @@ impl TelegramBotService {
         new_status: TaskStatus,
     ) {
         if matches!(new_status, TaskStatus::InReview) {
-            let message = self.describe_task(&task.id.to_string()).await;
-            if let Err(err) = bot.send_message(chat_id, message).await {
-                tracing::warn!("Failed to send telegram notification: {}", err);
+            if let Some(plan_approval) = self.find_exit_plan_approval(task.id).await {
+                self.send_plan_notification(bot, chat_id, task, &plan_approval)
+                    .await;
+            } else {
+                let message = self.describe_task(&task.id.to_string()).await;
+                if let Err(err) = bot.send_message(chat_id, message).await {
+                    tracing::warn!("Failed to send telegram notification: {}", err);
+                }
             }
             return;
         }
@@ -344,6 +374,76 @@ impl TelegramBotService {
         {
             tracing::warn!("Failed to send telegram notification: {}", err);
         }
+    }
+
+    async fn send_plan_notification(
+        &self,
+        bot: &Bot,
+        chat_id: ChatId,
+        task: &TaskWithAttemptStatus,
+        plan_approval: &PlanApproval,
+    ) {
+        let short_id = ShortIdMapping::get_or_create(&self.db.pool, task.id)
+            .await
+            .unwrap_or_else(|_| "????".to_string());
+        let header = format!(
+            "Plan ready for review\n\n[{}] task{}\nTitle: {}\n\nCommands:\n/approve task{}\n/reject task{} [reason]",
+            short_id,
+            task.id,
+            task.title,
+            task.id,
+            task.id
+        );
+
+        if let Err(err) = bot.send_message(chat_id, header).await {
+            tracing::warn!("Failed to send telegram notification: {}", err);
+            return;
+        }
+
+        let chunks = split_text_chunks(&plan_approval.plan, TELEGRAM_MESSAGE_SAFE_LIMIT);
+        if chunks.is_empty() {
+            if let Err(err) = bot.send_message(chat_id, "Plan\n".to_string()).await {
+                tracing::warn!("Failed to send telegram plan notification: {}", err);
+            }
+            return;
+        }
+
+        let total_parts = chunks.len();
+
+        for (index, chunk) in chunks.into_iter().enumerate() {
+            let prefix = if total_parts > 1 {
+                format!("Plan (part {}/{})\n", index + 1, total_parts)
+            } else {
+                "Plan\n".to_string()
+            };
+            let message = format!("{prefix}{chunk}");
+            if let Err(err) = bot.send_message(chat_id, message).await {
+                tracing::warn!("Failed to send telegram plan notification: {}", err);
+                break;
+            }
+        }
+    }
+
+    async fn find_exit_plan_approval(&self, task_id: Uuid) -> Option<PlanApproval> {
+        for approval in self.approvals.list_pending() {
+            if approval.tool_name != EXIT_PLAN_MODE_NAME {
+                continue;
+            }
+
+            let ctx =
+                ExecutionProcess::load_context(&self.db.pool, approval.execution_process_id).await;
+            if let Ok(ctx) = ctx
+                && ctx.task.id == task_id
+            {
+                return Some(PlanApproval {
+                    approval_id: approval.id,
+                    execution_process_id: approval.execution_process_id,
+                    plan: approval.entry.content,
+                });
+            }
+        }
+
+        None
     }
 
     async fn load_task_statuses(&self) -> Result<HashMap<Uuid, TaskStatus>, sqlx::Error> {
@@ -804,6 +904,117 @@ impl TelegramBotService {
         }
     }
 
+    async fn approve_plan_from_command(&self, payload: &str) -> String {
+        let parts: Vec<&str> = payload.split_whitespace().collect();
+        if parts.is_empty() {
+            return "Usage: /approve <task_id>".to_string();
+        }
+
+        let Some(task_id) = self.resolve_task_id(parts[0]).await else {
+            return "Invalid task id. Expected short code, task<uuid>, or uuid.".to_string();
+        };
+
+        let Some(plan_approval) = self.find_exit_plan_approval(task_id).await else {
+            return format!("No pending plan approval found for task{task_id}.");
+        };
+
+        let response = self
+            .approvals
+            .respond(
+                &self.db.pool,
+                &plan_approval.approval_id,
+                ApprovalResponse {
+                    execution_process_id: plan_approval.execution_process_id,
+                    status: ApprovalStatus::Approved,
+                },
+            )
+            .await;
+
+        match response {
+            Ok(_) => self
+                .describe_plan_subtask(plan_approval.execution_process_id)
+                .await,
+            Err(e) => format!("Failed to approve plan: {e}"),
+        }
+    }
+
+    async fn reject_plan_from_command(&self, payload: &str) -> String {
+        let parts: Vec<&str> = payload.split_whitespace().collect();
+        if parts.is_empty() {
+            return "Usage: /reject <task_id> [reason]".to_string();
+        }
+
+        let Some(task_id) = self.resolve_task_id(parts[0]).await else {
+            return "Invalid task id. Expected short code, task<uuid>, or uuid.".to_string();
+        };
+
+        let Some(plan_approval) = self.find_exit_plan_approval(task_id).await else {
+            return format!("No pending plan approval found for task{task_id}.");
+        };
+
+        let reason = parts
+            .get(1..)
+            .map(|rest| rest.join(" "))
+            .and_then(|text| {
+                let trimmed = text.trim();
+                if trimmed.is_empty() {
+                    None
+                } else {
+                    Some(trimmed.to_string())
+                }
+            });
+
+        let response = self
+            .approvals
+            .respond(
+                &self.db.pool,
+                &plan_approval.approval_id,
+                ApprovalResponse {
+                    execution_process_id: plan_approval.execution_process_id,
+                    status: ApprovalStatus::Denied { reason: reason.clone() },
+                },
+            )
+            .await;
+
+        match response {
+            Ok(_) => {
+                let short_id = ShortIdMapping::get_or_create(&self.db.pool, task_id)
+                    .await
+                    .unwrap_or_else(|_| "????".to_string());
+                if let Some(reason) = reason {
+                    format!("Rejected plan for [{}] task{}: {}", short_id, task_id, reason)
+                } else {
+                    format!("Rejected plan for [{}] task{}", short_id, task_id)
+                }
+            }
+            Err(e) => format!("Failed to reject plan: {e}"),
+        }
+    }
+
+    async fn describe_plan_subtask(&self, execution_process_id: Uuid) -> String {
+        let ctx =
+            match ExecutionProcess::load_context(&self.db.pool, execution_process_id).await {
+                Ok(ctx) => ctx,
+                Err(e) => {
+                    return format!(
+                        "Plan approved, but failed to load execution context: {e}"
+                    );
+                }
+            };
+
+        match Task::find_children_by_workspace_id(&self.db.pool, ctx.workspace.id).await {
+            Ok(children) if !children.is_empty() => {
+                let child = &children[0];
+                let short_id = ShortIdMapping::get_or_create(&self.db.pool, child.id)
+                    .await
+                    .unwrap_or_else(|_| "????".to_string());
+                format!("Created [{}] task{}", short_id, child.id)
+            }
+            Ok(_) => "Plan approved, but no subtask was created.".to_string(),
+            Err(e) => format!("Plan approved, but failed to load subtask: {e}"),
+        }
+    }
+
     fn parse_task_id(raw: &str) -> Option<Uuid> {
         let trimmed = raw.trim();
         let trimmed = trimmed.strip_prefix("task").unwrap_or(trimmed);
@@ -828,6 +1039,7 @@ impl Clone for TelegramBotService {
             git: self.git.clone(),
             config: self.config.clone(),
             events_msg_store: self.events_msg_store.clone(),
+            approvals: self.approvals.clone(),
         }
     }
 }
@@ -836,6 +1048,13 @@ impl Clone for TelegramBotService {
 enum TaskChange {
     Upsert(TaskWithAttemptStatus),
     Delete(Uuid),
+}
+
+#[derive(Clone, Debug)]
+struct PlanApproval {
+    approval_id: String,
+    execution_process_id: Uuid,
+    plan: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -934,6 +1153,32 @@ fn escape_markdown_v2(input: &str) -> String {
         }
     }
     escaped
+}
+
+fn split_text_chunks(input: &str, limit: usize) -> Vec<String> {
+    if limit == 0 {
+        return vec![input.to_string()];
+    }
+
+    let mut chunks = Vec::new();
+    let mut current = String::new();
+    let mut count = 0usize;
+
+    for ch in input.chars() {
+        if count >= limit {
+            chunks.push(current);
+            current = String::new();
+            count = 0;
+        }
+        current.push(ch);
+        count += 1;
+    }
+
+    if !current.is_empty() {
+        chunks.push(current);
+    }
+
+    chunks
 }
 
 async fn api_base_url() -> Result<String, std::io::Error> {

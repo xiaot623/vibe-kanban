@@ -9,7 +9,7 @@ use std::{
 use dashmap::DashMap;
 use db::models::{
     execution_process::ExecutionProcess,
-    task::{Task, TaskStatus},
+    task::{CreateTask, Task, TaskStatus},
 };
 use executors::{
     approvals::ToolCallMetadata,
@@ -29,6 +29,8 @@ use utils::{
 };
 use uuid::Uuid;
 
+const EXIT_PLAN_MODE_NAME: &str = "ExitPlanMode";
+
 #[derive(Debug)]
 struct PendingApproval {
     entry_index: usize,
@@ -44,6 +46,14 @@ type ApprovalWaiter = Shared<BoxFuture<'static, ApprovalStatus>>;
 pub struct ToolContext {
     pub tool_name: String,
     pub execution_process_id: Uuid,
+}
+
+#[derive(Debug, Clone)]
+pub struct PendingApprovalInfo {
+    pub id: String,
+    pub tool_name: String,
+    pub execution_process_id: Uuid,
+    pub entry: NormalizedEntry,
 }
 
 #[derive(Clone)]
@@ -185,6 +195,38 @@ impl Approvals {
                 );
             }
 
+            if matches!(req.status, ApprovalStatus::Approved)
+                && tool_ctx.tool_name == EXIT_PLAN_MODE_NAME
+            {
+                let plan_content = p.entry.content.clone();
+                match ExecutionProcess::load_context(pool, tool_ctx.execution_process_id).await {
+                    Ok(ctx) => {
+                        let create_task = CreateTask {
+                            project_id: ctx.task.project_id,
+                            title: format!("Implement the Plan ({})", ctx.task.title),
+                            description: Some(plan_content),
+                            status: Some(TaskStatus::Todo),
+                            parent_workspace_id: Some(ctx.workspace.id),
+                            image_ids: None,
+                        };
+                        let task_id = Uuid::new_v4();
+                        if let Err(e) = Task::create(pool, &create_task, task_id).await {
+                            tracing::warn!(
+                                "Failed to create plan implementation task for execution_process_id {}: {}",
+                                tool_ctx.execution_process_id,
+                                e
+                            );
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            "Failed to load execution context for plan approval: {}",
+                            e
+                        );
+                    }
+                }
+            }
+
             Ok((req.status, tool_ctx))
         } else if self.completed.contains_key(id) {
             Err(ApprovalError::AlreadyCompleted)
@@ -277,6 +319,18 @@ impl Approvals {
                 } else {
                     None
                 }
+            })
+            .collect()
+    }
+
+    pub fn list_pending(&self) -> Vec<PendingApprovalInfo> {
+        self.pending
+            .iter()
+            .map(|entry| PendingApprovalInfo {
+                id: entry.key().clone(),
+                tool_name: entry.value().tool_name.clone(),
+                execution_process_id: entry.value().execution_process_id,
+                entry: entry.value().entry.clone(),
             })
             .collect()
     }

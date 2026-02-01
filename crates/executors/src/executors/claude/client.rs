@@ -3,7 +3,6 @@ use std::sync::Arc;
 use tokio::process::Command;
 use workspace_utils::approvals::ApprovalStatus;
 
-use super::types::PermissionMode;
 use crate::{
     approvals::{ExecutorApprovalError, ExecutorApprovalService},
     env::RepoContext,
@@ -11,10 +10,7 @@ use crate::{
         ExecutorError,
         claude::{
             ClaudeJson,
-            types::{
-                PermissionResult, PermissionUpdate, PermissionUpdateDestination,
-                PermissionUpdateType,
-            },
+            types::{PermissionResult, PermissionUpdate},
         },
         codex::client::LogWriter,
     },
@@ -75,16 +71,11 @@ impl ClaudeAgentClient {
                 match status {
                     ApprovalStatus::Approved => {
                         if tool_name == EXIT_PLAN_MODE_NAME {
-                            Ok(PermissionResult::Allow {
-                                updated_input: tool_input,
-                                updated_permissions: Some(vec![PermissionUpdate {
-                                    update_type: PermissionUpdateType::SetMode,
-                                    mode: Some(PermissionMode::BypassPermissions),
-                                    destination: Some(PermissionUpdateDestination::Session),
-                                    rules: None,
-                                    behavior: None,
-                                    directories: None,
-                                }]),
+                            Ok(PermissionResult::Deny {
+                                message:
+                                    "Plan accepted. A subtask has been created to implement the plan."
+                                        .to_string(),
+                                interrupt: Some(true),
                             })
                         } else {
                             Ok(PermissionResult::Allow {

@@ -136,6 +136,7 @@ pub trait Deployment: Clone + Send + Sync + 'static {
             self.git().clone(),
             self.config().clone(),
             self.events().msg_store().clone(),
+            self.approvals().clone(),
         )
         .await
     }
