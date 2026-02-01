@@ -1,6 +1,20 @@
-use std::{env, path::PathBuf};
+use std::{env, path::PathBuf, sync::OnceLock};
 
 use tokio::fs;
+
+/// In-process shared port for same-process consumers (e.g. telegram bot).
+static SHARED_PORT: OnceLock<u16> = OnceLock::new();
+
+/// Store the server port in-process so other components can read it without
+/// relying on the port file or environment variables.
+pub fn set_shared_port(port: u16) {
+    let _ = SHARED_PORT.set(port);
+}
+
+/// Read the port previously stored via [`set_shared_port`].
+pub fn get_shared_port() -> Option<u16> {
+    SHARED_PORT.get().copied()
+}
 
 pub async fn write_port_file(port: u16) -> std::io::Result<PathBuf> {
     let dir = env::temp_dir().join("vibe-kanban");

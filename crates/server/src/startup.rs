@@ -1,11 +1,5 @@
-use crate::routes;
-use crate::DeploymentImpl;
-use deployment::{Deployment, DeploymentError};
-use services::services::container::ContainerService;
-use sqlx::Error as SqlxError;
-use thiserror::Error;
-use tokio::task::JoinHandle;
-use tracing_subscriber::{EnvFilter, prelude::*};
+use std::net::SocketAddr;
+
 use axum::{
     ServiceExt,
     body::Body,
@@ -15,13 +9,20 @@ use axum::{
     response::Response,
 };
 use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
+use deployment::{Deployment, DeploymentError};
+use services::services::container::ContainerService;
+use sqlx::Error as SqlxError;
+use thiserror::Error;
+use tokio::task::JoinHandle;
+use tracing_subscriber::{EnvFilter, prelude::*};
 use utils::{
     assets::asset_dir,
     browser::open_browser,
-    port_file::write_port_file,
+    port_file::{set_shared_port, write_port_file},
     sentry::{self as sentry_utils, SentrySource, sentry_layer},
 };
-use std::net::SocketAddr;
+
+use crate::{DeploymentImpl, routes};
 
 #[derive(Debug, Error)]
 pub enum StartupError {
@@ -125,10 +126,7 @@ pub async fn spawn_background_services(deployment: &DeploymentImpl, platform: &s
     deployment.spawn_telegram_bot_service().await;
 
     deployment
-        .track_if_analytics_allowed(
-            "session_start",
-            serde_json::json!({ "platform": platform }),
-        )
+        .track_if_analytics_allowed("session_start", serde_json::json!({ "platform": platform }))
         .await;
 
     // Pre-warm file search cache for most active projects
@@ -167,6 +165,9 @@ pub async fn start_server(
     let listener =
         tokio::net::TcpListener::bind(format!("{}:{}", config.host, config.port)).await?;
     let actual_port = listener.local_addr()?.port();
+
+    // Share port in-process for components like the telegram bot
+    set_shared_port(actual_port);
 
     // Write port file for discovery if requested
     if config.write_port_file {

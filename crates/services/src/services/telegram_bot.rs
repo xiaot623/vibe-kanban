@@ -21,9 +21,7 @@ use serde::Serialize;
 use sqlx::Row;
 use teloxide::{prelude::*, types::ParseMode, utils::command::BotCommands};
 use tokio::{sync::RwLock, task::JoinHandle};
-use utils::{
-    log_msg::LogMsg, msg_store::MsgStore, port_file::read_port_file, response::ApiResponse,
-};
+use utils::{log_msg::LogMsg, msg_store::MsgStore, response::ApiResponse};
 use uuid::Uuid;
 
 use crate::services::{
@@ -939,6 +937,11 @@ fn escape_markdown_v2(input: &str) -> String {
 }
 
 async fn api_base_url() -> Result<String, std::io::Error> {
-    let port = read_port_file("vibe-kanban").await?;
+    let port = utils::port_file::get_shared_port().ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "Server port not yet available",
+        )
+    })?;
     Ok(format!("http://127.0.0.1:{port}/api"))
 }
