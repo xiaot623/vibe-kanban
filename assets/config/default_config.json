@@ -24,7 +24,7 @@
     "primary_email": null,
     "default_pr_base": "main"
   },
-  "analytics_enabled": true,
+  "analytics_enabled": false,
   "workspace_dir": null,
   "last_app_version": null,
   "show_release_notes": false,
