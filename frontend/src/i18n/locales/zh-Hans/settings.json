@@ -138,22 +138,22 @@
         }
       },
       "proxy": {
-        "title": "Proxy",
-        "description": "Override HTTP(S)_PROXY and NO_PROXY for coding agent runs. Leave empty to use environment variables.",
+        "title": "代理",
+        "description": "agent cli执行的全局代理",
         "http": {
           "label": "HTTP Proxy",
           "placeholder": "http://127.0.0.1:7890",
-          "helper": "Proxy URL for HTTP requests."
+          "helper": "HTTP请求的代理URL。"
         },
         "https": {
           "label": "HTTPS Proxy",
           "placeholder": "http://127.0.0.1:7890",
-          "helper": "Proxy URL for HTTPS requests."
+          "helper": "HTTPS请求的代理URL。"
         },
         "noProxy": {
           "label": "No Proxy",
           "placeholder": "localhost,127.0.0.1",
-          "helper": "Comma-separated hostnames or IPs that should bypass the proxy."
+          "helper": "以逗号分隔的需要绕过代理的主机名或 IP 地址。"
         }
       },
       "pullRequests": {
@@ -292,6 +292,20 @@
         "commitReminder": {
           "label": "提交提醒",
           "helper": "提示支持的代理在停止前提交更改。"
+        },
+        "powerMode": {
+          "label": "电源管理",
+          "helper": "控制应用如何防止设备进入睡眠状态。",
+          "options": {
+            "systemDefault": "系统默认",
+            "keepAwake": "保持系统唤醒",
+            "keepScreenOn": "保持屏幕常亮"
+          },
+          "descriptions": {
+            "systemDefault": "允许系统正常管理电源设置。",
+            "keepAwake": "防止系统睡眠，但允许显示器关闭。",
+            "keepScreenOn": "同时防止系统和显示器进入睡眠状态。"
+          }
         }
       }
     },

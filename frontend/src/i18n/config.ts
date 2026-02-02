@@ -8,26 +8,10 @@ import enCommon from './locales/en/common.json';
 import enSettings from './locales/en/settings.json';
 import enProjects from './locales/en/projects.json';
 import enTasks from './locales/en/tasks.json';
-import jaCommon from './locales/ja/common.json';
-import jaSettings from './locales/ja/settings.json';
-import jaProjects from './locales/ja/projects.json';
-import jaTasks from './locales/ja/tasks.json';
-import esCommon from './locales/es/common.json';
-import esSettings from './locales/es/settings.json';
-import esProjects from './locales/es/projects.json';
-import esTasks from './locales/es/tasks.json';
-import koCommon from './locales/ko/common.json';
-import koSettings from './locales/ko/settings.json';
-import koProjects from './locales/ko/projects.json';
-import koTasks from './locales/ko/tasks.json';
 import zhHansCommon from './locales/zh-Hans/common.json';
 import zhHansSettings from './locales/zh-Hans/settings.json';
 import zhHansProjects from './locales/zh-Hans/projects.json';
 import zhHansTasks from './locales/zh-Hans/tasks.json';
-import zhHantCommon from './locales/zh-Hant/common.json';
-import zhHantSettings from './locales/zh-Hant/settings.json';
-import zhHantProjects from './locales/zh-Hant/projects.json';
-import zhHantTasks from './locales/zh-Hant/tasks.json';
 
 const resources = {
   en: {
@@ -36,35 +20,11 @@ const resources = {
     projects: enProjects,
     tasks: enTasks,
   },
-  ja: {
-    common: jaCommon,
-    settings: jaSettings,
-    projects: jaProjects,
-    tasks: jaTasks,
-  },
-  es: {
-    common: esCommon,
-    settings: esSettings,
-    projects: esProjects,
-    tasks: esTasks,
-  },
-  ko: {
-    common: koCommon,
-    settings: koSettings,
-    projects: koProjects,
-    tasks: koTasks,
-  },
   'zh-Hans': {
     common: zhHansCommon,
     settings: zhHansSettings,
     projects: zhHansProjects,
     tasks: zhHansTasks,
-  },
-  'zh-Hant': {
-    common: zhHantCommon,
-    settings: zhHantSettings,
-    projects: zhHantProjects,
-    tasks: zhHantTasks,
   },
 };
 
@@ -74,30 +34,26 @@ i18n
   .init({
     resources,
     fallbackLng: {
-      'zh-TW': ['zh-Hant'],
-      'zh-HK': ['zh-Hant'],
-      'zh-MO': ['zh-Hant'],
-      zh: ['zh-Hans'], // Map generic Chinese to Simplified Chinese
+      zh: ['zh-Hans'],
       default: ['en'],
     },
     defaultNS: 'common',
     debug: import.meta.env.DEV,
-    // Include 'zh' + Traditional Chinese locales for browser detection
-    supportedLngs: [...SUPPORTED_I18N_CODES, 'zh', 'zh-TW', 'zh-HK', 'zh-MO'],
-    nonExplicitSupportedLngs: true, // Accept zh -> zh-Hans mapping
-    load: 'currentOnly', // Load exact language code
+    supportedLngs: [...SUPPORTED_I18N_CODES, 'zh'],
+    nonExplicitSupportedLngs: true,
+    load: 'currentOnly',
 
     interpolation: {
-      escapeValue: false, // React already escapes
+      escapeValue: false,
     },
 
     react: {
-      useSuspense: false, // Avoid suspense for now to simplify initial setup
+      useSuspense: false,
     },
 
     detection: {
       order: ['navigator', 'htmlTag'],
-      caches: [], // Disable localStorage cache - we'll handle this via config
+      caches: [],
     },
   });
 

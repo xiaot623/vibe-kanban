@@ -78,6 +78,16 @@ pub enum UiLanguage {
     ZhHant,  // Force Traditional Chinese
 }
 
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, TS, Default, PartialEq, Eq)]
+#[ts(export)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum PowerMode {
+    #[default]
+    SystemDefault,
+    KeepAwake,
+    KeepScreenOn,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 pub struct NotificationConfig {
     pub sound_enabled: bool,
@@ -244,6 +254,8 @@ pub struct Config {
     pub proxy: ProxyConfig,
     #[serde(default)]
     pub telegram: TelegramConfig,
+    #[serde(default)]
+    pub power_mode: PowerMode,
 }
 
 impl Default for Config {
@@ -318,6 +330,7 @@ impl From<super::v1::Config> for Config {
             local_network_access: false,
             local_network_password: None,
             telegram: TelegramConfig::default(),
+            power_mode: PowerMode::default(),
         }
     }
 }

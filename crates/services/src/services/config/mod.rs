@@ -39,6 +39,7 @@ pub type UiLanguage = versions::v2::UiLanguage;
 pub type ShowcaseState = versions::v2::ShowcaseState;
 pub type ProxyConfig = versions::v2::ProxyConfig;
 pub type TelegramConfig = versions::v2::TelegramConfig;
+pub type PowerMode = versions::v2::PowerMode;
 
 /// Load config from file, creating default if not exists
 /// Returns ConfigLoadResult which includes the config and optionally a parse error

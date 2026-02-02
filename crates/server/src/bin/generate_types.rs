@@ -128,6 +128,7 @@ fn generate_types_content() -> String {
         services::services::config::GitHubConfig::decl(),
         services::services::config::SoundFile::decl(),
         services::services::config::UiLanguage::decl(),
+        services::services::config::PowerMode::decl(),
         services::services::config::ShowcaseState::decl(),
         services::services::config::ProxyConfig::decl(),
         services::services::config::TelegramConfig::decl(),

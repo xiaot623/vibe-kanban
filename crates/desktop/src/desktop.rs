@@ -3,11 +3,12 @@
 use std::{net::Ipv4Addr, sync::Arc, time::Duration};
 
 use deployment::Deployment;
+use nosleep::{NoSleep, NoSleepType};
 use server::{
     startup::{self, ServerConfig},
     DeploymentImpl,
 };
-use services::services::config::Config as AppConfig;
+use services::services::config::{Config as AppConfig, PowerMode};
 use tauri::{Manager, WebviewUrl, WebviewWindowBuilder};
 use tokio::{net::UdpSocket, sync::Mutex};
 
@@ -18,6 +19,54 @@ struct LanServerState {
     handle: Option<tokio::task::JoinHandle<()>>,
     broadcast_handle: Option<tokio::task::JoinHandle<()>>,
     enabled: bool,
+}
+
+struct KeepAwakeState {
+    nosleep: Option<NoSleep>,
+    current_mode: PowerMode,
+}
+
+impl KeepAwakeState {
+    fn new() -> Self {
+        Self {
+            nosleep: None,
+            current_mode: PowerMode::SystemDefault,
+        }
+    }
+
+    fn apply_mode(&mut self, mode: PowerMode) -> Result<(), Box<dyn std::error::Error>> {
+        if mode == self.current_mode {
+            return Ok(());
+        }
+        self.stop();
+
+        match mode {
+            PowerMode::SystemDefault => {
+                tracing::info!("Power mode: System default");
+            }
+            PowerMode::KeepAwake => {
+                let mut nosleep = NoSleep::new()?;
+                nosleep.start(NoSleepType::PreventUserIdleSystemSleep)?;
+                self.nosleep = Some(nosleep);
+                tracing::info!("Power mode: Keep awake (preventing system sleep)");
+            }
+            PowerMode::KeepScreenOn => {
+                let mut nosleep = NoSleep::new()?;
+                nosleep.start(NoSleepType::PreventUserIdleDisplaySleep)?;
+                self.nosleep = Some(nosleep);
+                tracing::info!("Power mode: Keep screen on");
+            }
+        }
+
+        self.current_mode = mode;
+        Ok(())
+    }
+
+    fn stop(&mut self) {
+        if let Some(nosleep) = self.nosleep.take() {
+            let _ = nosleep.stop();
+        }
+    }
 }
 
 /// Start the embedded server and set up the desktop application.
@@ -69,6 +118,17 @@ pub async fn start_embedded_server(app_handle: &tauri::AppHandle) -> anyhow::Res
     }));
 
     spawn_local_network_watcher(deployment.clone(), lan_state);
+
+    // Initialize keep-awake state
+    let initial_power_mode = deployment.config().read().await.power_mode;
+    let keep_awake_state = Arc::new(Mutex::new(KeepAwakeState::new()));
+    {
+        let mut state = keep_awake_state.lock().await;
+        if let Err(err) = state.apply_mode(initial_power_mode) {
+            tracing::warn!("Failed to apply initial power mode: {}", err);
+        }
+    }
+    spawn_keep_awake_watcher(deployment.clone(), keep_awake_state);
 
     // Store deployment for cleanup on exit
     app_handle.manage(Arc::new(Mutex::new(Some(deployment))));
@@ -230,6 +290,22 @@ fn spawn_local_network_watcher(deployment: DeploymentImpl, lan_state: Arc<Mutex<
                     tracing::info!("Discovery multicast stopped");
                 }
                 state.enabled = false;
+            }
+        }
+    });
+}
+
+fn spawn_keep_awake_watcher(deployment: DeploymentImpl, state: Arc<Mutex<KeepAwakeState>>) {
+    tauri::async_runtime::spawn(async move {
+        let mut interval = tokio::time::interval(Duration::from_secs(2));
+        loop {
+            interval.tick().await;
+            let config_mode = deployment.config().read().await.power_mode;
+            let mut state = state.lock().await;
+            if config_mode != state.current_mode {
+                if let Err(err) = state.apply_mode(config_mode) {
+                    tracing::error!("Failed to apply power mode: {}", err);
+                }
             }
         }
     });

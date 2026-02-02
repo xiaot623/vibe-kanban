@@ -292,6 +292,20 @@
         "commitReminder": {
           "label": "Commit reminder",
           "helper": "Prompt supported agents to commit changes before stopping."
+        },
+        "powerMode": {
+          "label": "Power Management",
+          "helper": "Control how the app prevents your device from sleeping.",
+          "options": {
+            "systemDefault": "System Default",
+            "keepAwake": "Keep System Awake",
+            "keepScreenOn": "Keep Screen On"
+          },
+          "descriptions": {
+            "systemDefault": "Allow the system to manage sleep behavior normally.",
+            "keepAwake": "Prevent the system from sleeping while tasks are running.",
+            "keepScreenOn": "Keep the screen on and prevent system sleep while tasks are running."
+          }
         }
       }
     },

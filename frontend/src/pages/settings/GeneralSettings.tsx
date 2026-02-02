@@ -24,6 +24,7 @@ import { Loader2, Volume2 } from 'lucide-react';
 import {
   DEFAULT_PR_DESCRIPTION_PROMPT,
   EditorType,
+  PowerMode,
   SoundFile,
   ThemeMode,
   UiLanguage,
@@ -378,58 +379,58 @@ export function GeneralSettings() {
             draft?.editor.editor_type === EditorType.GOOGLE_ANTIGRAVITY ||
             draft?.editor.editor_type === EditorType.ZED ||
             draft?.editor.editor_type === EditorType.TRAE) && (
-              <>
+            <>
+              <div className="space-y-2">
+                <Label htmlFor="remote-ssh-host">
+                  {t('settings.general.editor.remoteSsh.host.label')}
+                </Label>
+                <Input
+                  id="remote-ssh-host"
+                  placeholder={t(
+                    'settings.general.editor.remoteSsh.host.placeholder'
+                  )}
+                  value={draft?.editor.remote_ssh_host || ''}
+                  onChange={(e) =>
+                    updateDraft({
+                      editor: {
+                        ...draft!.editor,
+                        remote_ssh_host: e.target.value || null,
+                      },
+                    })
+                  }
+                />
+                <p className="text-sm text-muted-foreground">
+                  {t('settings.general.editor.remoteSsh.host.helper')}
+                </p>
+              </div>
+
+              {draft?.editor.remote_ssh_host && (
                 <div className="space-y-2">
-                  <Label htmlFor="remote-ssh-host">
-                    {t('settings.general.editor.remoteSsh.host.label')}
+                  <Label htmlFor="remote-ssh-user">
+                    {t('settings.general.editor.remoteSsh.user.label')}
                   </Label>
                   <Input
-                    id="remote-ssh-host"
+                    id="remote-ssh-user"
                     placeholder={t(
-                      'settings.general.editor.remoteSsh.host.placeholder'
+                      'settings.general.editor.remoteSsh.user.placeholder'
                     )}
-                    value={draft?.editor.remote_ssh_host || ''}
+                    value={draft?.editor.remote_ssh_user || ''}
                     onChange={(e) =>
                       updateDraft({
                         editor: {
                           ...draft!.editor,
-                          remote_ssh_host: e.target.value || null,
+                          remote_ssh_user: e.target.value || null,
                         },
                       })
                     }
                   />
                   <p className="text-sm text-muted-foreground">
-                    {t('settings.general.editor.remoteSsh.host.helper')}
+                    {t('settings.general.editor.remoteSsh.user.helper')}
                   </p>
                 </div>
-
-                {draft?.editor.remote_ssh_host && (
-                  <div className="space-y-2">
-                    <Label htmlFor="remote-ssh-user">
-                      {t('settings.general.editor.remoteSsh.user.label')}
-                    </Label>
-                    <Input
-                      id="remote-ssh-user"
-                      placeholder={t(
-                        'settings.general.editor.remoteSsh.user.placeholder'
-                      )}
-                      value={draft?.editor.remote_ssh_user || ''}
-                      onChange={(e) =>
-                        updateDraft({
-                          editor: {
-                            ...draft!.editor,
-                            remote_ssh_user: e.target.value || null,
-                          },
-                        })
-                      }
-                    />
-                    <p className="text-sm text-muted-foreground">
-                      {t('settings.general.editor.remoteSsh.user.helper')}
-                    </p>
-                  </div>
-                )}
-              </>
-            )}
+              )}
+            </>
+          )}
         </CardContent>
       </Card>
 
@@ -488,7 +489,9 @@ export function GeneralSettings() {
       <Card>
         <CardHeader>
           <CardTitle>{t('settings.general.proxy.title')}</CardTitle>
-          <CardDescription>{t('settings.general.proxy.description')}</CardDescription>
+          <CardDescription>
+            {t('settings.general.proxy.description')}
+          </CardDescription>
         </CardHeader>
         <CardContent className="space-y-4">
           <div className="space-y-2">
@@ -608,10 +611,11 @@ export function GeneralSettings() {
           <div className="space-y-2">
             <textarea
               id="pr-custom-prompt"
-              className={`flex min-h-[100px] w-full rounded-md border border-input bg-background px-3 py-2 text-sm ring-offset-background placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 ${draft?.pr_auto_description_prompt == null
+              className={`flex min-h-[100px] w-full rounded-md border border-input bg-background px-3 py-2 text-sm ring-offset-background placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 ${
+                draft?.pr_auto_description_prompt == null
                   ? 'opacity-50 cursor-not-allowed'
                   : ''
-                }`}
+              }`}
               value={
                 draft?.pr_auto_description_prompt ??
                 DEFAULT_PR_DESCRIPTION_PROMPT
@@ -887,7 +891,9 @@ export function GeneralSettings() {
                   </p>
                 )}
                 <p className="text-sm text-muted-foreground">
-                  {t('settings.general.beta.localNetworkAccess.password.helper')}
+                  {t(
+                    'settings.general.beta.localNetworkAccess.password.helper'
+                  )}
                 </p>
               </div>
             )}
@@ -909,6 +915,46 @@ export function GeneralSettings() {
                 {t('settings.general.beta.commitReminder.helper')}
               </p>
             </div>
+          </div>
+
+          <div className="space-y-2">
+            <Label htmlFor="power-mode">
+              {t('settings.general.beta.powerMode.label')}
+            </Label>
+            <Select
+              value={draft?.power_mode ?? 'SYSTEM_DEFAULT'}
+              onValueChange={(value: string) =>
+                updateDraft({ power_mode: value as PowerMode })
+              }
+            >
+              <SelectTrigger id="power-mode">
+                <SelectValue
+                  placeholder={t('settings.general.beta.powerMode.label')}
+                />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="SYSTEM_DEFAULT">
+                  {t('settings.general.beta.powerMode.options.systemDefault')}
+                </SelectItem>
+                <SelectItem value="KEEP_AWAKE">
+                  {t('settings.general.beta.powerMode.options.keepAwake')}
+                </SelectItem>
+                <SelectItem value="KEEP_SCREEN_ON">
+                  {t('settings.general.beta.powerMode.options.keepScreenOn')}
+                </SelectItem>
+              </SelectContent>
+            </Select>
+            <p className="text-sm text-muted-foreground">
+              {t(
+                `settings.general.beta.powerMode.descriptions.${
+                  draft?.power_mode === 'KEEP_SCREEN_ON'
+                    ? 'keepScreenOn'
+                    : draft?.power_mode === 'KEEP_AWAKE'
+                      ? 'keepAwake'
+                      : 'systemDefault'
+                }`
+              )}
+            </p>
           </div>
 
           <div className="flex items-center space-x-2">
@@ -952,7 +998,9 @@ export function GeneralSettings() {
                       },
                     })
                   }
-                  placeholder={t('settings.general.telegram.botToken.placeholder')}
+                  placeholder={t(
+                    'settings.general.telegram.botToken.placeholder'
+                  )}
                 />
                 <p className="text-sm text-muted-foreground">
                   {t('settings.general.telegram.botToken.helper')}
@@ -984,7 +1032,9 @@ export function GeneralSettings() {
                       },
                     });
                   }}
-                  placeholder={t('settings.general.telegram.chatId.placeholder')}
+                  placeholder={t(
+                    'settings.general.telegram.chatId.placeholder'
+                  )}
                 />
                 <p className="text-sm text-muted-foreground">
                   {t('settings.general.telegram.chatId.helper')}
