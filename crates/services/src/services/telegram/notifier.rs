@@ -241,7 +241,7 @@ impl TelegramHandler for TaskInReviewHandler {
 
         // override the message if the task is pending plan
         if let Some(plan) = find_exit_plan_approval(tg, task.id).await {
-            tracing::info!("Found exit plan approval: {:?}", plan.plan);
+            tracing::debug!("Found exit plan approval: {:?}", plan.plan);
             message = format!("Plan: {}", plan.plan);
         }
         if let Err(err) = tg.bot.send_message(tg.chat_id, message).await {
