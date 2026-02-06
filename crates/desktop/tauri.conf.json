@@ -2,13 +2,13 @@
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "Vibe Kanban",
   "identifier": "ai.bloop.vibe-kanban.fork",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "build": {
     "frontendDist": "../../frontend/dist"
   },
   "bundle": {
     "active": true,
-    "targets": "all",
+    "targets": ["dmg"],
     "icon": [
       "icons/icon.png"
     ],
