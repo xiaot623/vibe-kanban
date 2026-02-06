@@ -40,8 +40,6 @@ impl ExecutorApprovalService for ExecutorApprovalBridge {
         tool_input: Value,
         tool_call_id: &str,
     ) -> Result<ApprovalStatus, ExecutorApprovalError> {
-        super::ensure_task_in_review(&self.db.pool, self.execution_process_id).await;
-
         let request = ApprovalRequest::from_create(
             CreateApprovalRequest {
                 tool_name: tool_name.to_string(),
@@ -56,6 +54,11 @@ impl ExecutorApprovalService for ExecutorApprovalBridge {
             .create_with_waiter(request)
             .await
             .map_err(ExecutorApprovalError::request_failed)?;
+
+        // Transition task to InReview AFTER adding the approval to the pending list,
+        // so that state handlers (e.g. Telegram notifier) can find the approval
+        // when they run synchronously during the dispatch.
+        super::ensure_task_in_review(&self.db.pool, self.execution_process_id).await;
 
         let task_name = ExecutionProcess::load_context(&self.db.pool, self.execution_process_id)
             .await

@@ -146,8 +146,9 @@ impl TelegramHandler for TaskCreatedHandler {
         };
 
         let message = format!(
-            "Task Created\n\n[{}] task{}\nProject: {}\nTitle: {}",
-            short_id, task.id, project_name, task.title
+            "[{}]Task Created\n
+            Project: {}; Task: {}",
+            short_id, project_name, task.title
         );
 
         if let Err(err) = tg.bot.send_message(tg.chat_id, message).await {
@@ -203,8 +204,9 @@ impl TelegramHandler for TaskInProgressHandler {
         };
 
         let message = format!(
-            "Started [{}] task{}\nProject: {}\nTitle: {}\nWorkspace: {}\nBranch: {}\nExecutor: {}",
-            short_id, task.id, project_name, task.title, workspace.id, workspace.branch, executor
+            "[{}]Task Running on {} {}\n
+            Project: {}; Task: {}",
+            short_id, executor, workspace.branch, project_name, task.title
         );
 
         if let Err(err) = tg.bot.send_message(tg.chat_id, message).await {
@@ -236,8 +238,11 @@ impl TelegramHandler for TaskInReviewHandler {
             .unwrap_or_else(|_| "????".to_string());
 
         let mut message = format!("[{}] task{} InReview", short_id, task.title,);
+
+        // override the message if the task is pending plan
         if let Some(plan) = find_exit_plan_approval(tg, task.id).await {
-            message.push_str(&format!("\nPlan: {}", plan.plan));
+            tracing::info!("Found exit plan approval: {:?}", plan.plan);
+            message = format!("Plan: {}", plan.plan);
         }
         if let Err(err) = tg.bot.send_message(tg.chat_id, message).await {
             tracing::warn!("Failed to send telegram notification: {}", err);
@@ -265,13 +270,17 @@ impl TelegramHandler for TaskFinishedHandler {
             .await
             .unwrap_or_else(|_| "????".to_string());
 
-        let diff_stats = compute_workspace_diff_stats(tg, task.id).await;
-        let diff_line = match diff_stats {
-            Some((added, removed)) => format!("\n+{} / -{}", added, removed),
-            None => String::new(),
-        };
+        let message = format!(
+            "[{}] 🎉🎉🎉 Task {} Finished\n
+            diff: {}",
+            short_id,
+            task.title,
+            match compute_workspace_diff_stats(tg, task.id).await {
+                Some((added, removed)) => format!("+{} / -{}", added, removed),
+                None => format!("+{0} / -{0}", 0),
+            }
+        );
 
-        let message = format!("[{}] task{} Done{}", short_id, task.title, diff_line);
         if let Err(err) = tg.bot.send_message(tg.chat_id, message).await {
             tracing::warn!("Failed to send telegram notification: {}", err);
         }
