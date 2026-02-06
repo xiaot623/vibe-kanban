@@ -142,10 +142,10 @@ impl TelegramHandler for TaskCreatedHandler {
         };
 
         let message = format!(
-            "[{}]Task Created\n
-            Project: {}; Task: {}",
+            "[{}]Task Created\nProject: {}; Task: {}",
             short_id, project_name, task.title
         );
+        tracing::info!("Sending telegram notification: {}", message);
 
         if let Err(err) = tg.bot.send_message(tg.chat_id, message).await {
             tracing::warn!("Failed to send telegram notification: {}", err);
@@ -200,8 +200,7 @@ impl TelegramHandler for TaskInProgressHandler {
         };
 
         let message = format!(
-            "[{}]Task Running on {} {}\n
-            Project: {}; Task: {}",
+            "[{}]Task Running on {} {}\nProject: {}; Task: {}",
             short_id, executor, workspace.branch, project_name, task.title
         );
 
@@ -267,8 +266,7 @@ impl TelegramHandler for TaskFinishedHandler {
             .unwrap_or_else(|_| "????".to_string());
 
         let message = format!(
-            "[{}] 🎉🎉🎉 Task {} Finished\n
-            diff: {}",
+            "[{}] 🎉🎉🎉 Task {} Finished\ndiff: {}",
             short_id,
             task.title,
             match compute_workspace_diff_stats(tg, task.id).await {
