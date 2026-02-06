@@ -232,13 +232,18 @@ impl TelegramHandler for TaskInReviewHandler {
             .await
             .unwrap_or_else(|_| "????".to_string());
 
-        let mut message = format!("[{}] task{} InReview", short_id, task.title,);
-
-        // override the message if the task is pending plan
+        // If the task has a pending plan, split and send as multiple messages
         if let Some(plan) = find_exit_plan_approval(tg, task.id).await {
-            tracing::debug!("Found exit plan approval: {:?}", plan.plan);
-            message = format!("Plan: {}", plan.plan);
+            let chunks = split_plan(&plan.plan);
+            for chunk in chunks {
+                if let Err(err) = tg.bot.send_message(tg.chat_id, chunk).await {
+                    tracing::warn!("Failed to send telegram plan notification: {}", err);
+                }
+            }
+            return;
         }
+
+        let message = format!("[{}] task{} InReview", short_id, task.title);
         if let Err(err) = tg.bot.send_message(tg.chat_id, message).await {
             tracing::warn!("Failed to send telegram notification: {}", err);
         }
@@ -339,6 +344,71 @@ struct PlanApproval {
     plan: String,
 }
 
+const TELEGRAM_MESSAGE_LIMIT: usize = 3072;
+
+fn split_plan(plan: &str) -> Vec<String> {
+    if plan.is_empty() {
+        return vec![];
+    }
+
+    // Split into sections at heading boundaries
+    let mut sections: Vec<String> = Vec::new();
+    let mut current = String::new();
+
+    for line in plan.lines() {
+        let trimmed = line.trim_start();
+        if trimmed.starts_with('#') && !current.is_empty() {
+            sections.push(current);
+            current = String::new();
+        }
+        if !current.is_empty() {
+            current.push('\n');
+        }
+        current.push_str(line);
+    }
+    if !current.is_empty() {
+        sections.push(current);
+    }
+
+    let prefix_reserve = 10;
+    let limit = TELEGRAM_MESSAGE_LIMIT.saturating_sub(prefix_reserve);
+
+    let mut chunks: Vec<String> = Vec::new();
+    let mut buf = String::new();
+
+    for section in &sections {
+        let needed = if buf.is_empty() {
+            section.len()
+        } else {
+            buf.len() + 1 /* newline */ + section.len()
+        };
+
+        if !buf.is_empty() && needed > limit {
+            chunks.push(buf);
+            buf = String::new();
+        }
+
+        if !buf.is_empty() {
+            buf.push('\n');
+        }
+        buf.push_str(section);
+    }
+    if !buf.is_empty() {
+        chunks.push(buf);
+    }
+
+    if chunks.len() <= 1 {
+        return chunks;
+    }
+
+    let total = chunks.len();
+    chunks
+        .into_iter()
+        .enumerate()
+        .map(|(i, c)| format!("Plan Review: [{}/{}] {}", i + 1, total, c))
+        .collect()
+}
+
 async fn find_exit_plan_approval(
     tg: &TelegramContext,
     task_id: uuid::Uuid,
@@ -359,4 +429,85 @@ async fn find_exit_plan_approval(
     }
 
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn split_plan_empty() {
+        assert!(split_plan("").is_empty());
+    }
+
+    #[test]
+    fn split_plan_no_headings_short() {
+        let plan = "Just a plain text plan with no headings.";
+        let result = split_plan(plan);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0], plan);
+    }
+
+    #[test]
+    fn split_plan_single_heading_short() {
+        let plan = "# Heading\nSome content";
+        let result = split_plan(plan);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0], plan);
+    }
+
+    #[test]
+    fn split_plan_multiple_headings_within_limit() {
+        let plan = "# Part 1\ncontent1\n## Part 2\ncontent2";
+        let result = split_plan(plan);
+        // Fits in one message, no labels
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0], plan);
+    }
+
+    #[test]
+    fn split_plan_labels_format() {
+        // Build a plan with headings where each section is large enough to force splitting
+        let section1 = format!("# Section 1\n{}", "a".repeat(3000));
+        let section2 = format!("# Section 2\n{}", "b".repeat(3000));
+        let plan = format!("{}\n{}", section1, section2);
+
+        let result = split_plan(&plan);
+        assert_eq!(result.len(), 2);
+        assert!(result[0].starts_with("[1/2] # Section 1"));
+        assert!(result[1].starts_with("[2/2] # Section 2"));
+    }
+
+    #[test]
+    fn split_plan_splits_at_heading_boundary() {
+        let section1 = format!("# Introduction\n{}", "x".repeat(2000));
+        let section2 = format!("## Details\n{}", "y".repeat(2000));
+        let section3 = format!("### Conclusion\n{}", "z".repeat(2000));
+        let plan = format!("{}\n{}\n{}", section1, section2, section3);
+
+        let result = split_plan(&plan);
+        // Each section is ~2010 chars; two sections ~4020 which exceeds limit after prefix reserve
+        assert!(result.len() >= 2);
+        // First chunk should contain the introduction heading
+        assert!(result[0].contains("# Introduction"));
+        // Verify all chunks have [i/n] labels
+        for (i, chunk) in result.iter().enumerate() {
+            assert!(chunk.starts_with(&format!("[{}/{}]", i + 1, result.len())));
+        }
+    }
+
+    #[test]
+    fn split_plan_merges_small_sections() {
+        // Many small sections should be merged into fewer chunks
+        let mut parts = Vec::new();
+        for i in 0..10 {
+            parts.push(format!("# Section {}\nShort content {}", i, i));
+        }
+        let plan = parts.join("\n");
+
+        let result = split_plan(&plan);
+        // All sections are tiny, should fit in one chunk with no labels
+        assert_eq!(result.len(), 1);
+        assert!(!result[0].starts_with("[1/"));
+    }
 }
