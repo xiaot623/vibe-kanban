@@ -118,6 +118,7 @@ impl TelegramBotService {
             bot: bot.clone(),
             chat_id,
             approvals: self.approvals.clone(),
+            git: self.git.clone(),
         };
         super::notifier::set_telegram_context(tg_context);
         super::notifier::register_handlers(self.task_state.dispatcher()).await;
@@ -613,14 +614,8 @@ impl TelegramBotService {
 
         let error_message = api_response.message().map(String::from);
         match api_response.into_data() {
-            Some(workspace) => {
-                let short_id = ShortIdMapping::get_or_create(&self.db.pool, task_id)
-                    .await
-                    .unwrap_or_else(|_| "????".to_string());
-                return Some(format!(
-                    "Started [{}] task{} in workspace{} on branch {}",
-                    short_id, task_id, workspace.id, workspace.branch
-                ));
+            Some(_) => {
+                return None;
             }
             None => {
                 return Some(

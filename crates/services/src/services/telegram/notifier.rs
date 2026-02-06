@@ -2,29 +2,30 @@
 //!
 //! triggered when task status changes occur.
 
-use std::sync::{Arc, OnceLock};
+use std::{
+    path::PathBuf,
+    sync::{Arc, OnceLock},
+    vec,
+};
 
 use db::{
     DBService,
     models::{
-        execution_process::ExecutionProcess,
-        project::Project,
-        short_id_mapping::ShortIdMapping,
-        task::{Task, TaskStatus},
+        execution_process::ExecutionProcess, project::Project, session::Session,
+        short_id_mapping::ShortIdMapping, task::TaskStatus, workspace::Workspace,
+        workspace_repo::WorkspaceRepo,
     },
     task_state::{
         TaskStateTransition,
         dispatcher::TaskStateDispatcher,
-        handler::{HandlerContext, TransitionFilter, fn_handler},
+        handler::{TransitionFilter, fn_handler},
     },
 };
-use teloxide::{prelude::*, types::ParseMode};
+use teloxide::prelude::*;
 use tokio::sync::{OnceCell, RwLock};
 
 use super::EXIT_PLAN_MODE_NAME;
-use crate::services::approvals::Approvals;
-
-const TELEGRAM_MESSAGE_SAFE_LIMIT: usize = 3800;
+use crate::services::{approvals::Approvals, git::GitService};
 
 /// Telegram context for event handlers.
 #[derive(Clone)]
@@ -33,6 +34,7 @@ pub struct TelegramContext {
     pub bot: Bot,
     pub chat_id: ChatId,
     pub approvals: Approvals,
+    pub git: GitService,
 }
 
 /// Global telegram context, set during bot initialization.
@@ -40,7 +42,6 @@ static TELEGRAM_CONTEXT: OnceLock<Arc<RwLock<Option<TelegramContext>>>> = OnceLo
 
 static TELEGRAM_HANDLER_REGISTRATION: OnceCell<()> = OnceCell::const_new();
 
-/// Initialize the telegram context for event handlers.
 pub fn set_telegram_context(ctx: TelegramContext) {
     let lock = TELEGRAM_CONTEXT.get_or_init(|| Arc::new(RwLock::new(None)));
     if let Ok(mut guard) = lock.try_write() {
@@ -57,168 +58,278 @@ pub fn clear_telegram_context() {
     }
 }
 
-/// Register Telegram handlers with the task state dispatcher.
-pub async fn register_handlers(dispatcher: &TaskStateDispatcher) {
-    TELEGRAM_HANDLER_REGISTRATION
-        .get_or_init(|| async {
-            let handlers = vec![
-                fn_handler(
-                    "on_task_created",
-                    TransitionFilter::new().to(vec![TaskStatus::Todo]),
-                    |ctx, transition| Box::pin(on_task_created(ctx, transition)),
-                ),
-                fn_handler(
-                    "on_task_in_review",
-                    TransitionFilter::new().to(vec![TaskStatus::InReview]),
-                    |ctx, transition| Box::pin(on_task_in_review(ctx, transition)),
-                ),
-                fn_handler(
-                    "on_task_status_change",
-                    TransitionFilter::new().to(vec![
-                        TaskStatus::Done,
-                        TaskStatus::Cancelled,
-                        TaskStatus::InProgress,
-                    ]),
-                    |ctx, transition| Box::pin(on_task_status_change(ctx, transition)),
-                ),
-                fn_handler(
-                    "on_task_reopened",
-                    TransitionFilter::new()
-                        .from(vec![
-                            TaskStatus::InProgress,
-                            TaskStatus::InReview,
-                            TaskStatus::Done,
-                            TaskStatus::Cancelled,
-                        ])
-                        .to(vec![TaskStatus::Todo]),
-                    |ctx, transition| Box::pin(on_task_reopened(ctx, transition)),
-                ),
-            ];
-
-            for handler in handlers {
-                dispatcher.register_handler(handler).await;
-            }
-        })
-        .await;
-}
-
 async fn get_context() -> Option<TelegramContext> {
     let lock = TELEGRAM_CONTEXT.get()?;
     lock.read().await.clone()
 }
 
-/// Handler for newly created tasks (Todo status with no previous state).
-pub async fn on_task_created(_ctx: &HandlerContext, transition: &TaskStateTransition) {
-    if transition.from_status().is_some() {
-        return;
-    }
+/// Register Telegram handlers with the task state dispatcher
+pub async fn register_handlers(dispatcher: &TaskStateDispatcher) {
+    TELEGRAM_HANDLER_REGISTRATION
+        .get_or_init(|| async {
+            TelegramHandlerWrapper::<TaskCreatedHandler>::register(dispatcher).await;
+            TelegramHandlerWrapper::<TaskInProgressHandler>::register(dispatcher).await;
+            TelegramHandlerWrapper::<TaskInReviewHandler>::register(dispatcher).await;
+            TelegramHandlerWrapper::<TaskFinishedHandler>::register(dispatcher).await;
+        })
+        .await;
+}
 
-    let Some(tg) = get_context().await else {
-        return;
-    };
+#[async_trait::async_trait]
+pub trait TelegramHandler: Send + Sync + 'static {
+    /// The filter for which transitions this handler should receive
+    fn filter() -> TransitionFilter
+    where
+        Self: Sized;
 
-    let task = &transition.task;
-    let short_id = ShortIdMapping::get_or_create(&tg.db.pool, task.id)
-        .await
-        .unwrap_or_else(|_| "????".to_string());
+    /// Handler name for logging/debugging
+    fn name() -> &'static str
+    where
+        Self: Sized;
 
-    let project_name = match Project::find_by_id(&tg.db.pool, task.project_id).await {
-        Ok(Some(project)) => project.name,
-        _ => "Unknown".to_string(),
-    };
+    /// The actual handler logic, called only when Telegram context is available
+    async fn handle_with_context(&self, tg: &TelegramContext, transition: &TaskStateTransition);
+}
 
-    let message = format!(
-        "Task Created\n\n[{}] task{}\nProject: {}\nTitle: {}",
-        short_id, task.id, project_name, task.title
-    );
+/// Wrapper to convert a TelegramHandler into a TaskStateHandler.
+pub struct TelegramHandlerWrapper<H: TelegramHandler> {
+    _phantom: std::marker::PhantomData<H>,
+}
 
-    if let Err(err) = tg.bot.send_message(tg.chat_id, message).await {
-        tracing::warn!("Failed to send telegram notification: {}", err);
+impl<H: TelegramHandler> TelegramHandlerWrapper<H> {
+    /// Register this handler with the dispatcher
+    pub async fn register(dispatcher: &TaskStateDispatcher)
+    where
+        H: Default,
+    {
+        let handler = fn_handler(H::name(), H::filter(), |_, transition| {
+            Box::pin(async move {
+                if transition.from_status().is_none() {
+                    return;
+                }
+
+                let Some(tg) = get_context().await else {
+                    return;
+                };
+
+                let handler = H::default();
+                handler.handle_with_context(&tg, transition).await;
+            })
+        });
+        dispatcher.register_handler(handler).await;
     }
 }
 
-/// Handler for tasks transitioning to InReview status.
-pub async fn on_task_in_review(_ctx: &HandlerContext, transition: &TaskStateTransition) {
-    if transition.from_status().is_none() {
-        return;
+/// Handler for newly created tasks (add a task)
+#[derive(Default)]
+pub struct TaskCreatedHandler;
+
+#[async_trait::async_trait]
+impl TelegramHandler for TaskCreatedHandler {
+    fn filter() -> TransitionFilter {
+        TransitionFilter::new().to(vec![TaskStatus::Todo])
     }
 
-    let Some(tg) = get_context().await else {
-        return;
-    };
+    fn name() -> &'static str {
+        "on_task_created"
+    }
 
-    let task = &transition.task;
+    async fn handle_with_context(&self, tg: &TelegramContext, transition: &TaskStateTransition) {
+        let task = &transition.task;
+        let short_id = ShortIdMapping::get_or_create(&tg.db.pool, task.id)
+            .await
+            .unwrap_or_else(|_| "????".to_string());
 
-    // Check for pending plan approval
-    if let Some(plan_approval) = find_exit_plan_approval(&tg, task.id).await {
-        send_plan_notification(&tg, task, &plan_approval).await;
-    } else {
-        let message = describe_task_for_notification(&tg, task).await;
+        let project_name = match Project::find_by_id(&tg.db.pool, task.project_id).await {
+            Ok(Some(project)) => project.name,
+            _ => "Unknown".to_string(),
+        };
+
+        let message = format!(
+            "Task Created\n\n[{}] task{}\nProject: {}\nTitle: {}",
+            short_id, task.id, project_name, task.title
+        );
+
         if let Err(err) = tg.bot.send_message(tg.chat_id, message).await {
             tracing::warn!("Failed to send telegram notification: {}", err);
         }
     }
 }
 
-/// Handler for task status changes (excluding creation).
-pub async fn on_task_status_change(_ctx: &HandlerContext, transition: &TaskStateTransition) {
-    let Some(old_status) = transition.from_status() else {
-        return;
-    };
+/// Handler for Todo tasks transitioning to InProgress status (run a task)
+#[derive(Default)]
+pub struct TaskInProgressHandler;
 
-    if old_status == transition.to_status() {
-        return;
+#[async_trait::async_trait]
+impl TelegramHandler for TaskInProgressHandler {
+    fn filter() -> TransitionFilter {
+        TransitionFilter::new()
+            .from(vec![TaskStatus::Todo])
+            .to(vec![TaskStatus::InProgress])
     }
 
-    let Some(tg) = get_context().await else {
-        return;
-    };
-
-    send_status_change_notification(&tg, &transition.task, old_status, transition.to_status())
-        .await;
-}
-
-/// Handler for task moved back to Todo (re-opened).
-pub async fn on_task_reopened(_ctx: &HandlerContext, transition: &TaskStateTransition) {
-    let Some(old_status) = transition.from_status() else {
-        return;
-    };
-
-    if matches!(old_status, TaskStatus::Todo) {
-        return;
+    fn name() -> &'static str {
+        "on_task_in_progress"
     }
 
-    let Some(tg) = get_context().await else {
-        return;
-    };
+    async fn handle_with_context(&self, tg: &TelegramContext, transition: &TaskStateTransition) {
+        let task = &transition.task;
+        let short_id = ShortIdMapping::get_or_create(&tg.db.pool, task.id)
+            .await
+            .unwrap_or_else(|_| "????".to_string());
 
-    send_status_change_notification(&tg, &transition.task, old_status, transition.to_status())
-        .await;
+        let workspace = match Workspace::fetch_all(&tg.db.pool, Some(task.id)).await {
+            Ok(workspaces) => match workspaces.into_iter().next() {
+                Some(workspace) => workspace,
+                None => {
+                    tracing::warn!("No workspace found for task {}", task.id);
+                    return;
+                }
+            },
+            Err(_) => {
+                tracing::warn!("Failed to find workspace for task {}", task.id);
+                return;
+            }
+        };
+
+        let executor = match Session::find_latest_by_workspace_id(&tg.db.pool, workspace.id).await {
+            Ok(Some(session)) => session.executor.unwrap_or_else(|| "Unknown".to_string()),
+            _ => "Unknown".to_string(),
+        };
+
+        let project_name = match Project::find_by_id(&tg.db.pool, task.project_id).await {
+            Ok(Some(project)) => project.name,
+            _ => "Unknown".to_string(),
+        };
+
+        let message = format!(
+            "Started [{}] task{}\nProject: {}\nTitle: {}\nWorkspace: {}\nBranch: {}\nExecutor: {}",
+            short_id, task.id, project_name, task.title, workspace.id, workspace.branch, executor
+        );
+
+        if let Err(err) = tg.bot.send_message(tg.chat_id, message).await {
+            tracing::warn!("Failed to send telegram notification: {}", err);
+        }
+    }
 }
 
-// Helper functions for notifications
+/// Handler for tasks transitioning to InReview status
+/// if the task is planned, include the plan in the message
+#[derive(Default)]
+pub struct TaskInReviewHandler;
 
-async fn send_status_change_notification(
+#[async_trait::async_trait]
+impl TelegramHandler for TaskInReviewHandler {
+    fn filter() -> TransitionFilter {
+        TransitionFilter::new().to(vec![TaskStatus::InReview])
+    }
+
+    fn name() -> &'static str {
+        "on_task_in_review"
+    }
+
+    async fn handle_with_context(&self, tg: &TelegramContext, transition: &TaskStateTransition) {
+        let task = &transition.task;
+
+        let short_id = ShortIdMapping::get_or_create(&tg.db.pool, task.id)
+            .await
+            .unwrap_or_else(|_| "????".to_string());
+
+        let mut message = format!("[{}] task{} InReview", short_id, task.title,);
+        if let Some(plan) = find_exit_plan_approval(tg, task.id).await {
+            message.push_str(&format!("\nPlan: {}", plan.plan));
+        }
+        if let Err(err) = tg.bot.send_message(tg.chat_id, message).await {
+            tracing::warn!("Failed to send telegram notification: {}", err);
+        }
+    }
+}
+
+/// Handler for tasks transitioning to Done status.
+#[derive(Default)]
+pub struct TaskFinishedHandler;
+
+#[async_trait::async_trait]
+impl TelegramHandler for TaskFinishedHandler {
+    fn filter() -> TransitionFilter {
+        TransitionFilter::new().to(vec![TaskStatus::Done])
+    }
+
+    fn name() -> &'static str {
+        "on_task_done"
+    }
+
+    async fn handle_with_context(&self, tg: &TelegramContext, transition: &TaskStateTransition) {
+        let task = &transition.task;
+        let short_id = ShortIdMapping::get_or_create(&tg.db.pool, task.id)
+            .await
+            .unwrap_or_else(|_| "????".to_string());
+
+        let diff_stats = compute_workspace_diff_stats(tg, task.id).await;
+        let diff_line = match diff_stats {
+            Some((added, removed)) => format!("\n+{} / -{}", added, removed),
+            None => String::new(),
+        };
+
+        let message = format!("[{}] task{} Done{}", short_id, task.title, diff_line);
+        if let Err(err) = tg.bot.send_message(tg.chat_id, message).await {
+            tracing::warn!("Failed to send telegram notification: {}", err);
+        }
+    }
+}
+
+/// helper function
+
+async fn compute_workspace_diff_stats(
     tg: &TelegramContext,
-    task: &Task,
-    old_status: &TaskStatus,
-    new_status: &TaskStatus,
-) {
-    let message = format!(
-        "*Task Status Changed*\n\n*{}*\n{} -> {}",
-        escape_markdown_v2(&task.title),
-        escape_markdown_v2(&format!("{:?}", old_status)),
-        escape_markdown_v2(&format!("{:?}", new_status))
-    );
-
-    if let Err(err) = tg
-        .bot
-        .send_message(tg.chat_id, message)
-        .parse_mode(ParseMode::MarkdownV2)
+    task_id: uuid::Uuid,
+) -> Option<(usize, usize)> {
+    let workspaces = Workspace::fetch_all(&tg.db.pool, Some(task_id))
         .await
-    {
-        tracing::warn!("Failed to send telegram notification: {}", err);
+        .ok()?;
+    let workspace = workspaces.into_iter().next()?;
+    let container_ref = workspace.container_ref.as_ref()?;
+
+    let workspace_repos =
+        WorkspaceRepo::find_repos_with_target_branch_for_workspace(&tg.db.pool, workspace.id)
+            .await
+            .ok()?;
+
+    let mut total_added = 0usize;
+    let mut total_removed = 0usize;
+
+    for repo_with_branch in workspace_repos {
+        let worktree_path = PathBuf::from(container_ref).join(&repo_with_branch.repo.name);
+        let workspace_branch = workspace.branch.clone();
+        let target_branch = repo_with_branch.target_branch.clone();
+
+        let base_commit = tg
+            .git
+            .get_base_commit(
+                &repo_with_branch.repo.path,
+                &workspace_branch,
+                &target_branch,
+            )
+            .ok()?;
+
+        let diffs = tg
+            .git
+            .get_diffs(
+                crate::services::git::DiffTarget::Worktree {
+                    worktree_path: &worktree_path,
+                    base_commit: &base_commit,
+                },
+                None,
+            )
+            .ok()?;
+
+        for diff in diffs {
+            total_added += diff.additions.unwrap_or(0);
+            total_removed += diff.deletions.unwrap_or(0);
+        }
     }
+
+    Some((total_added, total_removed))
 }
 
 struct PlanApproval {
@@ -245,119 +356,4 @@ async fn find_exit_plan_approval(
     }
 
     None
-}
-
-async fn send_plan_notification(tg: &TelegramContext, task: &Task, plan_approval: &PlanApproval) {
-    let short_id = ShortIdMapping::get_or_create(&tg.db.pool, task.id)
-        .await
-        .unwrap_or_else(|_| "????".to_string());
-
-    let header = format!(
-        "Plan ready for review\n\n[{}] task{}\nTitle: {}\n\nCommands:\n/approve task{}\n/reject task{} [reason]",
-        short_id, task.id, task.title, task.id, task.id
-    );
-
-    if let Err(err) = tg.bot.send_message(tg.chat_id, header).await {
-        tracing::warn!("Failed to send telegram notification: {}", err);
-        return;
-    }
-
-    let chunks = split_text_chunks(&plan_approval.plan, TELEGRAM_MESSAGE_SAFE_LIMIT);
-    if chunks.is_empty() {
-        if let Err(err) = tg.bot.send_message(tg.chat_id, "Plan\n".to_string()).await {
-            tracing::warn!("Failed to send telegram plan notification: {}", err);
-        }
-        return;
-    }
-
-    let total_parts = chunks.len();
-    for (index, chunk) in chunks.into_iter().enumerate() {
-        let prefix = if total_parts > 1 {
-            format!("Plan (part {}/{})\n", index + 1, total_parts)
-        } else {
-            "Plan\n".to_string()
-        };
-        let message = format!("{prefix}{chunk}");
-        if let Err(err) = tg.bot.send_message(tg.chat_id, message).await {
-            tracing::warn!("Failed to send telegram plan notification: {}", err);
-            break;
-        }
-    }
-}
-
-async fn describe_task_for_notification(tg: &TelegramContext, task: &Task) -> String {
-    let project_name = match Project::find_by_id(&tg.db.pool, task.project_id).await {
-        Ok(Some(project)) => project.name,
-        _ => "Unknown project".to_string(),
-    };
-
-    let description = task
-        .description
-        .clone()
-        .unwrap_or_else(|| "No description.".to_string());
-
-    let short_id = ShortIdMapping::get_or_create(&tg.db.pool, task.id)
-        .await
-        .unwrap_or_else(|_| "????".to_string());
-
-    format!(
-        "[{}] task{}\nProject: {}\nStatus: {:?}\nTitle: {}\nDescription: {}",
-        short_id,
-        task.id,
-        project_name,
-        task.status,
-        task.title,
-        truncate_text(&description, 500)
-    )
-}
-
-fn escape_markdown_v2(input: &str) -> String {
-    let mut escaped = String::with_capacity(input.len());
-    for ch in input.chars() {
-        match ch {
-            '\\' | '_' | '*' | '[' | ']' | '(' | ')' | '~' | '`' | '>' | '#' | '+' | '-' | '='
-            | '|' | '{' | '}' | '.' | '!' => {
-                escaped.push('\\');
-                escaped.push(ch);
-            }
-            _ => escaped.push(ch),
-        }
-    }
-    escaped
-}
-
-fn truncate_text(input: &str, limit: usize) -> String {
-    let mut chars = input.chars();
-    let truncated: String = chars.by_ref().take(limit).collect();
-    if chars.next().is_some() {
-        format!("{truncated}...")
-    } else {
-        truncated
-    }
-}
-
-fn split_text_chunks(input: &str, limit: usize) -> Vec<String> {
-    if limit == 0 {
-        return vec![input.to_string()];
-    }
-
-    let mut chunks = Vec::new();
-    let mut current = String::new();
-    let mut count = 0usize;
-
-    for ch in input.chars() {
-        if count >= limit {
-            chunks.push(current);
-            current = String::new();
-            count = 0;
-        }
-        current.push(ch);
-        count += 1;
-    }
-
-    if !current.is_empty() {
-        chunks.push(current);
-    }
-
-    chunks
 }
