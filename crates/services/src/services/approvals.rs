@@ -184,15 +184,22 @@ impl Approvals {
             if matches!(
                 req.status,
                 ApprovalStatus::Approved | ApprovalStatus::Denied { .. }
-            ) && let Ok(ctx) =
-                ExecutionProcess::load_context(pool, tool_ctx.execution_process_id).await
-                && ctx.task.status == TaskStatus::InReview
-                && let Err(e) = Task::update_status(pool, ctx.task.id, TaskStatus::InProgress).await
-            {
-                tracing::warn!(
-                    "Failed to update task status to InProgress after approval response: {}",
-                    e
-                );
+            ) {
+                if let Ok(ctx) =
+                    ExecutionProcess::load_context(pool, tool_ctx.execution_process_id).await
+                {
+                    if ctx.task.status == TaskStatus::InReview {
+                        // State transition is auto-dispatched by Task::update_status
+                        if let Err(e) =
+                            Task::update_status(pool, ctx.task.id, TaskStatus::InProgress).await
+                        {
+                            tracing::warn!(
+                                "Failed to update task status to InProgress after approval response: {}",
+                                e
+                            );
+                        }
+                    }
+                }
             }
 
             if matches!(req.status, ApprovalStatus::Approved)
@@ -210,6 +217,7 @@ impl Approvals {
                             image_ids: None,
                         };
                         let task_id = Uuid::new_v4();
+                        // State transition is auto-dispatched by Task::create
                         if let Err(e) = Task::create(pool, &create_task, task_id).await {
                             tracing::warn!(
                                 "Failed to create plan implementation task for execution_process_id {}: {}",

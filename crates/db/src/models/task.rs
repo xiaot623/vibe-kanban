@@ -6,6 +6,7 @@ use ts_rs::TS;
 use uuid::Uuid;
 
 use super::{project::Project, workspace::Workspace};
+use crate::task_state::dispatcher::dispatch_task_transition;
 
 #[derive(
     Debug, Clone, Type, Serialize, Deserialize, PartialEq, TS, EnumString, Display, Default,
@@ -219,7 +220,7 @@ ORDER BY t.created_at DESC"#,
         task_id: Uuid,
     ) -> Result<Self, sqlx::Error> {
         let status = data.status.clone().unwrap_or_default();
-        sqlx::query_as!(
+        let task = sqlx::query_as!(
             Task,
             r#"INSERT INTO tasks (id, project_id, title, description, status, parent_workspace_id)
                VALUES ($1, $2, $3, $4, $5, $6)
@@ -232,7 +233,12 @@ ORDER BY t.created_at DESC"#,
             data.parent_workspace_id
         )
         .fetch_one(pool)
-        .await
+        .await?;
+
+        // Dispatch state transition (old_status is None for creation)
+        dispatch_task_transition(pool, task.clone(), None).await;
+
+        Ok(task)
     }
 
     pub async fn update(
@@ -244,7 +250,10 @@ ORDER BY t.created_at DESC"#,
         status: TaskStatus,
         parent_workspace_id: Option<Uuid>,
     ) -> Result<Self, sqlx::Error> {
-        sqlx::query_as!(
+        // Capture old status for transition dispatch
+        let old_status = Self::find_by_id(pool, id).await?.map(|t| t.status);
+
+        let task = sqlx::query_as!(
             Task,
             r#"UPDATE tasks
                SET title = $3, description = $4, status = $5, parent_workspace_id = $6
@@ -258,22 +267,37 @@ ORDER BY t.created_at DESC"#,
             parent_workspace_id
         )
         .fetch_one(pool)
-        .await
+        .await?;
+
+        // Dispatch state transition
+        dispatch_task_transition(pool, task.clone(), old_status).await;
+
+        Ok(task)
     }
 
     pub async fn update_status(
         pool: &SqlitePool,
         id: Uuid,
         status: TaskStatus,
-    ) -> Result<(), sqlx::Error> {
-        sqlx::query!(
-            "UPDATE tasks SET status = $2, updated_at = CURRENT_TIMESTAMP WHERE id = $1",
+    ) -> Result<Task, sqlx::Error> {
+        // Capture old status for transition dispatch
+        let old_status = Self::find_by_id(pool, id).await?.map(|t| t.status);
+
+        // Update status in database
+        let task = sqlx::query_as!(
+            Task,
+            r#"UPDATE tasks SET status = $2, updated_at = CURRENT_TIMESTAMP WHERE id = $1
+               RETURNING id as "id!: Uuid", project_id as "project_id!: Uuid", title, description, status as "status!: TaskStatus", parent_workspace_id as "parent_workspace_id: Uuid", created_at as "created_at!: DateTime<Utc>", updated_at as "updated_at!: DateTime<Utc>""#,
             id,
             status
         )
-        .execute(pool)
+        .fetch_one(pool)
         .await?;
-        Ok(())
+
+        // Dispatch state transition
+        dispatch_task_transition(pool, task.clone(), old_status).await;
+
+        Ok(task)
     }
 
     /// Update the parent_workspace_id field for a task

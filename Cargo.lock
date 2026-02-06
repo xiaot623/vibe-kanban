@@ -1309,6 +1309,7 @@ name = "db"
 version = "0.1.1"
 dependencies = [
  "anyhow",
+ "async-trait",
  "chrono",
  "executors",
  "rand 0.8.5",
@@ -1319,6 +1320,7 @@ dependencies = [
  "strum",
  "strum_macros",
  "thiserror 2.0.17",
+ "tokio",
  "tracing",
  "ts-rs 11.0.1",
  "utils",

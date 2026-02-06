@@ -1,4 +1,8 @@
-use std::{collections::HashMap, path::PathBuf, str::FromStr, sync::Arc};
+// ! Command handlers for Telegram bot.
+// !
+// ! triggered when a command is received.
+
+use std::{path::PathBuf, str::FromStr, sync::Arc};
 
 use db::{
     DBService,
@@ -17,24 +21,21 @@ use executors::{
     executors::BaseCodingAgent,
     profile::{ExecutorProfileId, canonical_variant_key},
 };
-use json_patch::PatchOperation;
 use serde::Serialize;
-use sqlx::Row;
-use teloxide::{prelude::*, types::ParseMode, utils::command::BotCommands};
-use tokio::{sync::RwLock, task::JoinHandle};
+use teloxide::{prelude::*, utils::command::BotCommands};
+use tokio::sync::RwLock;
 use utils::{
     approvals::{ApprovalResponse, ApprovalStatus},
-    log_msg::LogMsg,
-    msg_store::MsgStore,
     response::ApiResponse,
 };
 use uuid::Uuid;
 
+use super::{EXIT_PLAN_MODE_NAME, notifier::TelegramContext};
 use crate::services::{
     approvals::Approvals,
     config::Config,
-    events::EventPatch,
-    git::{DiffTarget, GitBranch, GitService},
+    git::{GitBranch, GitService},
+    task_state::TaskStateService,
 };
 
 #[derive(BotCommands, Clone)]
@@ -58,15 +59,13 @@ pub enum Command {
     Reject(String),
 }
 
-const EXIT_PLAN_MODE_NAME: &str = "ExitPlanMode";
-const TELEGRAM_MESSAGE_SAFE_LIMIT: usize = 3800;
-
+/// Telegram bot service for handling commands.
 pub struct TelegramBotService {
     db: DBService,
     git: GitService,
     config: Arc<RwLock<Config>>,
-    events_msg_store: Arc<MsgStore>,
     approvals: Approvals,
+    task_state: TaskStateService,
 }
 
 impl TelegramBotService {
@@ -74,9 +73,8 @@ impl TelegramBotService {
         db: DBService,
         git: GitService,
         config: Arc<RwLock<Config>>,
-        events_msg_store: Arc<MsgStore>,
         approvals: Approvals,
-    ) -> Option<JoinHandle<()>> {
+    ) -> Option<tokio::task::JoinHandle<()>> {
         let telegram_config = config.read().await.telegram.clone();
 
         if !telegram_config.enabled {
@@ -94,12 +92,13 @@ impl TelegramBotService {
             return None;
         };
 
+        let task_state = TaskStateService::new(db.pool.clone());
         let service = Self {
             db,
             git,
             config,
-            events_msg_store,
             approvals,
+            task_state,
         };
 
         Some(tokio::spawn(async move {
@@ -113,23 +112,21 @@ impl TelegramBotService {
 
         tracing::info!("Starting Telegram bot service");
 
-        let notification_service = self.clone();
-        let notification_bot = bot.clone();
-        let notification_handle = tokio::spawn(async move {
-            notification_service
-                .notification_listener(notification_bot, chat_id)
-                .await;
-        });
+        // Register telegram context for event handlers
+        let tg_context = TelegramContext {
+            db: self.db.clone(),
+            bot: bot.clone(),
+            chat_id,
+            approvals: self.approvals.clone(),
+        };
+        super::notifier::set_telegram_context(tg_context);
+        super::notifier::register_handlers(self.task_state.dispatcher()).await;
 
-        let command_service = self.clone();
-        let command_bot = bot.clone();
-        let command_handle = tokio::spawn(async move {
-            command_service
-                .command_dispatcher(command_bot, chat_id)
-                .await;
-        });
+        // Run command dispatcher
+        self.command_dispatcher(bot, chat_id).await;
 
-        let _ = tokio::join!(notification_handle, command_handle);
+        // Clean up on exit
+        super::notifier::clear_telegram_context();
     }
 
     async fn command_dispatcher(&self, bot: Bot, chat_id: ChatId) {
@@ -159,306 +156,36 @@ impl TelegramBotService {
         // Lazily clean up expired short ID mappings
         ShortIdMapping::cleanup_expired(&self.db.pool).await;
 
-        match cmd {
-            Command::Help => {
-                bot.send_message(msg.chat.id, Command::descriptions().to_string())
-                    .await?;
-            }
-            Command::Project => {
-                let response = self.list_projects().await;
-                bot.send_message(msg.chat.id, response).await?;
-            }
-            Command::List(args) => {
-                let response = self.list_tasks_for_project(args).await;
-                bot.send_message(msg.chat.id, response).await?;
-            }
+        let outcome = match cmd {
+            Command::Help => CommandOutcome::reply(Command::descriptions().to_string()),
+            Command::Project => CommandOutcome::reply(self.list_projects().await),
+            Command::List(args) => CommandOutcome::reply(self.list_tasks_for_project(args).await),
             Command::Task(task_id_raw) => {
-                let response = self.describe_task(&task_id_raw).await;
-                bot.send_message(msg.chat.id, response).await?;
+                CommandOutcome::reply(self.describe_task(&task_id_raw).await)
             }
-            Command::Add(payload) => {
-                let response = self.create_task_from_command(&payload).await;
-                bot.send_message(msg.chat.id, response).await?;
-            }
-            Command::Run(payload) => {
-                let response = self.run_task_from_command(&payload).await;
-                bot.send_message(msg.chat.id, response).await?;
-            }
-            Command::Approve(payload) => {
-                let response = self.approve_plan_from_command(&payload).await;
-                bot.send_message(msg.chat.id, response).await?;
-            }
-            Command::Reject(payload) => {
-                let response = self.reject_plan_from_command(&payload).await;
-                bot.send_message(msg.chat.id, response).await?;
-            }
+            Command::Add(payload) => match self.create_task_from_command(&payload).await {
+                Some(msg) => CommandOutcome::reply(msg),
+                None => CommandOutcome::Finished,
+            },
+            Command::Run(payload) => match self.run_task_from_command(&payload).await {
+                Some(msg) => CommandOutcome::reply(msg),
+                None => CommandOutcome::Finished,
+            },
+            Command::Approve(payload) => match self.approve_plan_from_command(&payload).await {
+                Some(msg) => CommandOutcome::reply(msg),
+                None => CommandOutcome::Finished,
+            },
+            Command::Reject(payload) => match self.reject_plan_from_command(&payload).await {
+                Some(msg) => CommandOutcome::reply(msg),
+                None => CommandOutcome::Finished,
+            },
+        };
+
+        if let CommandOutcome::WithResponse(response) = outcome {
+            bot.send_message(msg.chat.id, response).await?;
         }
 
         Ok(())
-    }
-
-    async fn notification_listener(&self, bot: Bot, chat_id: ChatId) {
-        let mut status_map = match self.load_task_statuses().await {
-            Ok(map) => map,
-            Err(e) => {
-                tracing::error!("Failed to load initial task statuses: {}", e);
-                HashMap::new()
-            }
-        };
-
-        let mut receiver = self.events_msg_store.get_receiver();
-
-        loop {
-            match receiver.recv().await {
-                Ok(LogMsg::JsonPatch(patch)) => {
-                    self.handle_task_patch(&patch.0, &bot, chat_id, &mut status_map)
-                        .await;
-                }
-                Ok(_) => {}
-                Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
-                    tracing::warn!("Telegram bot lagged on events channel (skipped {skipped})");
-                }
-                Err(tokio::sync::broadcast::error::RecvError::Closed) => {
-                    tracing::warn!("Telegram bot events channel closed");
-                    break;
-                }
-            }
-        }
-    }
-
-    async fn handle_task_patch(
-        &self,
-        operations: &[PatchOperation],
-        bot: &Bot,
-        chat_id: ChatId,
-        status_map: &mut HashMap<Uuid, TaskStatus>,
-    ) {
-        for op in operations {
-            if let Some(change) = Self::extract_task_change(op) {
-                match change {
-                    TaskChange::Upsert(task) => {
-                        self.handle_task_upsert(task, bot, chat_id, status_map)
-                            .await;
-                    }
-                    TaskChange::Delete(task_id) => {
-                        status_map.remove(&task_id);
-                    }
-                }
-                continue;
-            }
-
-            if let Some(change) = Self::extract_task_change_from_event_patch(op) {
-                match change {
-                    TaskChange::Upsert(task) => {
-                        self.handle_task_upsert(task, bot, chat_id, status_map)
-                            .await;
-                    }
-                    TaskChange::Delete(task_id) => {
-                        status_map.remove(&task_id);
-                    }
-                }
-            }
-        }
-    }
-
-    fn extract_task_change(op: &PatchOperation) -> Option<TaskChange> {
-        let path = op.path();
-        if !path.starts_with("/tasks/") {
-            return None;
-        }
-
-        match op {
-            PatchOperation::Add(add) => {
-                Self::parse_task_value(add.value.clone()).map(TaskChange::Upsert)
-            }
-            PatchOperation::Replace(replace) => {
-                Self::parse_task_value(replace.value.clone()).map(TaskChange::Upsert)
-            }
-            PatchOperation::Remove(_remove) => {
-                let task_id = path.trim_start_matches("/tasks/");
-                Self::parse_task_id(task_id).map(TaskChange::Delete)
-            }
-            _ => None,
-        }
-    }
-
-    fn extract_task_change_from_event_patch(op: &PatchOperation) -> Option<TaskChange> {
-        let event_patch_value = serde_json::to_value(op).ok()?;
-        let event_patch: EventPatch = serde_json::from_value(event_patch_value).ok()?;
-
-        match event_patch.value.record {
-            crate::services::events::types::RecordTypes::Task(task) => {
-                Some(TaskChange::Upsert(TaskWithAttemptStatus {
-                    task,
-                    has_in_progress_attempt: false,
-                    last_attempt_failed: false,
-                    executor: "".to_string(),
-                }))
-            }
-            crate::services::events::types::RecordTypes::DeletedTask { task_id, .. } => {
-                task_id.map(TaskChange::Delete)
-            }
-            _ => None,
-        }
-    }
-
-    fn parse_task_value(value: serde_json::Value) -> Option<TaskWithAttemptStatus> {
-        if let Ok(task) = serde_json::from_value::<TaskWithAttemptStatus>(value.clone()) {
-            return Some(task);
-        }
-
-        let task = serde_json::from_value::<Task>(value).ok()?;
-        Some(TaskWithAttemptStatus {
-            task,
-            has_in_progress_attempt: false,
-            last_attempt_failed: false,
-            executor: "".to_string(),
-        })
-    }
-
-    async fn handle_task_upsert(
-        &self,
-        task: TaskWithAttemptStatus,
-        bot: &Bot,
-        chat_id: ChatId,
-        status_map: &mut HashMap<Uuid, TaskStatus>,
-    ) {
-        let new_status = task.status.clone();
-        let old_status = status_map.insert(task.id, new_status.clone());
-
-        match old_status {
-            Some(old_status) if old_status != new_status => {
-                self.send_status_notification(bot, chat_id, &task, old_status, new_status)
-                    .await;
-            }
-            None if matches!(new_status, TaskStatus::InReview) => {
-                self.send_status_notification(bot, chat_id, &task, new_status.clone(), new_status)
-                    .await;
-            }
-            _ => {}
-        }
-    }
-
-    async fn send_status_notification(
-        &self,
-        bot: &Bot,
-        chat_id: ChatId,
-        task: &TaskWithAttemptStatus,
-        old_status: TaskStatus,
-        new_status: TaskStatus,
-    ) {
-        if matches!(new_status, TaskStatus::InReview) {
-            if let Some(plan_approval) = self.find_exit_plan_approval(task.id).await {
-                self.send_plan_notification(bot, chat_id, task, &plan_approval)
-                    .await;
-            } else {
-                let message = self.describe_task(&task.id.to_string()).await;
-                if let Err(err) = bot.send_message(chat_id, message).await {
-                    tracing::warn!("Failed to send telegram notification: {}", err);
-                }
-            }
-            return;
-        }
-
-        let message = format!(
-            "*Task Status Changed*\n\n*{}*\n{} -> {}",
-            escape_markdown_v2(&task.title),
-            escape_markdown_v2(&format!("{:?}", old_status)),
-            escape_markdown_v2(&format!("{:?}", new_status))
-        );
-
-        if let Err(err) = bot
-            .send_message(chat_id, message)
-            .parse_mode(ParseMode::MarkdownV2)
-            .await
-        {
-            tracing::warn!("Failed to send telegram notification: {}", err);
-        }
-    }
-
-    async fn send_plan_notification(
-        &self,
-        bot: &Bot,
-        chat_id: ChatId,
-        task: &TaskWithAttemptStatus,
-        plan_approval: &PlanApproval,
-    ) {
-        let short_id = ShortIdMapping::get_or_create(&self.db.pool, task.id)
-            .await
-            .unwrap_or_else(|_| "????".to_string());
-        let header = format!(
-            "Plan ready for review\n\n[{}] task{}\nTitle: {}\n\nCommands:\n/approve task{}\n/reject task{} [reason]",
-            short_id,
-            task.id,
-            task.title,
-            task.id,
-            task.id
-        );
-
-        if let Err(err) = bot.send_message(chat_id, header).await {
-            tracing::warn!("Failed to send telegram notification: {}", err);
-            return;
-        }
-
-        let chunks = split_text_chunks(&plan_approval.plan, TELEGRAM_MESSAGE_SAFE_LIMIT);
-        if chunks.is_empty() {
-            if let Err(err) = bot.send_message(chat_id, "Plan\n".to_string()).await {
-                tracing::warn!("Failed to send telegram plan notification: {}", err);
-            }
-            return;
-        }
-
-        let total_parts = chunks.len();
-
-        for (index, chunk) in chunks.into_iter().enumerate() {
-            let prefix = if total_parts > 1 {
-                format!("Plan (part {}/{})\n", index + 1, total_parts)
-            } else {
-                "Plan\n".to_string()
-            };
-            let message = format!("{prefix}{chunk}");
-            if let Err(err) = bot.send_message(chat_id, message).await {
-                tracing::warn!("Failed to send telegram plan notification: {}", err);
-                break;
-            }
-        }
-    }
-
-    async fn find_exit_plan_approval(&self, task_id: Uuid) -> Option<PlanApproval> {
-        for approval in self.approvals.list_pending() {
-            if approval.tool_name != EXIT_PLAN_MODE_NAME {
-                continue;
-            }
-
-            let ctx =
-                ExecutionProcess::load_context(&self.db.pool, approval.execution_process_id).await;
-            if let Ok(ctx) = ctx
-                && ctx.task.id == task_id
-            {
-                return Some(PlanApproval {
-                    approval_id: approval.id,
-                    execution_process_id: approval.execution_process_id,
-                    plan: approval.entry.content,
-                });
-            }
-        }
-
-        None
-    }
-
-    async fn load_task_statuses(&self) -> Result<HashMap<Uuid, TaskStatus>, sqlx::Error> {
-        let records = sqlx::query("SELECT id, status FROM tasks")
-            .fetch_all(&self.db.pool)
-            .await?;
-
-        let mut map = HashMap::new();
-        for record in records {
-            let id: Uuid = record.try_get("id")?;
-            let status: TaskStatus = record.try_get("status")?;
-            map.insert(id, status);
-        }
-
-        Ok(map)
     }
 
     async fn list_projects(&self) -> String {
@@ -504,7 +231,6 @@ impl TelegramBotService {
 
         let (project, warning) = match Project::find_by_name(&self.db.pool, project_name).await {
             Ok(projects) if projects.is_empty() => {
-                // Try parsing as UUID
                 match Uuid::parse_str(project_name.trim_start_matches("project")) {
                     Ok(id) => match Project::find_by_id(&self.db.pool, id).await {
                         Ok(Some(p)) => (p, None),
@@ -533,7 +259,6 @@ impl TelegramBotService {
                 Err(e) => return format!("Failed to load tasks: {e}"),
             };
 
-        // Filter tasks: if status filter provided use it, otherwise default to InReview/Done only
         let tasks: Vec<_> = tasks
             .into_iter()
             .filter(|task| {
@@ -563,7 +288,6 @@ impl TelegramBotService {
             Err(e) => return format!("Failed to load task: {e}"),
         };
 
-        // Only allow viewing tasks in InReview or Done status
         if !matches!(task.status, TaskStatus::InReview | TaskStatus::Done) {
             return format!(
                 "Task is not available for review (status: {:?}). Only InReview and Done tasks can be viewed.",
@@ -573,8 +297,7 @@ impl TelegramBotService {
 
         let project_name = match Project::find_by_id(&self.db.pool, task.project_id).await {
             Ok(Some(project)) => project.name,
-            Ok(None) => "Unknown project".to_string(),
-            Err(_) => "Unknown project".to_string(),
+            _ => "Unknown project".to_string(),
         };
 
         let description = task
@@ -596,7 +319,6 @@ impl TelegramBotService {
             truncate_text(&description, 500)
         );
 
-        // Fetch all attempts (workspaces) for this task with their status and diff stats
         if let Some(attempts_info) = self.fetch_attempts_info(task_id).await {
             if !attempts_info.is_empty() {
                 message.push_str(&format!("\n\nAttempts ({}):", attempts_info.len()));
@@ -622,7 +344,6 @@ impl TelegramBotService {
         for workspace in workspaces {
             let mut status_parts = Vec::new();
 
-            // Get executor name from the latest session
             if let Ok(Some(session)) =
                 Session::find_latest_by_workspace_id(&self.db.pool, workspace.id).await
             {
@@ -631,7 +352,6 @@ impl TelegramBotService {
                 }
             }
 
-            // Get workspace status (running/errored/idle)
             if let Ok(Some(ws_with_status)) =
                 Workspace::find_by_id_with_status(&self.db.pool, workspace.id).await
             {
@@ -648,7 +368,6 @@ impl TelegramBotService {
                 status_parts.push("archived".to_string());
             }
 
-            // Compute diff stats directly using git
             if let Some((added, removed)) = self.compute_workspace_diff_stats(&workspace).await {
                 status_parts.push(format!("+{} / -{}", added, removed));
             }
@@ -676,17 +395,15 @@ impl TelegramBotService {
             let workspace_branch = workspace.branch.clone();
             let target_branch = repo_with_branch.target_branch.clone();
 
-            // Get base commit
             let base_commit = self
                 .git
                 .get_base_commit(&repo_path, &workspace_branch, &target_branch)
                 .ok()?;
 
-            // Get diffs
             let diffs = self
                 .git
                 .get_diffs(
-                    DiffTarget::Worktree {
+                    crate::services::git::DiffTarget::Worktree {
                         worktree_path: &worktree_path,
                         base_commit: &base_commit,
                     },
@@ -703,17 +420,17 @@ impl TelegramBotService {
         Some((total_added, total_removed))
     }
 
-    async fn create_task_from_command(&self, payload: &str) -> String {
+    async fn create_task_from_command(&self, payload: &str) -> Option<String> {
         let lines: Vec<&str> = payload.lines().collect();
         if lines.len() < 2 {
-            return "Usage: /add [project_name]\\n[title]\\n[description]".to_string();
+            return Some("Usage: /add [project_name]\\n[title]\\n[description]".to_string());
         }
 
         let project_name = lines[0].trim();
         let title = lines[1].trim();
 
         if project_name.is_empty() || title.is_empty() {
-            return "Project name and title are required.".to_string();
+            return Some("Project name and title are required.".to_string());
         }
 
         let description = if lines.len() > 2 {
@@ -730,14 +447,19 @@ impl TelegramBotService {
 
         let (project, warning) = match Project::find_by_name(&self.db.pool, project_name).await {
             Ok(projects) if projects.is_empty() => {
-                // Try parsing as UUID
                 match Uuid::parse_str(project_name.trim_start_matches("project")) {
                     Ok(id) => match Project::find_by_id(&self.db.pool, id).await {
                         Ok(Some(p)) => (p, None),
-                        Ok(None) => return format!("Project not found: {project_name}"),
-                        Err(e) => return format!("Failed to load project: {e}"),
+                        Ok(None) => {
+                            return Some(format!("Project not found: {project_name}"));
+                        }
+                        Err(e) => {
+                            return Some(format!("Failed to load project: {e}"));
+                        }
                     },
-                    Err(_) => return format!("Project not found: {project_name}"),
+                    Err(_) => {
+                        return Some(format!("Project not found: {project_name}"));
+                    }
                 }
             }
             Ok(projects) if projects.len() > 1 => {
@@ -750,40 +472,37 @@ impl TelegramBotService {
                 (projects.into_iter().next().unwrap(), Some(msg))
             }
             Ok(mut projects) => (projects.remove(0), None),
-            Err(e) => return format!("Failed to load project: {e}"),
+            Err(e) => return Some(format!("Failed to load project: {e}")),
         };
 
         let task_id = Uuid::new_v4();
-        let task = match Task::create(
+        match Task::create(
             &self.db.pool,
             &CreateTask::from_title_description(project.id, title.to_string(), description),
             task_id,
         )
         .await
         {
-            Ok(task) => task,
-            Err(e) => return format!("Failed to create task: {e}"),
-        };
-
-        let short_id = ShortIdMapping::get_or_create(&self.db.pool, task.id)
-            .await
-            .unwrap_or_else(|_| "????".to_string());
-
-        let mut result = format!("Created [{}] task{}", short_id, task.id);
-        if let Some(warn) = warning {
-            result = format!("{warn}\n\n{result}");
+            Ok(_task) => {
+                if let Some(warn) = warning {
+                    tracing::warn!("{warn}");
+                }
+                return None;
+            }
+            Err(e) => {
+                return Some(format!("Failed to create task: {e}"));
+            }
         }
-        result
     }
 
-    async fn run_task_from_command(&self, payload: &str) -> String {
+    async fn run_task_from_command(&self, payload: &str) -> Option<String> {
         let parts: Vec<&str> = payload.split_whitespace().collect();
         if parts.is_empty() {
-            return "Usage: /run task<uuid> [executor] [mode] [branch]".to_string();
+            return Some("Usage: /run task<uuid> [executor] [mode] [branch]".to_string());
         }
 
         let Some(task_id) = self.resolve_task_id(parts[0]).await else {
-            return "Invalid task id. Expected short code, task<uuid>, or uuid.".to_string();
+            return Some("Invalid task id. Expected short code, task<uuid>, or uuid.".to_string());
         };
 
         let config = self.config.read().await.telegram.clone();
@@ -793,7 +512,7 @@ impl TelegramBotService {
 
         let executor = match parse_executor(executor_raw) {
             Ok(executor) => executor,
-            Err(message) => return message,
+            Err(message) => return Some(message),
         };
 
         let variant = mode_raw.map(|raw| canonical_variant_key(raw));
@@ -809,18 +528,18 @@ impl TelegramBotService {
 
         let task = match Task::find_by_id(&self.db.pool, task_id).await {
             Ok(Some(task)) => task,
-            Ok(None) => return format!("Task not found: task{task_id}"),
-            Err(e) => return format!("Failed to load task: {e}"),
+            Ok(None) => return Some(format!("Task not found: task{task_id}")),
+            Err(e) => return Some(format!("Failed to load task: {e}")),
         };
 
         let repos = match ProjectRepo::find_repos_for_project(&self.db.pool, task.project_id).await
         {
             Ok(repos) => repos,
-            Err(e) => return format!("Failed to load project repos: {e}"),
+            Err(e) => return Some(format!("Failed to load project repos: {e}")),
         };
 
         if repos.is_empty() {
-            return "Project has no repositories configured.".to_string();
+            return Some("Project has no repositories configured.".to_string());
         }
 
         let base_branch = if branch_override.is_none() {
@@ -844,14 +563,17 @@ impl TelegramBotService {
                     Ok(branches) => match select_target_branch(&branches, base_branch.as_deref()) {
                         Some(branch) => branch,
                         None => {
-                            return format!(
+                            return Some(format!(
                                 "No branches found for {}. Provide a branch with /run.",
                                 repo.display_name
-                            );
+                            ));
                         }
                     },
                     Err(e) => {
-                        return format!("Failed to load branches for {}: {e}", repo.display_name);
+                        return Some(format!(
+                            "Failed to load branches for {}: {e}",
+                            repo.display_name
+                        ));
                     }
                 },
             };
@@ -864,7 +586,7 @@ impl TelegramBotService {
 
         let base_url = match api_base_url().await {
             Ok(base_url) => base_url,
-            Err(e) => return format!("Failed to locate API server: {e}"),
+            Err(e) => return Some(format!("Failed to locate API server: {e}")),
         };
 
         let request = CreateTaskAttemptBody {
@@ -881,12 +603,12 @@ impl TelegramBotService {
             .await
         {
             Ok(response) => response,
-            Err(e) => return format!("Failed to start task: {e}"),
+            Err(e) => return Some(format!("Failed to start task: {e}")),
         };
 
         let api_response: ApiResponse<Workspace> = match response.json().await {
             Ok(response) => response,
-            Err(e) => return format!("Failed to parse task attempt response: {e}"),
+            Err(e) => return Some(format!("Failed to parse task attempt response: {e}")),
         };
 
         let error_message = api_response.message().map(String::from);
@@ -895,27 +617,31 @@ impl TelegramBotService {
                 let short_id = ShortIdMapping::get_or_create(&self.db.pool, task_id)
                     .await
                     .unwrap_or_else(|_| "????".to_string());
-                format!(
+                return Some(format!(
                     "Started [{}] task{} in workspace{} on branch {}",
                     short_id, task_id, workspace.id, workspace.branch
-                )
+                ));
             }
-            None => error_message.unwrap_or_else(|| "Failed to start task attempt.".to_string()),
+            None => {
+                return Some(
+                    error_message.unwrap_or_else(|| "Failed to start task attempt.".to_string()),
+                );
+            }
         }
     }
 
-    async fn approve_plan_from_command(&self, payload: &str) -> String {
+    async fn approve_plan_from_command(&self, payload: &str) -> Option<String> {
         let parts: Vec<&str> = payload.split_whitespace().collect();
         if parts.is_empty() {
-            return "Usage: /approve <task_id>".to_string();
+            return Some("Usage: /approve <task_id>".to_string());
         }
 
         let Some(task_id) = self.resolve_task_id(parts[0]).await else {
-            return "Invalid task id. Expected short code, task<uuid>, or uuid.".to_string();
+            return Some("Invalid task id. Expected short code, task<uuid>, or uuid.".to_string());
         };
 
         let Some(plan_approval) = self.find_exit_plan_approval(task_id).await else {
-            return format!("No pending plan approval found for task{task_id}.");
+            return Some(format!("No pending plan approval found for task{task_id}."));
         };
 
         let response = self
@@ -931,38 +657,33 @@ impl TelegramBotService {
             .await;
 
         match response {
-            Ok(_) => self
-                .describe_plan_subtask(plan_approval.execution_process_id)
-                .await,
-            Err(e) => format!("Failed to approve plan: {e}"),
+            Ok(_) => None,
+            Err(e) => Some(format!("Failed to approve plan: {e}")),
         }
     }
 
-    async fn reject_plan_from_command(&self, payload: &str) -> String {
+    async fn reject_plan_from_command(&self, payload: &str) -> Option<String> {
         let parts: Vec<&str> = payload.split_whitespace().collect();
         if parts.is_empty() {
-            return "Usage: /reject <task_id> [reason]".to_string();
+            return Some("Usage: /reject <task_id> [reason]".to_string());
         }
 
         let Some(task_id) = self.resolve_task_id(parts[0]).await else {
-            return "Invalid task id. Expected short code, task<uuid>, or uuid.".to_string();
+            return Some("Invalid task id. Expected short code, task<uuid>, or uuid.".to_string());
         };
 
         let Some(plan_approval) = self.find_exit_plan_approval(task_id).await else {
-            return format!("No pending plan approval found for task{task_id}.");
+            return Some(format!("No pending plan approval found for task{task_id}."));
         };
 
-        let reason = parts
-            .get(1..)
-            .map(|rest| rest.join(" "))
-            .and_then(|text| {
-                let trimmed = text.trim();
-                if trimmed.is_empty() {
-                    None
-                } else {
-                    Some(trimmed.to_string())
-                }
-            });
+        let reason = parts.get(1..).map(|rest| rest.join(" ")).and_then(|text| {
+            let trimmed = text.trim();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed.to_string())
+            }
+        });
 
         let response = self
             .approvals
@@ -971,63 +692,45 @@ impl TelegramBotService {
                 &plan_approval.approval_id,
                 ApprovalResponse {
                     execution_process_id: plan_approval.execution_process_id,
-                    status: ApprovalStatus::Denied { reason: reason.clone() },
+                    status: ApprovalStatus::Denied {
+                        reason: reason.clone(),
+                    },
                 },
             )
             .await;
 
         match response {
-            Ok(_) => {
-                let short_id = ShortIdMapping::get_or_create(&self.db.pool, task_id)
-                    .await
-                    .unwrap_or_else(|_| "????".to_string());
-                if let Some(reason) = reason {
-                    format!("Rejected plan for [{}] task{}: {}", short_id, task_id, reason)
-                } else {
-                    format!("Rejected plan for [{}] task{}", short_id, task_id)
-                }
-            }
-            Err(e) => format!("Failed to reject plan: {e}"),
+            Ok(_) => None,
+            Err(e) => Some(format!("Failed to reject plan: {e}")),
         }
     }
 
-    async fn describe_plan_subtask(&self, execution_process_id: Uuid) -> String {
-        let ctx =
-            match ExecutionProcess::load_context(&self.db.pool, execution_process_id).await {
-                Ok(ctx) => ctx,
-                Err(e) => {
-                    return format!(
-                        "Plan approved, but failed to load execution context: {e}"
-                    );
-                }
-            };
-
-        match Task::find_children_by_workspace_id(&self.db.pool, ctx.workspace.id).await {
-            Ok(children) if !children.is_empty() => {
-                let child = &children[0];
-                let short_id = ShortIdMapping::get_or_create(&self.db.pool, child.id)
-                    .await
-                    .unwrap_or_else(|_| "????".to_string());
-                format!("Created [{}] task{}", short_id, child.id)
+    async fn find_exit_plan_approval(&self, task_id: Uuid) -> Option<PlanApproval> {
+        for approval in self.approvals.list_pending() {
+            if approval.tool_name != EXIT_PLAN_MODE_NAME {
+                continue;
             }
-            Ok(_) => "Plan approved, but no subtask was created.".to_string(),
-            Err(e) => format!("Plan approved, but failed to load subtask: {e}"),
-        }
-    }
 
-    fn parse_task_id(raw: &str) -> Option<Uuid> {
-        let trimmed = raw.trim();
-        let trimmed = trimmed.strip_prefix("task").unwrap_or(trimmed);
-        Uuid::parse_str(trimmed).ok()
+            let ctx =
+                ExecutionProcess::load_context(&self.db.pool, approval.execution_process_id).await;
+            if let Ok(ctx) = ctx
+                && ctx.task.id == task_id
+            {
+                return Some(PlanApproval {
+                    approval_id: approval.id,
+                    execution_process_id: approval.execution_process_id,
+                });
+            }
+        }
+
+        None
     }
 
     async fn resolve_task_id(&self, raw: &str) -> Option<Uuid> {
         let trimmed = raw.trim();
-        // Try UUID first (with optional "task" prefix)
-        if let Some(uuid) = Self::parse_task_id(trimmed) {
+        if let Some(uuid) = parse_task_id(trimmed) {
             return Some(uuid);
         }
-        // Try short_id resolution
         ShortIdMapping::resolve(&self.db.pool, trimmed).await
     }
 }
@@ -1038,23 +741,26 @@ impl Clone for TelegramBotService {
             db: self.db.clone(),
             git: self.git.clone(),
             config: self.config.clone(),
-            events_msg_store: self.events_msg_store.clone(),
             approvals: self.approvals.clone(),
+            task_state: self.task_state.clone(),
         }
     }
 }
 
-#[derive(Clone, Debug)]
-enum TaskChange {
-    Upsert(TaskWithAttemptStatus),
-    Delete(Uuid),
-}
-
-#[derive(Clone, Debug)]
 struct PlanApproval {
     approval_id: String,
     execution_process_id: Uuid,
-    plan: String,
+}
+
+enum CommandOutcome {
+    WithResponse(String),
+    Finished,
+}
+
+impl CommandOutcome {
+    fn reply(message: impl Into<String>) -> Self {
+        Self::WithResponse(message.into())
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -1111,6 +817,12 @@ fn parse_task_status(raw: &str) -> Option<TaskStatus> {
     TaskStatus::from_str(&normalized).ok()
 }
 
+fn parse_task_id(raw: &str) -> Option<Uuid> {
+    let trimmed = raw.trim();
+    let trimmed = trimmed.strip_prefix("task").unwrap_or(trimmed);
+    Uuid::parse_str(trimmed).ok()
+}
+
 fn parse_executor(raw: &str) -> Result<BaseCodingAgent, String> {
     let normalized = raw.trim().replace('-', "_").to_ascii_uppercase();
     BaseCodingAgent::from_str(&normalized).map_err(|_| format!("Unknown executor: {raw}"))
@@ -1138,47 +850,6 @@ fn truncate_text(input: &str, limit: usize) -> String {
     } else {
         truncated
     }
-}
-
-fn escape_markdown_v2(input: &str) -> String {
-    let mut escaped = String::with_capacity(input.len());
-    for ch in input.chars() {
-        match ch {
-            '\\' | '_' | '*' | '[' | ']' | '(' | ')' | '~' | '`' | '>' | '#' | '+' | '-' | '='
-            | '|' | '{' | '}' | '.' | '!' => {
-                escaped.push('\\');
-                escaped.push(ch);
-            }
-            _ => escaped.push(ch),
-        }
-    }
-    escaped
-}
-
-fn split_text_chunks(input: &str, limit: usize) -> Vec<String> {
-    if limit == 0 {
-        return vec![input.to_string()];
-    }
-
-    let mut chunks = Vec::new();
-    let mut current = String::new();
-    let mut count = 0usize;
-
-    for ch in input.chars() {
-        if count >= limit {
-            chunks.push(current);
-            current = String::new();
-            count = 0;
-        }
-        current.push(ch);
-        count += 1;
-    }
-
-    if !current.is_empty() {
-        chunks.push(current);
-    }
-
-    chunks
 }
 
 async fn api_base_url() -> Result<String, std::io::Error> {

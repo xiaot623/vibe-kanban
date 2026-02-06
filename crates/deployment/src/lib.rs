@@ -31,7 +31,7 @@ use services::services::{
     project::ProjectService,
     queued_message::QueuedMessageService,
     repo::RepoService,
-    telegram_bot::TelegramBotService,
+    telegram::bot::TelegramBotService,
     worktree_manager::WorktreeError,
 };
 use sqlx::Error as SqlxError;
@@ -135,7 +135,6 @@ pub trait Deployment: Clone + Send + Sync + 'static {
             self.db().clone(),
             self.git().clone(),
             self.config().clone(),
-            self.events().msg_store().clone(),
             self.approvals().clone(),
         )
         .await

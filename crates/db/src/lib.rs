@@ -8,6 +8,7 @@ use sqlx::{
 use utils::assets::asset_dir;
 
 pub mod models;
+pub mod task_state;
 
 async fn run_migrations(pool: &Pool<Sqlite>) -> Result<(), Error> {
     use std::collections::HashSet;

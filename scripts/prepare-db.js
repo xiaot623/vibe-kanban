@@ -1,48 +1,93 @@
 #!/usr/bin/env node
 
-const { execSync } = require('child_process');
+const { spawn } = require('child_process');
 const fs = require('fs');
 const path = require('path');
 
 const checkMode = process.argv.includes('--check');
+const debugMode = process.argv.includes('--debug') || process.env.DEBUG_SQLX;
 
-console.log(checkMode ? 'Checking SQLx prepared queries...' : 'Preparing database for SQLx...');
+function log(...args) {
+  const timestamp = new Date().toISOString();
+  console.log(`[${timestamp}]`, ...args);
+}
 
-// Change to backend directory
-const backendDir = path.join(__dirname, '..', 'crates/db');
-process.chdir(backendDir);
+function runCommand(command, args, env) {
+  return new Promise((resolve, reject) => {
+    log(`Starting: ${command} ${args.join(' ')}`);
+    log(`Working directory: ${process.cwd()}`);
+    log(`DATABASE_URL: ${env.DATABASE_URL}`);
 
-// Create temporary database file
-const dbFile = path.join(backendDir, 'prepare_db.sqlite');
-fs.writeFileSync(dbFile, '');
+    const child = spawn(command, args, {
+      env: { ...process.env, ...env },
+      stdio: 'inherit', // 始终使用 inherit 以便看到所有输出
+    });
 
-try {
-  // Get absolute path (cross-platform)
-  const dbPath = path.resolve(dbFile);
-  const databaseUrl = `sqlite:${dbPath}`;
+    // 10分钟超时
+    const timeout = setTimeout(() => {
+      log('ERROR: Command timed out after 10 minutes!');
+      child.kill('SIGTERM');
+      setTimeout(() => child.kill('SIGKILL'), 5000);
+    }, 10 * 60 * 1000);
 
-  console.log(`Using database: ${databaseUrl}`);
+    child.on('close', (code) => {
+      clearTimeout(timeout);
+      log(`Command exited with code: ${code}`);
 
-  // Run migrations
-  console.log('Running migrations...');
-  execSync('cargo sqlx migrate run', {
-    stdio: 'inherit',
-    env: { ...process.env, DATABASE_URL: databaseUrl }
+      if (code === 0) {
+        resolve();
+      } else {
+        reject(new Error(`Command failed with code ${code}`));
+      }
+    });
+
+    child.on('error', (err) => {
+      clearTimeout(timeout);
+      log('Command error:', err.message);
+      reject(err);
+    });
   });
+}
 
-  // Prepare queries
-  const sqlxCommand = checkMode ? 'cargo sqlx prepare --check' : 'cargo sqlx prepare';
-  console.log(checkMode ? 'Checking prepared queries...' : 'Preparing queries...');
-  execSync(sqlxCommand, {
-    stdio: 'inherit',
-    env: { ...process.env, DATABASE_URL: databaseUrl }
-  });
+async function main() {
+  log(checkMode ? 'Checking SQLx prepared queries...' : 'Preparing database for SQLx...');
 
-  console.log(checkMode ? 'SQLx check complete!' : 'Database preparation complete!');
+  // Change to backend directory
+  const backendDir = path.join(__dirname, '..', 'crates/db');
+  process.chdir(backendDir);
 
-} finally {
-  // Clean up temporary file
-  if (fs.existsSync(dbFile)) {
-    fs.unlinkSync(dbFile);
+  // Create temporary database file
+  const dbFile = path.join(backendDir, 'prepare_db.sqlite');
+  fs.writeFileSync(dbFile, '');
+
+  try {
+    // Get absolute path (cross-platform)
+    const dbPath = path.resolve(dbFile);
+    const databaseUrl = `sqlite:${dbPath}`;
+
+    log(`Using database: ${databaseUrl}`);
+
+    // Run migrations
+    log('Running migrations...');
+    await runCommand('cargo', ['sqlx', 'migrate', 'run'], { DATABASE_URL: databaseUrl });
+
+    // Prepare queries
+    log('Preparing queries (this may take several minutes)...');
+    const sqlxArgs = checkMode ? ['sqlx', 'prepare', '--check'] : ['sqlx', 'prepare'];
+    await runCommand('cargo', sqlxArgs, { DATABASE_URL: databaseUrl });
+
+    log(checkMode ? 'SQLx check complete!' : 'Database preparation complete!');
+
+  } finally {
+    // Clean up temporary file
+    if (fs.existsSync(dbFile)) {
+      log('Cleaning up temporary database file...');
+      fs.unlinkSync(dbFile);
+    }
   }
 }
+
+main().catch(err => {
+  log('Error:', err.message);
+  process.exit(1);
+});
