@@ -104,10 +104,6 @@ impl<H: TelegramHandler> TelegramHandlerWrapper<H> {
     {
         let handler = fn_handler(H::name(), H::filter(), |_, transition| {
             Box::pin(async move {
-                if transition.from_status().is_none() {
-                    return;
-                }
-
                 let Some(tg) = get_context().await else {
                     return;
                 };
