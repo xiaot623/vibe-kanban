@@ -4,7 +4,16 @@
 
 > currently only test for **local environment on macOS**
 
-## RoadMap
+## To Install
+1. Double-click the .dmg to mount it
+2. Drag Vibe Kanban.app to /Applications
+3. Before opening, run this in Terminal to clear the quarantine flag
+    ```bash
+    xattr -cr /Applications/Vibe\ Kanban.app
+    ```
+4. Now you can open the app normally
+
+## Stage One: feature for local environment `Local Version`
 - [x] using agent cli in system path rather than npx
 - [x] add start port configure by using "--port" flag
 - [x] add proxy configure from web config && passthrough the running proxy to the agent cli
@@ -28,3 +37,9 @@
 ## remove
 - [x] beta_new_workspace(Just follow the state of your vibe-coding project, pure implementation)
 - [x] remote collaboration feature(local first, run the executor remote will be implemented in the several weeks)
+
+## Stage Two: feature for remote environment `Remote Version`
+- [ ] todo
+
+## Stage Three: feature for cloud native environment `Distributed Version`
+- [ ] todo
