@@ -344,6 +344,18 @@ ORDER BY t.created_at DESC"#,
         Ok(result.rows_affected())
     }
 
+    /// Check if there are any tasks with InProgress status.
+    pub async fn has_in_progress_tasks(pool: &SqlitePool) -> Result<bool, sqlx::Error> {
+        let count: i64 = sqlx::query_scalar!(
+            r#"SELECT COUNT(*) as "count!: i64"
+               FROM tasks
+               WHERE status = 'inprogress'"#
+        )
+        .fetch_one(pool)
+        .await?;
+        Ok(count > 0)
+    }
+
     pub async fn find_children_by_workspace_id(
         pool: &SqlitePool,
         workspace_id: Uuid,

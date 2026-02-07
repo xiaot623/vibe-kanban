@@ -2,6 +2,13 @@
 
 use std::{net::Ipv4Addr, sync::Arc, time::Duration};
 
+use db::{
+    models::task::{Task, TaskStatus},
+    task_state::{
+        dispatcher::shared_dispatcher,
+        handler::{fn_handler, TransitionFilter},
+    },
+};
 use deployment::Deployment;
 use nosleep::{NoSleep, NoSleepType};
 use server::{
@@ -120,7 +127,17 @@ pub async fn start_embedded_server(app_handle: &tauri::AppHandle) -> anyhow::Res
     spawn_local_network_watcher(deployment.clone(), lan_state);
 
     // Initialize keep-awake state
-    let initial_power_mode = deployment.config().read().await.power_mode;
+    let initial_power_mode = {
+        let config_mode = deployment.config().read().await.power_mode;
+        if config_mode != PowerMode::SystemDefault {
+            config_mode
+        } else {
+            match Task::has_in_progress_tasks(&deployment.db().pool).await {
+                Ok(true) => PowerMode::KeepAwake,
+                _ => PowerMode::SystemDefault,
+            }
+        }
+    };
     let keep_awake_state = Arc::new(Mutex::new(KeepAwakeState::new()));
     {
         let mut state = keep_awake_state.lock().await;
@@ -128,7 +145,7 @@ pub async fn start_embedded_server(app_handle: &tauri::AppHandle) -> anyhow::Res
             tracing::warn!("Failed to apply initial power mode: {}", err);
         }
     }
-    spawn_keep_awake_watcher(deployment.clone(), keep_awake_state);
+    register_keep_awake_handlers(deployment.clone(), keep_awake_state).await;
 
     // Store deployment for cleanup on exit
     app_handle.manage(Arc::new(Mutex::new(Some(deployment))));
@@ -295,18 +312,74 @@ fn spawn_local_network_watcher(deployment: DeploymentImpl, lan_state: Arc<Mutex<
     });
 }
 
-fn spawn_keep_awake_watcher(deployment: DeploymentImpl, state: Arc<Mutex<KeepAwakeState>>) {
-    tauri::async_runtime::spawn(async move {
-        let mut interval = tokio::time::interval(Duration::from_secs(2));
-        loop {
-            interval.tick().await;
-            let config_mode = deployment.config().read().await.power_mode;
-            let mut state = state.lock().await;
-            if config_mode != state.current_mode {
-                if let Err(err) = state.apply_mode(config_mode) {
-                    tracing::error!("Failed to apply power mode: {}", err);
-                }
-            }
-        }
-    });
+async fn register_keep_awake_handlers(
+    deployment: DeploymentImpl,
+    state: Arc<Mutex<KeepAwakeState>>,
+) {
+    let dispatcher = shared_dispatcher();
+
+    {
+        let state = state.clone();
+        let deployment = deployment.clone();
+        let handler = fn_handler(
+            "KeepAwakeOnStart",
+            TransitionFilter::new().to(vec![TaskStatus::InProgress]),
+            move |_ctx, _transition| {
+                let state = state.clone();
+                let deployment = deployment.clone();
+                Box::pin(async move {
+                    let config_mode = deployment.config().read().await.power_mode;
+                    if config_mode != PowerMode::SystemDefault {
+                        return;
+                    }
+
+                    let mut state = state.lock().await;
+                    if let Err(err) = state.apply_mode(PowerMode::KeepAwake) {
+                        tracing::error!("Failed to enable keep-awake: {}", err);
+                    }
+                })
+            },
+        );
+        dispatcher.register_handler(handler).await;
+    }
+
+    {
+        let handler = fn_handler(
+            "KeepAwakeOnFinish",
+            TransitionFilter::new()
+                .from(vec![TaskStatus::InProgress])
+                .to(vec![
+                    TaskStatus::Todo,
+                    TaskStatus::InReview,
+                    TaskStatus::Done,
+                    TaskStatus::Cancelled,
+                ]),
+            move |ctx, _transition| {
+                let state = state.clone();
+                let deployment = deployment.clone();
+                Box::pin(async move {
+                    let config_mode = deployment.config().read().await.power_mode;
+                    if config_mode != PowerMode::SystemDefault {
+                        return;
+                    }
+
+                    let has_running = match Task::has_in_progress_tasks(&ctx.pool).await {
+                        Ok(v) => v,
+                        Err(err) => {
+                            tracing::warn!("Failed to check in-progress tasks: {}", err);
+                            return;
+                        }
+                    };
+
+                    if !has_running {
+                        let mut state = state.lock().await;
+                        if let Err(err) = state.apply_mode(PowerMode::SystemDefault) {
+                            tracing::error!("Failed to disable keep-awake: {}", err);
+                        }
+                    }
+                })
+            },
+        );
+        dispatcher.register_handler(handler).await;
+    }
 }
