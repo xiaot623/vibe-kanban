@@ -204,6 +204,12 @@
           "label": "默认执行器",
           "placeholder": "选择执行器",
           "helper": "/run 未指定时使用的执行器。"
+        },
+        "defaultMode": {
+          "label": "默认模式",
+          "defaultLabel": "DEFAULT",
+          "placeholder": "选择模式",
+          "helper": "telegram bot 执行 executor 使用的默认模式。"
         }
       },
       "privacy": {

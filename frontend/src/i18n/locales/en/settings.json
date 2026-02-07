@@ -204,6 +204,12 @@
           "label": "Default Executor",
           "placeholder": "Select executor",
           "helper": "Executor used when /run doesn't specify one."
+        },
+        "defaultMode": {
+          "label": "Default Mode",
+          "defaultLabel": "Default",
+          "placeholder": "Select mode",
+          "helper": "Mode used when /run doesn't specify one."
         }
       },
       "privacy": {

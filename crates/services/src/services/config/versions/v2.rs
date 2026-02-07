@@ -25,10 +25,16 @@ pub struct TelegramConfig {
     pub chat_id: Option<i64>,
     #[serde(default = "default_telegram_executor")]
     pub default_executor: String,
+    #[serde(default = "default_telegram_mode")]
+    pub default_mode: String,
 }
 
 fn default_telegram_executor() -> String {
     "CLAUDE_CODE".to_string()
+}
+
+fn default_telegram_mode() -> String {
+    "DEFAULT".to_string()
 }
 
 impl Default for TelegramConfig {
@@ -38,6 +44,7 @@ impl Default for TelegramConfig {
             bot_token: None,
             chat_id: None,
             default_executor: default_telegram_executor(),
+            default_mode: default_telegram_mode(),
         }
     }
 }

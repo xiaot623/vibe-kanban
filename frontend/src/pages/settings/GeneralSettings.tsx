@@ -161,6 +161,16 @@ export function GeneralSettings() {
     return null;
   }, [draft, t]);
 
+  const telegramModeOptions = useMemo(() => {
+    const executor = draft?.telegram?.default_executor;
+    if (!profiles || !executor) return [];
+    const variants = profiles[executor];
+    if (!variants) return [];
+    return Object.keys(variants)
+      .filter((variant) => variant !== 'DEFAULT')
+      .sort((a, b) => a.localeCompare(b));
+  }, [draft?.telegram?.default_executor, profiles]);
+
   const handleSave = async () => {
     if (!draft) return;
 
@@ -1048,14 +1058,26 @@ export function GeneralSettings() {
                 {profiles ? (
                   <Select
                     value={draft?.telegram?.default_executor ?? ''}
-                    onValueChange={(value: string) =>
+                    onValueChange={(value: string) => {
+                      const currentMode =
+                        draft?.telegram?.default_mode ?? 'DEFAULT';
+                      let nextMode = currentMode;
+                      const variants = profiles?.[value];
+                      if (
+                        variants &&
+                        currentMode !== 'DEFAULT' &&
+                        !variants[currentMode]
+                      ) {
+                        nextMode = 'DEFAULT';
+                      }
                       updateDraft({
                         telegram: {
                           ...draft!.telegram,
                           default_executor: value,
+                          default_mode: nextMode,
                         },
-                      })
-                    }
+                      });
+                    }}
                   >
                     <SelectTrigger id="telegram-default-executor">
                       <SelectValue
@@ -1093,6 +1115,62 @@ export function GeneralSettings() {
                 )}
                 <p className="text-sm text-muted-foreground">
                   {t('settings.general.telegram.defaultExecutor.helper')}
+                </p>
+              </div>
+
+              <div className="ml-6 space-y-2">
+                <Label htmlFor="telegram-default-mode">
+                  {t('settings.general.telegram.defaultMode.label')}
+                </Label>
+                {profiles ? (
+                  <Select
+                    value={draft?.telegram?.default_mode ?? 'DEFAULT'}
+                    onValueChange={(value: string) =>
+                      updateDraft({
+                        telegram: {
+                          ...draft!.telegram,
+                          default_mode: value,
+                        },
+                      })
+                    }
+                  >
+                    <SelectTrigger id="telegram-default-mode">
+                      <SelectValue
+                        placeholder={t(
+                          'settings.general.telegram.defaultMode.placeholder'
+                        )}
+                      />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="DEFAULT">
+                        {t('settings.general.telegram.defaultMode.defaultLabel')}
+                      </SelectItem>
+                      {telegramModeOptions.map((mode) => (
+                        <SelectItem key={mode} value={mode}>
+                          {mode}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                ) : (
+                  <Input
+                    id="telegram-default-mode"
+                    value={draft?.telegram?.default_mode ?? ''}
+                    onChange={(e) =>
+                      updateDraft({
+                        telegram: {
+                          ...draft!.telegram,
+                          default_mode: e.target.value,
+                        },
+                      })
+                    }
+                    placeholder={t(
+                      'settings.general.telegram.defaultMode.placeholder'
+                    )}
+                  />
+                )}
+                <p className="text-sm text-muted-foreground">
+                  {t('settings.general.telegram.defaultMode.helper')}
                 </p>
               </div>
             </>

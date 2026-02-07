@@ -334,7 +334,7 @@ export type ShowcaseState = { seen_features: Array<string>, };
 
 export type ProxyConfig = { http_proxy: string | null, https_proxy: string | null, no_proxy: string | null, };
 
-export type TelegramConfig = { enabled: boolean, bot_token: string | null, chat_id: bigint | null, default_executor: string, };
+export type TelegramConfig = { enabled: boolean, bot_token: string | null, chat_id: bigint | null, default_executor: string, default_mode: string, };
 
 export type GitBranch = { name: string, is_current: boolean, is_remote: boolean, last_commit_date: Date, };
 

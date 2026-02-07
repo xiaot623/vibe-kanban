@@ -49,7 +49,8 @@
     "enabled": false,
     "bot_token": null,
     "chat_id": null,
-    "default_executor": "CLAUDE_CODE"
+    "default_executor": "CLAUDE_CODE",
+    "default_mode": "DEFAULT"
   },
   "power_mode": "SYSTEM_DEFAULT"
 }

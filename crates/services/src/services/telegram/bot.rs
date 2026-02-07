@@ -507,8 +507,21 @@ impl TelegramBotService {
         };
 
         let config = self.config.read().await.telegram.clone();
-        let executor_raw = parts.get(1).copied().unwrap_or(&config.default_executor);
-        let mode_raw = parts.get(2).copied();
+        let executor_arg = parts.get(1).copied();
+        let executor_raw = executor_arg.unwrap_or(&config.default_executor);
+        let use_default_mode = executor_arg.is_none()
+            || executor_raw.eq_ignore_ascii_case(&config.default_executor);
+        let mode_raw = parts.get(2).copied().or_else(|| {
+            if !use_default_mode {
+                return None;
+            }
+            let trimmed = config.default_mode.trim();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed)
+            }
+        });
         let branch_override = parts.get(3).map(|value| value.to_string());
 
         let executor = match parse_executor(executor_raw) {
