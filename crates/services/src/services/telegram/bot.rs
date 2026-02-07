@@ -820,7 +820,23 @@ fn parse_task_id(raw: &str) -> Option<Uuid> {
 
 fn parse_executor(raw: &str) -> Result<BaseCodingAgent, String> {
     let normalized = raw.trim().replace('-', "_").to_ascii_uppercase();
-    BaseCodingAgent::from_str(&normalized).map_err(|_| format!("Unknown executor: {raw}"))
+
+    // Try exact match first
+    if let Ok(executor) = BaseCodingAgent::from_str(&normalized) {
+        return Ok(executor);
+    }
+
+    // Try shorthand aliases
+    let alias_match = match normalized.as_str() {
+        "CLAUDE" | "CLAUDECODE" => Some(BaseCodingAgent::ClaudeCode),
+        "GEMINI" => Some(BaseCodingAgent::Gemini),
+        "CODEX" => Some(BaseCodingAgent::Codex),
+        "OPENCODE" => Some(BaseCodingAgent::Opencode),
+        "DROID" => Some(BaseCodingAgent::Droid),
+        _ => None,
+    };
+
+    alias_match.ok_or_else(|| format!("Unknown executor: {raw}"))
 }
 
 fn select_target_branch(branches: &[GitBranch], base_branch: Option<&str>) -> Option<String> {
