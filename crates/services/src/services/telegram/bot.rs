@@ -12,7 +12,7 @@ use db::{
         project_repo::ProjectRepo,
         session::Session,
         short_id_mapping::ShortIdMapping,
-        task::{CreateTask, Task, TaskStatus, TaskWithAttemptStatus},
+        task::{CreateTask, Task, TaskStatus, TaskWithAttemptStatus, UpdateTask},
         workspace::Workspace,
         workspace_repo::WorkspaceRepo,
     },
@@ -51,6 +51,8 @@ pub enum Command {
     Task(String),
     #[command(description = "/add <project>\\n<title>\\n<description>")]
     Add(String),
+    #[command(description = "/edit <task_id>\\n<title>\\n<description>")]
+    Edit(String),
     #[command(description = "/run <uuid> [executor] [mode] [branch]")]
     Run(String),
     #[command(description = "/approve <task_id>")]
@@ -168,6 +170,9 @@ impl TelegramBotService {
                 Some(msg) => CommandOutcome::reply(msg),
                 None => CommandOutcome::Finished,
             },
+            Command::Edit(payload) => {
+                CommandOutcome::reply(self.edit_task_from_command(&payload).await)
+            }
             Command::Run(payload) => match self.run_task_from_command(&payload).await {
                 Some(msg) => CommandOutcome::reply(msg),
                 None => CommandOutcome::Finished,
@@ -509,8 +514,8 @@ impl TelegramBotService {
         let config = self.config.read().await.telegram.clone();
         let executor_arg = parts.get(1).copied();
         let executor_raw = executor_arg.unwrap_or(&config.default_executor);
-        let use_default_mode = executor_arg.is_none()
-            || executor_raw.eq_ignore_ascii_case(&config.default_executor);
+        let use_default_mode =
+            executor_arg.is_none() || executor_raw.eq_ignore_ascii_case(&config.default_executor);
         let mode_raw = parts.get(2).copied().or_else(|| {
             if !use_default_mode {
                 return None;
@@ -635,6 +640,81 @@ impl TelegramBotService {
                     error_message.unwrap_or_else(|| "Failed to start task attempt.".to_string()),
                 );
             }
+        }
+    }
+
+    async fn edit_task_from_command(&self, payload: &str) -> String {
+        let lines: Vec<&str> = payload.lines().collect();
+        if lines.len() < 3 {
+            return "Usage: /edit [task_id]\\n[title]\\n[description]".to_string();
+        }
+
+        let raw_task_id = lines[0].trim();
+        let title = lines[1].trim();
+        let description = lines[2..].join("\n").trim().to_string();
+
+        if raw_task_id.is_empty() || title.is_empty() {
+            return "Task id and title are required.".to_string();
+        }
+
+        let Some(task_id) = self.resolve_task_id(raw_task_id).await else {
+            return "Invalid task id. Expected short code, task<uuid>, or uuid.".to_string();
+        };
+
+        let task = match Task::find_by_id(&self.db.pool, task_id).await {
+            Ok(Some(task)) => task,
+            Ok(None) => return format!("Task not found: task{task_id}"),
+            Err(e) => return format!("Failed to load task: {e}"),
+        };
+
+        if task.status != TaskStatus::Todo {
+            return format!(
+                "Task task{} is {:?}. Only Todo tasks can be edited with /edit.",
+                task.id, task.status
+            );
+        }
+
+        let payload = UpdateTask {
+            title: Some(title.to_string()),
+            description: Some(description),
+            status: None,
+            parent_workspace_id: None,
+            image_ids: None,
+        };
+
+        let base_url = match api_base_url().await {
+            Ok(base_url) => base_url,
+            Err(e) => return format!("Failed to locate API server: {e}"),
+        };
+
+        let client = reqwest::Client::new();
+        let response = match client
+            .put(format!("{base_url}/tasks/{task_id}"))
+            .json(&payload)
+            .send()
+            .await
+        {
+            Ok(response) => response,
+            Err(e) => return format!("Failed to edit task: {e}"),
+        };
+
+        let api_response: ApiResponse<Task> = match response.json().await {
+            Ok(response) => response,
+            Err(e) => return format!("Failed to parse task update response: {e}"),
+        };
+
+        let error_message = api_response.message().map(String::from);
+        match api_response.into_data() {
+            Some(updated_task) => {
+                let short_id = ShortIdMapping::get_or_create(&self.db.pool, updated_task.id)
+                    .await
+                    .unwrap_or_else(|_| "????".to_string());
+                format!(
+                    "Updated task [{}] task{}\\nTitle: {}",
+                    short_id, updated_task.id, updated_task.title
+                )
+            }
+            None => error_message.unwrap_or_else(|| "Failed to edit task.".to_string()),
         }
     }
 
