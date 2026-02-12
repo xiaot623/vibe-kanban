@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE tasks SET diff_additions = $2, diff_deletions = $3, updated_at = CURRENT_TIMESTAMP WHERE id = $1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": []
+  },
+  "hash": "718d26a9e449d65aecf73e33b6335dd287076ff1371e4b73b70887370f9c93c6"
+}

@@ -80,6 +80,8 @@ mod tests {
             description: None,
             status: TaskStatus::InReview,
             parent_workspace_id: None,
+            diff_additions: None,
+            diff_deletions: None,
             created_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
         };
@@ -95,6 +97,8 @@ mod tests {
             description: None,
             status: TaskStatus::Done,
             parent_workspace_id: None,
+            diff_additions: None,
+            diff_deletions: None,
             created_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
         };

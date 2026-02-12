@@ -270,11 +270,18 @@ impl TelegramHandler for TaskFinishedHandler {
             .await
             .unwrap_or_else(|_| "????".to_string());
 
+        // Use stored diff stats from the task (computed before merge),
+        // falling back to runtime computation if not available
+        let diff_stats = match (task.diff_additions, task.diff_deletions) {
+            (Some(added), Some(removed)) => Some((added as usize, removed as usize)),
+            _ => compute_workspace_diff_stats(tg, task.id).await,
+        };
+
         let message = format!(
             "[{}] 🎉🎉🎉 Task {} Finished\ndiff: {}",
             short_id,
             task.title,
-            match compute_workspace_diff_stats(tg, task.id).await {
+            match diff_stats {
                 Some((added, removed)) => format!("+{} / -{}", added, removed),
                 None => format!("+{0} / -{0}", 0),
             }

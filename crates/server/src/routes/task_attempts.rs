@@ -46,7 +46,7 @@ use serde::{Deserialize, Serialize};
 use services::services::{
     container::ContainerService,
     file_search::SearchQuery,
-    git::{ConflictOp, GitCliError, GitServiceError},
+    git::{ConflictOp, DiffTarget, GitCliError, GitServiceError},
     workspace_manager::WorkspaceManager,
 };
 use sqlx::Error as SqlxError;
@@ -449,6 +449,16 @@ pub async fn merge_task_attempt(
         commit_message.push_str(description);
     }
 
+    // Compute diff stats BEFORE merging, since after merge the branch
+    // will be identical to base and diff would show +0/-0
+    let diff_stats = compute_diff_stats_before_merge(
+        &deployment,
+        &workspace,
+        &repo.path,
+        &worktree_path,
+        &workspace_repo.target_branch,
+    );
+
     let merge_commit_id = deployment.git().merge_changes(
         &repo.path,
         &worktree_path,
@@ -465,6 +475,11 @@ pub async fn merge_task_attempt(
         &merge_commit_id,
     )
     .await?;
+
+    // Store diff stats on the task before updating status (which triggers notifications)
+    if let Some((added, removed)) = diff_stats {
+        let _ = Task::update_diff_stats(pool, task.id, added as i32, removed as i32).await;
+    }
     Task::update_status(pool, task.id, TaskStatus::Done).await?;
     if !workspace.pinned {
         Workspace::set_archived(pool, workspace.id, true).await?;
@@ -1726,6 +1741,40 @@ pub async fn mark_seen(
     CodingAgentTurn::mark_seen_by_workspace_id(pool, workspace.id).await?;
 
     Ok(ResponseJson(ApiResponse::success(())))
+}
+
+/// Compute diff stats (additions, deletions) for a workspace before merging.
+/// Returns None if stats cannot be computed (non-fatal).
+fn compute_diff_stats_before_merge(
+    deployment: &DeploymentImpl,
+    workspace: &Workspace,
+    repo_path: &Path,
+    worktree_path: &Path,
+    target_branch: &str,
+) -> Option<(usize, usize)> {
+    let base_commit = deployment
+        .git()
+        .get_base_commit(repo_path, &workspace.branch, target_branch)
+        .ok()?;
+
+    let diffs = deployment
+        .git()
+        .get_diffs(
+            DiffTarget::Worktree {
+                worktree_path,
+                base_commit: &base_commit,
+            },
+            None,
+        )
+        .ok()?;
+
+    let mut total_added = 0usize;
+    let mut total_removed = 0usize;
+    for diff in diffs {
+        total_added += diff.additions.unwrap_or(0);
+        total_removed += diff.deletions.unwrap_or(0);
+    }
+    Some((total_added, total_removed))
 }
 
 pub fn router(deployment: &DeploymentImpl) -> Router<DeploymentImpl> {
