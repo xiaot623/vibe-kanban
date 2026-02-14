@@ -4,7 +4,7 @@ import NiceModal, { useModal } from '@ebay/nice-modal-react';
 import { defineModal } from '@/lib/modals';
 import { useDropzone } from 'react-dropzone';
 import { useForm, useStore } from '@tanstack/react-form';
-import { Image as ImageIcon } from 'lucide-react';
+import { Image as ImageIcon, Maximize2, Minimize2 } from 'lucide-react';
 import {
   Dialog,
   DialogContent,
@@ -86,6 +86,7 @@ type TaskFormValues = {
 const TaskFormDialogImpl = NiceModal.create<TaskFormDialogProps>((props) => {
   const { mode, projectId } = props;
   const editMode = mode === 'edit';
+  const canToggleFullscreen = !editMode;
   const modal = useModal();
   const { t } = useTranslation(['tasks', 'common']);
   const { createTask, createAndStart, updateTask } =
@@ -99,6 +100,7 @@ const TaskFormDialogImpl = NiceModal.create<TaskFormDialogProps>((props) => {
   const [newlyUploadedImageIds, setNewlyUploadedImageIds] = useState<string[]>(
     []
   );
+  const [isFullscreen, setIsFullscreen] = useState(false);
   const [showDiscardWarning, setShowDiscardWarning] = useState(false);
   const forceCreateOnlyRef = useRef(false);
 
@@ -403,12 +405,42 @@ const TaskFormDialogImpl = NiceModal.create<TaskFormDialogProps>((props) => {
         open={modal.visible}
         onOpenChange={handleDialogClose}
         uncloseable={showDiscardWarning}
+        className={cn(
+          isFullscreen &&
+            canToggleFullscreen &&
+            '!max-w-none !my-0 h-[calc(100dvh-2rem)]'
+        )}
       >
+        {canToggleFullscreen && (
+          <button
+            type="button"
+            className="absolute right-12 top-4 rounded-sm opacity-70 ring-offset-background transition-opacity hover:opacity-100 focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2 z-10"
+            onClick={() => setIsFullscreen((prev) => !prev)}
+            aria-label={
+              isFullscreen ? 'Exit fullscreen mode' : 'Enter fullscreen mode'
+            }
+            title={isFullscreen ? 'Exit fullscreen mode' : 'Enter fullscreen mode'}
+          >
+            {isFullscreen ? (
+              <Minimize2 className="h-4 w-4" />
+            ) : (
+              <Maximize2 className="h-4 w-4" />
+            )}
+            <span className="sr-only">
+              {isFullscreen ? 'Exit fullscreen mode' : 'Enter fullscreen mode'}
+            </span>
+          </button>
+        )}
+
         <div
           {...getRootProps()}
-          className="h-full flex flex-col gap-4 p-4 relative min-h-0"
+          className={cn(
+            'h-full flex flex-col gap-4 p-4 relative min-h-0',
+            isFullscreen && canToggleFullscreen && 'overflow-y-auto'
+          )}
         >
           <input {...getInputProps()} />
+
           {/* Drag overlay */}
           {isDragActive && (
             <div className="absolute inset-0 z-50 bg-primary/95 border-2 border-dashed border-primary-foreground/50 rounded-lg flex items-center justify-center pointer-events-none">
@@ -439,10 +471,20 @@ const TaskFormDialogImpl = NiceModal.create<TaskFormDialogProps>((props) => {
           {/* Description */}
           <form.Field name="description">
             {(field) => (
-              <div className="border p-3">
+              <div
+                className={cn(
+                  'border p-3',
+                  isFullscreen && canToggleFullscreen && 'flex-1 min-h-0'
+                )}
+              >
                 <WYSIWYGEditor
                   placeholder={t('taskFormDialog.descriptionPlaceholder')}
-                  className="w-full h-24 overflow-auto"
+                  className={cn(
+                    'w-full overflow-auto',
+                    isFullscreen && canToggleFullscreen
+                      ? 'h-[calc(100dvh-26rem)] min-h-[18rem]'
+                      : 'h-24'
+                  )}
                   value={field.state.value}
                   onChange={(desc) => field.handleChange(desc)}
                   disabled={isSubmitting}
