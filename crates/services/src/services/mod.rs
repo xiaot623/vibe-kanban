@@ -14,7 +14,6 @@ pub mod git_host;
 pub mod image;
 pub mod notification;
 pub mod oauth_credentials;
-pub mod pr_monitor;
 pub mod project;
 #[cfg(feature = "qa-mode")]
 pub mod qa_repos;

@@ -1,7 +1,6 @@
 use std::{collections::HashMap, env, fs, path::Path};
 
 use schemars::{JsonSchema, Schema, SchemaGenerator, generate::SchemaSettings};
-use server::routes::task_attempts::pr::DEFAULT_PR_DESCRIPTION_PROMPT;
 use ts_rs::TS;
 
 fn generate_types_content() -> String {
@@ -88,7 +87,6 @@ fn generate_types_content() -> String {
         server::routes::task_attempts::OpenEditorRequest::decl(),
         server::routes::task_attempts::OpenEditorResponse::decl(),
         server::routes::tasks::CreateAndStartTaskRequest::decl(),
-        server::routes::task_attempts::pr::CreatePrApiRequest::decl(),
         server::routes::images::ImageResponse::decl(),
         server::routes::images::ImageMetadata::decl(),
         server::routes::task_attempts::CreateTaskAttemptBody::decl(),
@@ -196,16 +194,7 @@ fn generate_types_content() -> String {
         .collect::<Vec<_>>()
         .join("\n\n");
 
-    // Append exported constants
-    let prompt_escaped = DEFAULT_PR_DESCRIPTION_PROMPT
-        .replace('\\', "\\\\")
-        .replace('`', "\\`");
-    let constants = format!(
-        "export const DEFAULT_PR_DESCRIPTION_PROMPT = `{}`;",
-        prompt_escaped
-    );
-
-    format!("{HEADER}\n\n{body}\n\n{constants}")
+    format!("{HEADER}\n\n{body}")
 }
 
 fn generate_json_schema<T: JsonSchema>() -> Result<String, serde_json::Error> {

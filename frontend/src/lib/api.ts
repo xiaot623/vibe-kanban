@@ -6,7 +6,6 @@ import {
   Config,
   CreateFollowUpAttempt,
   EditorType,
-  CreatePrApiRequest,
   CreateTask,
   CreateAndStartTaskRequest,
   CreateTaskAttemptBody,
@@ -54,7 +53,6 @@ import {
   StatusResponse,
   OpenEditorResponse,
   OpenEditorRequest,
-  PrError,
   Scratch,
   ScratchType,
   CreateScratch,
@@ -617,17 +615,6 @@ export const attemptsApi = {
       }
     );
     return handleApiResponse<void>(response);
-  },
-
-  createPR: async (
-    attemptId: string,
-    data: CreatePrApiRequest
-  ): Promise<Result<string, PrError>> => {
-    const response = await makeRequest(`/api/task-attempts/${attemptId}/pr`, {
-      method: 'POST',
-      body: JSON.stringify(data),
-    });
-    return handleApiResponseAsResult<string, PrError>(response);
   },
 
   startDevServer: async (attemptId: string): Promise<void> => {

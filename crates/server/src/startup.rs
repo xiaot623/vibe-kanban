@@ -120,9 +120,8 @@ pub async fn initialize_deployment() -> Result<DeploymentImpl, StartupError> {
     Ok(deployment)
 }
 
-/// Spawn background services (cache warming, task verification, PR monitor)
+/// Spawn background services (cache warming, task verification)
 pub async fn spawn_background_services(deployment: &DeploymentImpl, platform: &str) {
-    deployment.spawn_pr_monitor_service().await;
     deployment.spawn_telegram_bot_service().await;
 
     deployment

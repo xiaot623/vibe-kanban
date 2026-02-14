@@ -184,8 +184,6 @@ export type OpenEditorResponse = { url: string | null, };
 
 export type CreateAndStartTaskRequest = { task: CreateTask, executor_profile_id: ExecutorProfileId, repos: Array<WorkspaceRepoInput>, };
 
-export type CreatePrApiRequest = { title: string, body: string | null, target_branch: string | null, draft: boolean | null, repo_id: string, auto_generate_description: boolean, };
-
 export type ImageResponse = { id: string, file_path: string, original_name: string, mime_type: string | null, size_bytes: bigint, hash: string, created_at: string, updated_at: string, };
 
 export type ImageMetadata = { exists: boolean, file_name: string | null, path: string | null, size_bytes: bigint | null, format: string | null, proxy_url: string | null, };
@@ -208,7 +206,7 @@ export type GitOperationError = { "type": "merge_conflicts", message: string, op
 
 export type PushError = { "type": "force_push_required" };
 
-export type PrError = { "type": "cli_not_installed", provider: ProviderKind, } | { "type": "cli_not_logged_in", provider: ProviderKind, } | { "type": "git_cli_not_logged_in" } | { "type": "git_cli_not_installed" } | { "type": "target_branch_not_found", branch: string, } | { "type": "unsupported_provider" };
+export type PrError = { "type": "cli_not_installed", provider: ProviderKind, } | { "type": "cli_not_logged_in", provider: ProviderKind, } | { "type": "unsupported_provider" };
 
 export type BranchStatus = { commits_behind: number | null, commits_ahead: number | null, has_uncommitted_changes: boolean | null, head_oid: string | null, uncommitted_count: number | null, untracked_count: number | null, target_branch_name: string, remote_commits_behind: number | null, remote_commits_ahead: number | null, merges: Array<Merge>, 
 /**
@@ -508,16 +506,3 @@ export type ToolStatus = { "status": "created" } | { "status": "success" } | { "
 export type PatchType = { "type": "NORMALIZED_ENTRY", "content": NormalizedEntry } | { "type": "STDOUT", "content": string } | { "type": "STDERR", "content": string } | { "type": "DIFF", "content": Diff };
 
 export type JsonValue = number | string | boolean | Array<JsonValue> | { [key in string]?: JsonValue } | null;
-
-export const DEFAULT_PR_DESCRIPTION_PROMPT = `Update the PR that was just created with a better title and description.
-The PR number is #{pr_number} and the URL is {pr_url}.
-
-Analyze the changes in this branch and write:
-1. A concise, descriptive title that summarizes the changes, postfixed with "(Vibe Kanban)"
-2. A detailed description that explains:
-   - What changes were made
-   - Why they were made (based on the task context)
-   - Any important implementation details
-   - At the end, include a note: "This PR was written using [Vibe Kanban](https://vibekanban.com)"
-
-Use the appropriate CLI tool to update the PR (gh pr edit for GitHub, az repos pr update for Azure DevOps).`;
