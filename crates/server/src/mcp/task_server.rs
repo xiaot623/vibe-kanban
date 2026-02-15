@@ -1,11 +1,8 @@
 use std::future::Future;
 
 use db::models::{
-    project::Project,
-    repo::Repo,
     tag::Tag,
     task::{CreateTask, Task, TaskStatus, TaskWithAttemptStatus, UpdateTask},
-    workspace::WorkspaceContext,
 };
 use regex::Regex;
 use rmcp::{
@@ -19,11 +16,11 @@ use rmcp::{
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use uuid::Uuid;
 
-use crate::routes::containers::ContainerQuery;
-
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct AddTaskRequest {
-    #[schemars(description = "The ID of the project to create the task in.")]
+    #[schemars(
+        description = "The ID of the project to create the task in. In agent runtimes this is usually available in VK_PROJECT_ID."
+    )]
     pub project_id: Uuid,
     #[schemars(description = "The title of the task")]
     pub title: String,
@@ -38,7 +35,9 @@ pub struct AddTaskResponse {
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct ListTasksRequest {
-    #[schemars(description = "The ID of the project to list TODO tasks from.")]
+    #[schemars(
+        description = "The ID of the project to list TODO tasks from. In agent runtimes this is usually available in VK_PROJECT_ID."
+    )]
     pub project_id: Uuid,
 }
 
@@ -148,113 +147,11 @@ pub struct DeleteTaskResponse {
     pub deleted_task_id: String,
 }
 
-#[derive(Debug, Serialize, schemars::JsonSchema)]
-pub struct ProjectRepositoryMeta {
-    #[schemars(description = "The unique identifier of the repository")]
-    pub id: String,
-    #[schemars(description = "The internal repository name")]
-    pub name: String,
-    #[schemars(description = "The display name of the repository")]
-    pub display_name: String,
-    #[schemars(description = "Repository absolute path")]
-    pub path: String,
-    #[schemars(description = "When the repository was created")]
-    pub created_at: String,
-    #[schemars(description = "When the repository was last updated")]
-    pub updated_at: String,
-}
-
-impl ProjectRepositoryMeta {
-    fn from_repo(repo: Repo) -> Self {
-        Self {
-            id: repo.id.to_string(),
-            name: repo.name,
-            display_name: repo.display_name,
-            path: repo.path.to_string_lossy().to_string(),
-            created_at: repo.created_at.to_rfc3339(),
-            updated_at: repo.updated_at.to_rfc3339(),
-        }
-    }
-}
-
-#[derive(Debug, Serialize, schemars::JsonSchema)]
-pub struct ProjectMeta {
-    #[schemars(description = "The unique identifier of the project")]
-    pub id: String,
-    #[schemars(description = "The name of the project")]
-    pub name: String,
-    #[schemars(description = "Default working dir for single-repo tasks, if set")]
-    pub default_agent_working_dir: Option<String>,
-    #[schemars(description = "When the project was created")]
-    pub created_at: String,
-    #[schemars(description = "When the project was last updated")]
-    pub updated_at: String,
-    #[schemars(description = "Repositories linked to the project")]
-    pub repositories: Vec<ProjectRepositoryMeta>,
-}
-
-impl ProjectMeta {
-    fn from_project_with_repositories(project: Project, repositories: Vec<Repo>) -> Self {
-        Self {
-            id: project.id.to_string(),
-            name: project.name,
-            default_agent_working_dir: project.default_agent_working_dir,
-            created_at: project.created_at.to_rfc3339(),
-            updated_at: project.updated_at.to_rfc3339(),
-            repositories: repositories
-                .into_iter()
-                .map(ProjectRepositoryMeta::from_repo)
-                .collect(),
-        }
-    }
-}
-
-#[derive(Debug, Serialize, schemars::JsonSchema)]
-pub struct GetContextResponse {
-    #[schemars(description = "All known projects and their metadata.")]
-    pub projects: Vec<ProjectMeta>,
-    #[schemars(description = "Total number of projects in this response.")]
-    pub count: usize,
-    #[schemars(
-        description = "Active workspace context resolved from the current working directory, if available."
-    )]
-    pub active_workspace: Option<McpContext>,
-}
-
 #[derive(Debug, Clone)]
 pub struct TaskServer {
     client: reqwest::Client,
     base_url: String,
     tool_router: ToolRouter<TaskServer>,
-    context: Option<McpContext>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, schemars::JsonSchema)]
-pub struct McpRepoContext {
-    #[schemars(description = "The unique identifier of the repository")]
-    pub repo_id: Uuid,
-    #[schemars(description = "The name of the repository")]
-    pub repo_name: String,
-    #[schemars(description = "The target branch for this repository in this workspace")]
-    pub target_branch: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, schemars::JsonSchema)]
-pub struct McpContext {
-    #[schemars(description = "The project ID for the active workspace session")]
-    pub project_id: Uuid,
-    #[schemars(description = "The task ID linked to the active workspace session")]
-    pub task_id: Uuid,
-    #[schemars(description = "The task title linked to the active workspace session")]
-    pub task_title: String,
-    #[schemars(description = "The workspace/attempt ID for the active session")]
-    pub workspace_id: Uuid,
-    #[schemars(description = "The workspace branch name")]
-    pub workspace_branch: String,
-    #[schemars(
-        description = "Repository info and target branches for each repo in this workspace"
-    )]
-    pub workspace_repos: Vec<McpRepoContext>,
 }
 
 impl TaskServer {
@@ -263,61 +160,7 @@ impl TaskServer {
             client: reqwest::Client::new(),
             base_url: base_url.to_string(),
             tool_router: Self::tool_router(),
-            context: None,
         }
-    }
-
-    pub async fn init(mut self) -> Self {
-        self.context = self.fetch_workspace_context().await;
-        self
-    }
-
-    async fn fetch_workspace_context(&self) -> Option<McpContext> {
-        let current_dir = std::env::current_dir().ok()?;
-        let canonical_path = current_dir.canonicalize().unwrap_or(current_dir);
-        let normalized_path = utils::path::normalize_macos_private_alias(&canonical_path);
-
-        let url = self.url("/api/containers/attempt-context");
-        let query = ContainerQuery {
-            container_ref: normalized_path.to_string_lossy().to_string(),
-        };
-
-        let response = tokio::time::timeout(
-            std::time::Duration::from_millis(500),
-            self.client.get(&url).query(&query).send(),
-        )
-        .await
-        .ok()?
-        .ok()?;
-
-        if !response.status().is_success() {
-            return None;
-        }
-
-        let api_response: ApiResponseEnvelope<WorkspaceContext> = response.json().await.ok()?;
-        if !api_response.success {
-            return None;
-        }
-
-        let ctx = api_response.data?;
-        let workspace_repos = ctx
-            .workspace_repos
-            .into_iter()
-            .map(|repo_with_branch| McpRepoContext {
-                repo_id: repo_with_branch.repo.id,
-                repo_name: repo_with_branch.repo.name,
-                target_branch: repo_with_branch.target_branch,
-            })
-            .collect();
-
-        Some(McpContext {
-            project_id: ctx.project.id,
-            task_id: ctx.task.id,
-            task_title: ctx.task.title,
-            workspace_id: ctx.workspace.id,
-            workspace_branch: ctx.workspace.branch,
-            workspace_repos,
-        })
     }
 }
 
@@ -439,20 +282,6 @@ impl TaskServer {
         )
     }
 
-    async fn fetch_project_meta(&self) -> Result<Vec<ProjectMeta>, CallToolResult> {
-        let projects_url = self.url("/api/projects");
-        let projects: Vec<Project> = self.send_json(self.client.get(&projects_url)).await?;
-
-        let mut project_meta = Vec::with_capacity(projects.len());
-        for project in projects {
-            let repos_url = self.url(&format!("/api/projects/{}/repositories", project.id));
-            let repos: Vec<Repo> = self.send_json(self.client.get(&repos_url)).await?;
-            project_meta.push(ProjectMeta::from_project_with_repositories(project, repos));
-        }
-
-        Ok(project_meta)
-    }
-
     /// Expand @tag references in task descriptions.
     async fn expand_tags(&self, text: &str) -> String {
         let tag_pattern = match Regex::new(r"@([^\s@]+)") {
@@ -505,27 +334,6 @@ impl TaskServer {
 
 #[tool_router]
 impl TaskServer {
-    #[tool(
-        description = "Return all project metadata for this Vibe Kanban instance and include active workspace context when available."
-    )]
-    async fn get_context(&self) -> Result<CallToolResult, ErrorData> {
-        let projects = match self.fetch_project_meta().await {
-            Ok(projects) => projects,
-            Err(err) => return Ok(err),
-        };
-
-        let active_workspace = match self.context.clone() {
-            Some(context) => Some(context),
-            None => self.fetch_workspace_context().await,
-        };
-
-        TaskServer::success(&GetContextResponse {
-            count: projects.len(),
-            projects,
-            active_workspace,
-        })
-    }
-
     #[tool(
         description = "List TODO tasks for a project. This MCP tool only returns tasks in `todo` status."
     )]
@@ -669,7 +477,7 @@ impl TaskServer {
 #[tool_handler]
 impl ServerHandler for TaskServer {
     fn get_info(&self) -> ServerInfo {
-        let instruction = "A TODO-task management MCP server for Vibe Kanban. Use 'get_context' to fetch all project metadata (including project IDs and repositories). Use 'list_tasks' to read TODO tasks for a project. Use 'add_task', 'edit_task', and 'delete_task' to manage tasks. Editing and deleting are restricted to tasks currently in TODO state.".to_string();
+        let instruction = "A TODO-task management MCP server for Vibe Kanban. Use 'list_tasks' to read TODO tasks for a project (project_id is usually available as VK_PROJECT_ID in the runtime environment). Use 'add_task', 'edit_task', and 'delete_task' to manage tasks. Editing and deleting are restricted to tasks currently in TODO state.".to_string();
 
         ServerInfo {
             protocol_version: ProtocolVersion::V_2025_03_26,

@@ -63,8 +63,6 @@ fn main() -> anyhow::Result<()> {
             };
 
             let service = TaskServer::new(&base_url)
-                .init()
-                .await
                 .serve(stdio())
                 .await
                 .map_err(|e| {
