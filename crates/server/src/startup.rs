@@ -123,7 +123,11 @@ pub async fn initialize_deployment() -> Result<DeploymentImpl, StartupError> {
 /// Spawn background services (cache warming, task verification)
 pub async fn spawn_background_services(deployment: &DeploymentImpl, platform: &str) {
     deployment.spawn_telegram_bot_service().await;
-    crate::mcp::http_service::McpHttpService::spawn(deployment.config().clone()).await;
+    crate::mcp::http_service::McpHttpService::start(
+        deployment.config().clone(),
+        deployment.mcp_server_handle().clone(),
+    )
+    .await;
 
     deployment
         .track_if_analytics_allowed("session_start", serde_json::json!({ "platform": platform }))

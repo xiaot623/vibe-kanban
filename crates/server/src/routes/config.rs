@@ -180,9 +180,43 @@ async fn track_config_events(deployment: &DeploymentImpl, old: &Config, new: &Co
 
 async fn handle_config_events(deployment: &DeploymentImpl, old: &Config, new: &Config) {
     track_config_events(deployment, old, new).await;
+    handle_mcp_server_changes(deployment, old, new).await;
 
     // Auto project setup on disclaimer acknowledgment is disabled.
     // Projects should be added manually by the user.
+}
+
+async fn handle_mcp_server_changes(deployment: &DeploymentImpl, old: &Config, new: &Config) {
+    let was_enabled = old.mcp_server.enabled;
+    let is_enabled = new.mcp_server.enabled;
+    let port_changed = old.mcp_server.port != new.mcp_server.port;
+
+    match (was_enabled, is_enabled) {
+        (false, true) => {
+            // Newly enabled — start the server
+            crate::mcp::http_service::McpHttpService::start(
+                deployment.config().clone(),
+                deployment.mcp_server_handle().clone(),
+            )
+            .await;
+        }
+        (true, false) => {
+            // Disabled — stop the server
+            crate::mcp::http_service::McpHttpService::stop(
+                deployment.mcp_server_handle().clone(),
+            )
+            .await;
+        }
+        (true, true) if port_changed => {
+            // Port changed while enabled — restart on new port
+            crate::mcp::http_service::McpHttpService::start(
+                deployment.config().clone(),
+                deployment.mcp_server_handle().clone(),
+            )
+            .await;
+        }
+        _ => {}
+    }
 }
 
 async fn get_sound(Path(sound): Path<SoundFile>) -> Result<Response<Body>, ApiError> {

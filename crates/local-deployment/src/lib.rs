@@ -20,7 +20,7 @@ use services::services::{
     queued_message::QueuedMessageService,
     repo::RepoService,
 };
-use tokio::sync::RwLock;
+use tokio::sync::{Mutex, RwLock};
 use utils::{
     assets::{config_path, credentials_path},
     msg_store::MsgStore,
@@ -33,8 +33,12 @@ pub mod container;
 mod copy;
 pub mod pty;
 
+/// Shared handle for the MCP HTTP server task, allowing start/stop lifecycle management.
+pub type McpServerHandle = Arc<Mutex<Option<tokio::task::JoinHandle<()>>>>;
+
 #[derive(Clone)]
 pub struct LocalDeployment {
+    mcp_server_handle: McpServerHandle,
     config: Arc<RwLock<Config>>,
     /// If the config file failed to parse, this contains the error message
     config_parse_error: Arc<RwLock<Option<String>>>,
@@ -168,6 +172,7 @@ impl Deployment for LocalDeployment {
         let pty = PtyService::new();
 
         let deployment = Self {
+            mcp_server_handle: Arc::new(Mutex::new(None)),
             config,
             config_parse_error,
             user_id,
@@ -282,5 +287,9 @@ impl LocalDeployment {
 
     pub fn pty(&self) -> &PtyService {
         &self.pty
+    }
+
+    pub fn mcp_server_handle(&self) -> &McpServerHandle {
+        &self.mcp_server_handle
     }
 }
