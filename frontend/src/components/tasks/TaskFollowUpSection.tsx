@@ -145,6 +145,7 @@ export function TaskFollowUpSection({
 
   // Local message state for immediate UI feedback (before debounced save)
   const [localMessage, setLocalMessage] = useState('');
+  const lastSavedReviewMarkdownRef = useRef<string | null>(null);
 
   // Variant selection - derive default from latest process
   const latestProfileId = useMemo<ExecutorProfileId | null>(() => {
@@ -251,6 +252,29 @@ export function TaskFollowUpSection({
     enabled: !!sessionId,
   });
 
+  const { data: persistedReviewCommand } = useQuery({
+    queryKey: ['review-command', workspaceId],
+    queryFn: () => attemptsApi.getReviewCommand(workspaceId!),
+    enabled: !!workspaceId,
+  });
+
+  const hasPersistedReviewCommand = Boolean(
+    persistedReviewCommand &&
+      !persistedReviewCommand.solved &&
+      persistedReviewCommand.markdown_text.trim()
+  );
+
+  useEffect(() => {
+    if (!workspaceId) {
+      lastSavedReviewMarkdownRef.current = null;
+      return;
+    }
+    const persistedMarkdown = persistedReviewCommand?.markdown_text?.trim();
+    if (persistedMarkdown) {
+      lastSavedReviewMarkdownRef.current = persistedMarkdown;
+    }
+  }, [workspaceId, persistedReviewCommand?.markdown_text, persistedReviewCommand?.updated_at]);
+
   const isQueued = queueStatus.status === 'queued';
   const queuedMessage = isQueued
     ? (queueStatus as Extract<QueueStatus, { status: 'queued' }>).message
@@ -343,9 +367,9 @@ export function TaskFollowUpSection({
   const { isSendingFollowUp, followUpError, setFollowUpError, onSendFollowUp } =
     useFollowUpSend({
       sessionId,
+      workspaceId,
       message: localMessage,
       conflictMarkdown: conflictResolutionInstructions,
-      reviewMarkdown,
       clickedMarkdown,
       selectedVariant,
       clearComments,
@@ -384,6 +408,7 @@ export function TaskFollowUpSection({
     return Boolean(
       conflictResolutionInstructions ||
         reviewMarkdown ||
+        hasPersistedReviewCommand ||
         clickedMarkdown ||
         localMessage.trim()
     );
@@ -391,6 +416,7 @@ export function TaskFollowUpSection({
     canTypeFollowUp,
     conflictResolutionInstructions,
     reviewMarkdown,
+    hasPersistedReviewCommand,
     clickedMarkdown,
     localMessage,
   ]);
@@ -416,57 +442,160 @@ export function TaskFollowUpSection({
     }
   }, [workspaceId, isAttemptRunning]);
 
-  // Handler to queue the current message for execution after agent finishes
-  const handleQueueMessage = useCallback(async () => {
-    if (
-      !localMessage.trim() &&
-      !conflictResolutionInstructions &&
-      !reviewMarkdown &&
-      !clickedMarkdown
-    ) {
+  const persistReviewCommand = useCallback(async (markdown: string) => {
+    if (!workspaceId) return true;
+    if (!markdown) {
+      if (comments.length > 0 && hasPersistedReviewCommand) {
+        try {
+          await attemptsApi.deleteReviewCommand(workspaceId);
+          lastSavedReviewMarkdownRef.current = null;
+          queryClient.invalidateQueries({
+            queryKey: ['review-command', workspaceId],
+          });
+        } catch (error) {
+          console.error('Failed to delete review command:', error);
+          setFollowUpError('Failed to delete review command');
+          return false;
+        }
+      }
+      return true;
+    }
+    if (markdown === lastSavedReviewMarkdownRef.current) return true;
+
+    try {
+      await attemptsApi.saveReviewCommand(workspaceId, {
+        markdown_text: markdown,
+        reason: null,
+      });
+      lastSavedReviewMarkdownRef.current = markdown;
+      queryClient.invalidateQueries({
+        queryKey: ['review-command', workspaceId],
+      });
+      return true;
+    } catch (error) {
+      console.error('Failed to save review command:', error);
+      setFollowUpError('Failed to save review command');
+      return false;
+    }
+  }, [
+    workspaceId,
+    comments.length,
+    hasPersistedReviewCommand,
+    queryClient,
+    setFollowUpError,
+  ]);
+
+  const persistReviewCommandIfNeeded = useCallback(
+    () => persistReviewCommand(reviewMarkdown.trim()),
+    [persistReviewCommand, reviewMarkdown]
+  );
+
+  const {
+    debounced: debouncedPersistReviewCommand,
+    cancel: cancelPersistReviewCommand,
+  } = useDebouncedCallback(
+    useCallback(
+      (markdown: string) => {
+        void persistReviewCommand(markdown);
+      },
+      [persistReviewCommand]
+    ),
+    400
+  );
+
+  useEffect(() => {
+    const markdown = reviewMarkdown.trim();
+    if (!workspaceId) {
+      cancelPersistReviewCommand();
       return;
     }
+    if (!markdown) {
+      cancelPersistReviewCommand();
+      if (comments.length > 0 && hasPersistedReviewCommand) {
+        void persistReviewCommand('');
+      }
+      return;
+    }
+    if (markdown === lastSavedReviewMarkdownRef.current) return;
+    debouncedPersistReviewCommand(markdown);
+  }, [
+    workspaceId,
+    comments.length,
+    hasPersistedReviewCommand,
+    persistReviewCommand,
+    reviewMarkdown,
+    debouncedPersistReviewCommand,
+    cancelPersistReviewCommand,
+  ]);
 
-    // Cancel any pending debounced save and save immediately before queueing
-    // This prevents the race condition where the debounce fires after queueing
-    cancelDebouncedSave();
-    await saveToScratch(localMessage, selectedVariant);
+  useEffect(() => {
+    return () => {
+      cancelPersistReviewCommand();
+    };
+  }, [cancelPersistReviewCommand]);
 
-    // Combine all the content that would be sent (same as follow-up send)
-    const parts = [
-      conflictResolutionInstructions,
-      clickedMarkdown,
-      reviewMarkdown,
-      localMessage,
-    ].filter(Boolean);
-    const combinedMessage = parts.join('\n\n');
-    await queueMessage(combinedMessage, selectedVariant);
+  // Handler to queue the current message for execution after agent finishes
+  const handleQueueMessage = useCallback(async () => {
+    try {
+      if (
+        !localMessage.trim() &&
+        !conflictResolutionInstructions &&
+        !reviewMarkdown &&
+        !hasPersistedReviewCommand &&
+        !clickedMarkdown
+      ) {
+        return;
+      }
+
+      cancelPersistReviewCommand();
+      const saved = await persistReviewCommandIfNeeded();
+      if (!saved) return;
+
+      // Cancel any pending debounced save and save immediately before queueing
+      // This prevents the race condition where the debounce fires after queueing
+      cancelDebouncedSave();
+      await saveToScratch(localMessage, selectedVariant);
+
+      const baseParts = [
+        conflictResolutionInstructions,
+        clickedMarkdown,
+        localMessage.trim(),
+      ].filter(Boolean) as string[];
+
+      const unsolvedReviewCommandMarkdowns = workspaceId
+        ? (
+            await attemptsApi.getUnsolvedReviewCommands(workspaceId)
+          ).map((command) => command.markdown_text.trim())
+        : [];
+
+      const commandParts = unsolvedReviewCommandMarkdowns.filter(
+        (commandMarkdown) =>
+          commandMarkdown &&
+          !baseParts.some((part) => part.includes(commandMarkdown))
+      );
+
+      const combinedMessage = [...baseParts, ...commandParts].join('\n\n');
+      if (!combinedMessage) return;
+      await queueMessage(combinedMessage, selectedVariant);
+    } catch (error) {
+      console.error('Failed to queue follow-up message:', error);
+      setFollowUpError('Failed to queue follow-up message');
+    }
   }, [
     localMessage,
     conflictResolutionInstructions,
     reviewMarkdown,
     clickedMarkdown,
+    hasPersistedReviewCommand,
     selectedVariant,
+    persistReviewCommandIfNeeded,
+    workspaceId,
     queueMessage,
     cancelDebouncedSave,
+    cancelPersistReviewCommand,
     saveToScratch,
+    setFollowUpError,
   ]);
-
-  // Keyboard shortcut handler - send follow-up or queue depending on state
-  const handleSubmitShortcut = useCallback(
-    (e?: KeyboardEvent) => {
-      e?.preventDefault();
-      if (isAttemptRunning) {
-        // When running, CMD+Enter queues the message (if not already queued)
-        if (!isQueued) {
-          handleQueueMessage();
-        }
-      } else {
-        onSendFollowUp();
-      }
-    },
-    [isAttemptRunning, isQueued, handleQueueMessage, onSendFollowUp]
-  );
 
   // Ref to access setFollowUpMessage without adding it as a dependency
   const setFollowUpMessageRef = useRef(setFollowUpMessage);
@@ -492,6 +621,29 @@ export function TaskFollowUpSection({
       : null;
     return { isQueued: queued, queuedMessage: message };
   }, [queryClient, sessionId]);
+
+  const handleSendFollowUp = useCallback(async () => {
+    cancelPersistReviewCommand();
+    const saved = await persistReviewCommandIfNeeded();
+    if (!saved) return;
+    await onSendFollowUp();
+  }, [cancelPersistReviewCommand, persistReviewCommandIfNeeded, onSendFollowUp]);
+
+  // Keyboard shortcut handler - send follow-up or queue depending on state
+  const handleSubmitShortcut = useCallback(
+    (e?: KeyboardEvent) => {
+      e?.preventDefault();
+      if (isAttemptRunning) {
+        // When running, CMD+Enter queues the message (if not already queued)
+        if (!isQueued) {
+          handleQueueMessage();
+        }
+      } else {
+        handleSendFollowUp();
+      }
+    },
+    [isAttemptRunning, isQueued, handleQueueMessage, handleSendFollowUp]
+  );
 
   // Handle image paste - upload to container and insert markdown
   const handlePasteFiles = useCallback(
@@ -623,12 +775,14 @@ export function TaskFollowUpSection({
   );
 
   // Memoize placeholder to avoid re-renders
-  const hasExtraContext = !!(reviewMarkdown || conflictResolutionInstructions);
+  const hasExtraContext = !!(
+    reviewMarkdown || hasPersistedReviewCommand || conflictResolutionInstructions
+  );
   const editorPlaceholder = useMemo(
     () =>
       hasExtraContext
-        ? '(Optional) Add additional instructions... Type @ to insert tags or search files.'
-        : 'Continue working on this task attempt... Type @ to insert tags or search files.',
+        ? '(Optional) Add additional instructions... Type @ to insert tags, search files, or use @review.'
+        : 'Continue working on this task attempt... Type @ to insert tags, search files, or use @review.',
     [hasExtraContext]
   );
 
@@ -707,15 +861,6 @@ export function TaskFollowUpSection({
             </Alert>
           )}
           <div className="space-y-2">
-            {/* Review comments preview */}
-            {reviewMarkdown && (
-              <div className="mb-4">
-                <div className="text-sm whitespace-pre-wrap break-words rounded-md border bg-muted p-3">
-                  {reviewMarkdown}
-                </div>
-              </div>
-            )}
-
             {/* Conflict notice and actions (optional UI) */}
             {branchStatus && (
               <FollowUpConflictSection
@@ -723,7 +868,7 @@ export function TaskFollowUpSection({
                 attemptBranch={attemptBranch}
                 branchStatus={branchStatus}
                 isEditable={isEditable}
-                onResolve={onSendFollowUp}
+                onResolve={handleSendFollowUp}
                 enableResolve={
                   canSendFollowUp && !isAttemptRunning && isEditable
                 }
@@ -750,7 +895,10 @@ export function TaskFollowUpSection({
 
             <div
               className="flex flex-col gap-2"
-              onFocus={() => setIsTextareaFocused(true)}
+              onFocus={() => {
+                if (isTextareaFocused) return;
+                setIsTextareaFocused(true);
+              }}
               onBlur={(e) => {
                 // Only blur if focus is leaving the container entirely
                 if (!e.currentTarget.contains(e.relatedTarget)) {
@@ -764,6 +912,7 @@ export function TaskFollowUpSection({
                 onChange={handleEditorChange}
                 disabled={!isEditable}
                 onPasteFiles={handlePasteFiles}
+                workspaceId={workspaceId}
                 projectId={projectId}
                 taskAttemptId={workspaceId}
                 onCmdEnter={handleSubmitShortcut}
@@ -882,6 +1031,7 @@ export function TaskFollowUpSection({
                     (!localMessage.trim() &&
                       !conflictResolutionInstructions &&
                       !reviewMarkdown &&
+                      !hasPersistedReviewCommand &&
                       !clickedMarkdown)
                   }
                   size="sm"
@@ -925,7 +1075,7 @@ export function TaskFollowUpSection({
                 </Button>
               )}
               <Button
-                onClick={onSendFollowUp}
+                onClick={handleSendFollowUp}
                 disabled={!canSendFollowUp || !isEditable}
                 size="sm"
               >

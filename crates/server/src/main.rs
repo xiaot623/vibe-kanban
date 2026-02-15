@@ -76,7 +76,11 @@ fn resolve_port() -> u16 {
         .ok()
         .and_then(|s| parse_port_value(&s))
         .or_else(|| cli_port)
-        .or_else(|| std::env::var("PORT").ok().and_then(|s| parse_port_value(&s)))
+        .or_else(|| {
+            std::env::var("PORT")
+                .ok()
+                .and_then(|s| parse_port_value(&s))
+        })
         .unwrap_or_else(|| {
             tracing::info!("No PORT environment variable set, using port 0 for auto-assignment");
             0

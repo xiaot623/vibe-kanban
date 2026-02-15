@@ -4,8 +4,7 @@ use executors::profile::ExecutorProfileId;
 use serde::{Deserialize, Serialize};
 use strum_macros::EnumString;
 use ts_rs::TS;
-use utils::assets::SoundAssets;
-use utils::cache_dir;
+use utils::{assets::SoundAssets, cache_dir};
 
 pub use crate::services::config::editor::EditorConfig;
 
@@ -44,12 +43,12 @@ impl Default for ThemeMode {
 pub enum UiLanguage {
     #[default]
     Browser, // Detect from browser
-    En,      // Force English
-    Ja,      // Force Japanese
-    Es,      // Force Spanish
-    Ko,      // Force Korean
-    ZhHans,  // Force Simplified Chinese
-    ZhHant,  // Force Traditional Chinese
+    En,     // Force English
+    Ja,     // Force Japanese
+    Es,     // Force Spanish
+    Ko,     // Force Korean
+    ZhHans, // Force Simplified Chinese
+    ZhHant, // Force Traditional Chinese
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]

@@ -8,6 +8,7 @@ import {
   useCallback,
 } from 'react';
 import { genId } from '@/utils/id';
+import { attemptsApi } from '@/lib/api';
 
 export interface ReviewComment {
   id: string;
@@ -15,6 +16,7 @@ export interface ReviewComment {
   lineNumber: number;
   side: SplitSide;
   text: string;
+  solved: boolean;
   codeLine?: string;
 }
 
@@ -26,11 +28,20 @@ export interface ReviewDraft {
   codeLine?: string;
 }
 
+interface ParsedPersistedComment {
+  filePath: string;
+  lineNumber: number;
+  side: SplitSide;
+  text: string;
+  codeLine?: string;
+}
+
 interface ReviewContextType {
   comments: ReviewComment[];
   drafts: Record<string, ReviewDraft>;
-  addComment: (comment: Omit<ReviewComment, 'id'>) => void;
+  addComment: (comment: Omit<ReviewComment, 'id' | 'solved'>) => void;
   updateComment: (id: string, text: string) => void;
+  toggleCommentSolved: (id: string) => void;
   deleteComment: (id: string) => void;
   clearComments: () => void;
   setDraft: (key: string, draft: ReviewDraft | null) => void;
@@ -69,10 +80,114 @@ export function ReviewProvider({
     return () => clearComments();
   }, [attemptId]);
 
-  const addComment = (comment: Omit<ReviewComment, 'id'>) => {
+  const parsePersistedReviewMarkdown = useCallback(
+    (markdown: string): ParsedPersistedComment[] => {
+      const normalized = markdown.replace(/\r\n/g, '\n').trim();
+      if (!normalized) return [];
+
+      const withoutHeader = normalized
+        .replace(/^\s*##\s+Review Comments\s+\(\d+\)\s*\n*/i, '')
+        .trim();
+      if (!withoutHeader) return [];
+
+      const sections = withoutHeader
+        .split(/\n(?=\*\*.+?\*\*\s+\(Line\s+\d+\))/)
+        .map((section) => section.trim())
+        .filter(Boolean);
+
+      return sections
+        .map((section) => {
+          const headerMatch = section.match(/^\*\*(.+?)\*\*\s+\(Line\s+(\d+)\)\s*/);
+          if (!headerMatch) return null;
+
+          const filePath = headerMatch[1].trim();
+          const lineNumber = Number(headerMatch[2]);
+          if (!filePath || Number.isNaN(lineNumber)) return null;
+
+          let rest = section.slice(headerMatch[0].length).trim();
+          let codeLine: string | undefined;
+
+          if (rest.startsWith('```')) {
+            const fencedMatch = rest.match(/^```[\w-]*\n?([\s\S]*?)\n?```/);
+            if (fencedMatch) {
+              codeLine = fencedMatch[1].trim() || undefined;
+              rest = rest.slice(fencedMatch[0].length).trim();
+            }
+          } else if (rest.startsWith('`')) {
+            const inlineMatch = rest.match(/^`([^`]+)`/);
+            if (inlineMatch) {
+              codeLine = inlineMatch[1].trim() || undefined;
+              rest = rest.slice(inlineMatch[0].length).trim();
+            }
+          }
+
+          const text = rest
+            .split('\n')
+            .map((line) => line.replace(/^>\s?/, ''))
+            .join('\n')
+            .trim();
+
+          return {
+            filePath,
+            lineNumber,
+            side: SplitSide.new,
+            text,
+            ...(codeLine ? { codeLine } : {}),
+          };
+        })
+        .filter(
+          (comment): comment is ParsedPersistedComment =>
+            comment !== null && !!comment.text
+        );
+    },
+    []
+  );
+
+  useEffect(() => {
+    let cancelled = false;
+
+    if (!attemptId) {
+      setComments([]);
+      setDrafts({});
+      return;
+    }
+
+    attemptsApi
+      .getReviewCommand(attemptId)
+      .then((command) => {
+        if (cancelled) return;
+        if (!command || command.solved || !command.markdown_text.trim()) {
+          setComments([]);
+          setDrafts({});
+          return;
+        }
+
+        const parsed = parsePersistedReviewMarkdown(command.markdown_text).map(
+          (comment) => ({
+            ...comment,
+            id: genId(),
+            solved: false,
+          })
+        );
+
+        setComments(parsed);
+        setDrafts({});
+      })
+      .catch((error) => {
+        if (cancelled) return;
+        console.error('Failed to load persisted review command comments', error);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [attemptId, parsePersistedReviewMarkdown]);
+
+  const addComment = (comment: Omit<ReviewComment, 'id' | 'solved'>) => {
     const newComment: ReviewComment = {
       ...comment,
       id: genId(),
+      solved: false,
     };
     setComments((prev) => [...prev, newComment]);
   };
@@ -81,6 +196,14 @@ export function ReviewProvider({
     setComments((prev) =>
       prev.map((comment) =>
         comment.id === id ? { ...comment, text } : comment
+      )
+    );
+  };
+
+  const toggleCommentSolved = (id: string) => {
+    setComments((prev) =>
+      prev.map((comment) =>
+        comment.id === id ? { ...comment, solved: !comment.solved } : comment
       )
     );
   };
@@ -106,9 +229,10 @@ export function ReviewProvider({
   };
 
   const generateReviewMarkdown = useCallback(() => {
-    if (comments.length === 0) return '';
+    const unsolvedComments = comments.filter((comment) => !comment.solved);
+    if (unsolvedComments.length === 0) return '';
 
-    const commentsNum = comments.length;
+    const commentsNum = unsolvedComments.length;
 
     const header = `## Review Comments (${commentsNum})\n\n`;
     const formatCodeLine = (line?: string) => {
@@ -119,7 +243,7 @@ export function ReviewProvider({
       return `\`${line}\``;
     };
 
-    const commentsMd = comments
+    const commentsMd = unsolvedComments
       .map((comment) => {
         const codeLine = formatCodeLine(comment.codeLine);
         // Format file paths in comment body with backticks
@@ -143,6 +267,7 @@ export function ReviewProvider({
         drafts,
         addComment,
         updateComment,
+        toggleCommentSolved,
         deleteComment,
         clearComments,
         setDraft,

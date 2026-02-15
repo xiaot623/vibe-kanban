@@ -1,14 +1,16 @@
 //! Central dispatcher for task state transitions.
 
 use std::sync::{Arc, OnceLock};
-use tokio::sync::{broadcast, RwLock};
 
+use tokio::sync::{RwLock, broadcast};
+
+use super::{
+    TaskStateTransition,
+    handler::{HandlerContext, TaskStateHandler},
+    registry,
+    registry::HandlerRegistry,
+};
 use crate::models::task::{Task, TaskStatus};
-
-use super::handler::{HandlerContext, TaskStateHandler};
-use super::registry;
-use super::registry::HandlerRegistry;
-use super::TaskStateTransition;
 
 static GLOBAL_DISPATCHER: OnceLock<Arc<TaskStateDispatcher>> = OnceLock::new();
 

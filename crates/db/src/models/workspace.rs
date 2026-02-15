@@ -1,6 +1,6 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use sqlx::{FromRow, SqlitePool};
+use sqlx::{FromRow, Row, SqlitePool};
 use thiserror::Error;
 use ts_rs::TS;
 use uuid::Uuid;
@@ -59,6 +59,15 @@ pub struct WorkspaceWithStatus {
     pub is_errored: bool,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+pub struct ReviewCommand {
+    pub markdown_text: String,
+    pub solved: bool,
+    pub reason: Option<String>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
 impl std::ops::Deref for WorkspaceWithStatus {
     type Target = Workspace;
     fn deref(&self) -> &Self::Target {
@@ -104,6 +113,141 @@ pub struct CreateWorkspace {
 }
 
 impl Workspace {
+    pub async fn get_review_command(
+        pool: &SqlitePool,
+        workspace_id: Uuid,
+    ) -> Result<Option<ReviewCommand>, sqlx::Error> {
+        let row = sqlx::query(
+            r#"SELECT review_command_markdown_text,
+                      review_command_solved,
+                      review_command_reason,
+                      review_command_created_at,
+                      review_command_updated_at
+               FROM workspaces
+               WHERE id = ?"#,
+        )
+        .bind(workspace_id)
+        .fetch_optional(pool)
+        .await?;
+
+        let Some(row) = row else {
+            return Ok(None);
+        };
+
+        let markdown_text: Option<String> = row.try_get("review_command_markdown_text")?;
+        let solved: Option<bool> = row.try_get("review_command_solved")?;
+        let reason: Option<String> = row.try_get("review_command_reason")?;
+        let created_at: Option<DateTime<Utc>> = row.try_get("review_command_created_at")?;
+        let updated_at: Option<DateTime<Utc>> = row.try_get("review_command_updated_at")?;
+
+        Ok(match (markdown_text, solved, created_at, updated_at) {
+            (Some(markdown_text), Some(solved), Some(created_at), Some(updated_at)) => {
+                Some(ReviewCommand {
+                    markdown_text,
+                    solved,
+                    reason,
+                    created_at,
+                    updated_at,
+                })
+            }
+            _ => None,
+        })
+    }
+
+    pub async fn get_unsolved_review_command(
+        pool: &SqlitePool,
+        workspace_id: Uuid,
+    ) -> Result<Option<ReviewCommand>, sqlx::Error> {
+        let command = Self::get_review_command(pool, workspace_id).await?;
+        Ok(command.filter(|c| !c.solved))
+    }
+
+    pub async fn list_unsolved_review_commands(
+        pool: &SqlitePool,
+        workspace_id: Uuid,
+    ) -> Result<Vec<ReviewCommand>, sqlx::Error> {
+        let command = Self::get_unsolved_review_command(pool, workspace_id).await?;
+        Ok(command.into_iter().collect())
+    }
+
+    pub async fn save_review_command(
+        pool: &SqlitePool,
+        workspace_id: Uuid,
+        markdown_text: &str,
+        reason: Option<&str>,
+    ) -> Result<ReviewCommand, sqlx::Error> {
+        sqlx::query(
+            r#"UPDATE workspaces
+               SET review_command_markdown_text = ?,
+                   review_command_solved = 0,
+                   review_command_reason = ?,
+                   review_command_created_at = COALESCE(review_command_created_at, datetime('now', 'subsec')),
+                   review_command_updated_at = datetime('now', 'subsec'),
+                   updated_at = datetime('now', 'subsec')
+               WHERE id = ?"#,
+        )
+        .bind(markdown_text)
+        .bind(reason)
+        .bind(workspace_id)
+        .execute(pool)
+        .await?;
+
+        Self::get_review_command(pool, workspace_id)
+            .await?
+            .ok_or(sqlx::Error::RowNotFound)
+    }
+
+    pub async fn set_review_command_status(
+        pool: &SqlitePool,
+        workspace_id: Uuid,
+        solved: bool,
+        reason: Option<&str>,
+    ) -> Result<ReviewCommand, sqlx::Error> {
+        let result = sqlx::query(
+            r#"UPDATE workspaces
+               SET review_command_solved = ?,
+                   review_command_reason = ?,
+                   review_command_updated_at = datetime('now', 'subsec'),
+                   updated_at = datetime('now', 'subsec')
+               WHERE id = ?
+                 AND review_command_markdown_text IS NOT NULL"#,
+        )
+        .bind(solved)
+        .bind(reason)
+        .bind(workspace_id)
+        .execute(pool)
+        .await?;
+
+        if result.rows_affected() == 0 {
+            return Err(sqlx::Error::RowNotFound);
+        }
+
+        Self::get_review_command(pool, workspace_id)
+            .await?
+            .ok_or(sqlx::Error::RowNotFound)
+    }
+
+    pub async fn clear_review_command(
+        pool: &SqlitePool,
+        workspace_id: Uuid,
+    ) -> Result<(), sqlx::Error> {
+        sqlx::query(
+            r#"UPDATE workspaces
+               SET review_command_markdown_text = NULL,
+                   review_command_solved = NULL,
+                   review_command_reason = NULL,
+                   review_command_created_at = NULL,
+                   review_command_updated_at = NULL,
+                   updated_at = datetime('now', 'subsec')
+               WHERE id = ?"#,
+        )
+        .bind(workspace_id)
+        .execute(pool)
+        .await?;
+
+        Ok(())
+    }
+
     pub async fn parent_task(&self, pool: &SqlitePool) -> Result<Option<Task>, sqlx::Error> {
         Task::find_by_id(pool, self.task_id).await
     }

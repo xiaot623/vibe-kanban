@@ -97,14 +97,14 @@ pub enum CodingAgent {
 }
 
 impl CodingAgent {
-    pub fn get_mcp_config(&self) -> McpConfig {
+    pub fn get_mcp_config(&self, mcp_port: u16) -> McpConfig {
         match self {
             Self::Codex(_) => McpConfig::new(
                 vec!["mcp_servers".to_string()],
                 serde_json::json!({
                     "mcp_servers": {}
                 }),
-                self.preconfigured_mcp(),
+                self.preconfigured_mcp(mcp_port),
                 true,
             ),
             Self::Opencode(_) => McpConfig::new(
@@ -113,7 +113,7 @@ impl CodingAgent {
                     "mcp": {},
                     "$schema": "https://opencode.ai/config.json"
                 }),
-                self.preconfigured_mcp(),
+                self.preconfigured_mcp(mcp_port),
                 false,
             ),
             Self::Droid(_) => McpConfig::new(
@@ -121,7 +121,7 @@ impl CodingAgent {
                 serde_json::json!({
                     "mcpServers": {}
                 }),
-                self.preconfigured_mcp(),
+                self.preconfigured_mcp(mcp_port),
                 false,
             ),
             _ => McpConfig::new(
@@ -129,7 +129,7 @@ impl CodingAgent {
                 serde_json::json!({
                     "mcpServers": {}
                 }),
-                self.preconfigured_mcp(),
+                self.preconfigured_mcp(mcp_port),
                 false,
             ),
         }

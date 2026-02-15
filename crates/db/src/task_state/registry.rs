@@ -4,8 +4,10 @@ use std::sync::{Arc, OnceLock};
 
 use tokio::sync::RwLock;
 
-use super::TaskStateTransition;
-use super::handler::{HandlerContext, TaskStateHandler};
+use super::{
+    TaskStateTransition,
+    handler::{HandlerContext, TaskStateHandler},
+};
 
 /// Runtime handler registry.
 pub struct HandlerRegistry {

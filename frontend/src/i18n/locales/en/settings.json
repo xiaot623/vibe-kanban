@@ -212,6 +212,16 @@
           "helper": "Mode used when /run doesn't specify one."
         }
       },
+      "mcpServer": {
+        "enabled": {
+          "label": "Enable MCP server (Beta)",
+          "helper": "Expose a local MCP endpoint that coding agents can connect to by URL."
+        },
+        "port": {
+          "label": "MCP server port",
+          "helper": "Agents can connect to http://127.0.0.1:{{port}}/mcp."
+        }
+      },
       "privacy": {
         "title": "Privacy",
         "description": "Help improve Vibe-Kanban by sharing anonymous usage data.",

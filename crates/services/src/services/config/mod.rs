@@ -39,6 +39,7 @@ pub type UiLanguage = versions::v2::UiLanguage;
 pub type ShowcaseState = versions::v2::ShowcaseState;
 pub type ProxyConfig = versions::v2::ProxyConfig;
 pub type TelegramConfig = versions::v2::TelegramConfig;
+pub type McpServerConfig = versions::v2::McpServerConfig;
 pub type PowerMode = versions::v2::PowerMode;
 
 /// Load config from file, creating default if not exists
@@ -116,7 +117,10 @@ pub async fn load_config_from_file(config_path: &PathBuf) -> ConfigLoadResult {
             }
         }
     } else {
-        tracing::info!("No config file found, creating default at {:?}", config_path);
+        tracing::info!(
+            "No config file found, creating default at {:?}",
+            config_path
+        );
         let config = Config::default();
         if let Err(e) = save_config_to_file(&config, config_path).await {
             tracing::warn!("Failed to save default config: {}", e);

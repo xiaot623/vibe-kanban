@@ -47,7 +47,9 @@ impl LogMsg {
             LogMsg::Finished => Event::default().event(EV_FINISHED).data(""),
             LogMsg::Notification(title, message) => {
                 let data = serde_json::json!({ "title": title, "message": message });
-                Event::default().event(EV_NOTIFICATION).data(data.to_string())
+                Event::default()
+                    .event(EV_NOTIFICATION)
+                    .data(data.to_string())
             }
         }
     }

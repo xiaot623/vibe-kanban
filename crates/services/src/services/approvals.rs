@@ -227,10 +227,7 @@ impl Approvals {
                         }
                     }
                     Err(e) => {
-                        tracing::warn!(
-                            "Failed to load execution context for plan approval: {}",
-                            e
-                        );
+                        tracing::warn!("Failed to load execution context for plan approval: {}", e);
                     }
                 }
             }

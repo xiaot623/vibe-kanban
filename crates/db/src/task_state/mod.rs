@@ -5,8 +5,9 @@ pub mod handler;
 pub mod registry;
 pub mod transition;
 
-use crate::models::task::{Task, TaskStatus};
 use transition::StateTransition;
+
+use crate::models::task::{Task, TaskStatus};
 
 /// Task-specific state transition with full task context.
 #[derive(Debug, Clone)]

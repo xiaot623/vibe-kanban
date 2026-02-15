@@ -902,7 +902,10 @@ fn apply_proxy_env(env: &mut ExecutionEnv, proxy: &ProxyConfig) {
 }
 
 fn apply_proxy_value(env: &mut ExecutionEnv, key: &str, value: &Option<String>) {
-    if let Some(value) = value.as_ref().map(|value| value.trim()).filter(|value| !value.is_empty())
+    if let Some(value) = value
+        .as_ref()
+        .map(|value| value.trim())
+        .filter(|value| !value.is_empty())
     {
         env.insert(key, value);
     }
@@ -1251,7 +1254,9 @@ impl ContainerService for LocalContainerService {
                 ExecutionProcessRunReason::DevServer
             )
         {
-            if let Err(e) = Task::update_status(&self.db.pool, ctx.task.id, TaskStatus::InReview).await {
+            if let Err(e) =
+                Task::update_status(&self.db.pool, ctx.task.id, TaskStatus::InReview).await
+            {
                 tracing::error!("Failed to update task status to InReview: {e}");
             }
         }

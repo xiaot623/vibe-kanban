@@ -1,12 +1,12 @@
 //! Handler trait and filter types for task state transitions.
 
-use async_trait::async_trait;
-use sqlx::SqlitePool;
 use std::{future::Future, pin::Pin, sync::Arc};
 
-use crate::models::task::TaskStatus;
+use async_trait::async_trait;
+use sqlx::SqlitePool;
 
 use super::TaskStateTransition;
+use crate::models::task::TaskStatus;
 
 /// Filter specification for which transitions a handler should receive.
 #[derive(Debug, Clone, Default)]
@@ -90,9 +90,7 @@ pub type HandlerFuture<'a> = Pin<Box<dyn Future<Output = ()> + Send + 'a>>;
 
 /// Function signature for handler callbacks.
 pub type HandlerFn = Arc<
-    dyn for<'a> Fn(&'a HandlerContext, &'a TaskStateTransition) -> HandlerFuture<'a>
-        + Send
-        + Sync,
+    dyn for<'a> Fn(&'a HandlerContext, &'a TaskStateTransition) -> HandlerFuture<'a> + Send + Sync,
 >;
 
 /// Handler implementation backed by a function callback.
@@ -132,9 +130,9 @@ pub fn fn_handler(
     name: &'static str,
     filter: TransitionFilter,
     handler: impl for<'a> Fn(&'a HandlerContext, &'a TaskStateTransition) -> HandlerFuture<'a>
-        + Send
-        + Sync
-        + 'static,
+    + Send
+    + Sync
+    + 'static,
 ) -> Arc<dyn TaskStateHandler> {
     Arc::new(FnTaskStateHandler::new(name, filter, Arc::new(handler)))
 }

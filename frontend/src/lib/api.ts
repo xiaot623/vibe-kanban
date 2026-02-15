@@ -68,6 +68,9 @@ import {
   Workspace,
   StartReviewRequest,
   ReviewError,
+  ReviewCommand,
+  SaveReviewCommandRequest,
+  UpdateReviewCommandStatusRequest,
 } from 'shared/types';
 import type { WorkspaceWithSession } from '@/types/attempt';
 import { createWorkspaceWithSession } from '@/types/attempt';
@@ -681,6 +684,60 @@ export const attemptsApi = {
       `/api/task-attempts/${attemptId}/mark-seen`,
       {
         method: 'PUT',
+      }
+    );
+    return handleApiResponse<void>(response);
+  },
+
+  getReviewCommand: async (attemptId: string): Promise<ReviewCommand | null> => {
+    const response = await makeRequest(
+      `/api/task-attempts/${attemptId}/review-command`
+    );
+    return handleApiResponse<ReviewCommand | null>(response);
+  },
+
+  getUnsolvedReviewCommands: async (
+    attemptId: string
+  ): Promise<ReviewCommand[]> => {
+    const response = await makeRequest(
+      `/api/task-attempts/${attemptId}/review-command/unsolved`
+    );
+    return handleApiResponse<ReviewCommand[]>(response);
+  },
+
+  saveReviewCommand: async (
+    attemptId: string,
+    data: SaveReviewCommandRequest
+  ): Promise<ReviewCommand> => {
+    const response = await makeRequest(
+      `/api/task-attempts/${attemptId}/review-command`,
+      {
+        method: 'PUT',
+        body: JSON.stringify(data),
+      }
+    );
+    return handleApiResponse<ReviewCommand>(response);
+  },
+
+  updateReviewCommandStatus: async (
+    attemptId: string,
+    data: UpdateReviewCommandStatusRequest
+  ): Promise<ReviewCommand> => {
+    const response = await makeRequest(
+      `/api/task-attempts/${attemptId}/review-command/status`,
+      {
+        method: 'PATCH',
+        body: JSON.stringify(data),
+      }
+    );
+    return handleApiResponse<ReviewCommand>(response);
+  },
+
+  deleteReviewCommand: async (attemptId: string): Promise<void> => {
+    const response = await makeRequest(
+      `/api/task-attempts/${attemptId}/review-command`,
+      {
+        method: 'DELETE',
       }
     );
     return handleApiResponse<void>(response);

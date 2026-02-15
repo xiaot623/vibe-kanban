@@ -15,7 +15,7 @@ use axum::{
 use db::models::{
     image::TaskImage,
     repo::{Repo, RepoError},
-    task::{CreateTask, Task, TaskWithAttemptStatus, UpdateTask},
+    task::{CreateTask, Task, TaskStatus, TaskWithAttemptStatus, UpdateTask},
     workspace::{CreateWorkspace, Workspace},
     workspace_repo::{CreateWorkspaceRepo, WorkspaceRepo},
 };
@@ -37,6 +37,11 @@ use crate::{
 #[derive(Debug, Serialize, Deserialize)]
 pub struct TaskQuery {
     pub project_id: Uuid,
+}
+
+#[derive(Debug, Deserialize, Default)]
+pub struct TaskMutationQuery {
+    pub expected_status: Option<TaskStatus>,
 }
 
 pub async fn get_tasks(
@@ -248,8 +253,18 @@ pub async fn create_task_and_start(
 pub async fn update_task(
     Extension(existing_task): Extension<Task>,
     State(deployment): State<DeploymentImpl>,
+    Query(query): Query<TaskMutationQuery>,
     Json(payload): Json<UpdateTask>,
 ) -> Result<ResponseJson<ApiResponse<Task>>, ApiError> {
+    if let Some(expected_status) = query.expected_status
+        && existing_task.status != expected_status
+    {
+        return Err(ApiError::BadRequest(format!(
+            "Task status must be '{}' for this operation",
+            expected_status
+        )));
+    }
+
     // Use existing values if not provided in update
     let title = payload.title.unwrap_or(existing_task.title);
     let description = match payload.description {
@@ -284,7 +299,17 @@ pub async fn update_task(
 pub async fn delete_task(
     Extension(task): Extension<Task>,
     State(deployment): State<DeploymentImpl>,
+    Query(query): Query<TaskMutationQuery>,
 ) -> Result<(StatusCode, ResponseJson<ApiResponse<()>>), ApiError> {
+    if let Some(expected_status) = query.expected_status
+        && task.status != expected_status
+    {
+        return Err(ApiError::BadRequest(format!(
+            "Task status must be '{}' for this operation",
+            expected_status
+        )));
+    }
+
     let pool = &deployment.db().pool;
 
     // Gather task attempts data needed for background cleanup

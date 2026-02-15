@@ -1105,6 +1105,64 @@ export function GeneralSettings() {
               </div>
             </>
           )}
+
+          <div className="flex items-center space-x-2">
+            <Checkbox
+              id="mcp-server-enabled"
+              checked={draft?.mcp_server?.enabled ?? false}
+              onCheckedChange={(checked: boolean) =>
+                updateDraft({
+                  mcp_server: {
+                    ...(draft?.mcp_server ?? {
+                      enabled: false,
+                      port: 45677,
+                    }),
+                    enabled: checked,
+                  },
+                })
+              }
+            />
+            <div className="space-y-0.5">
+              <Label htmlFor="mcp-server-enabled" className="cursor-pointer">
+                {t('settings.general.mcpServer.enabled.label')}
+              </Label>
+              <p className="text-sm text-muted-foreground">
+                {t('settings.general.mcpServer.enabled.helper')}
+              </p>
+            </div>
+          </div>
+
+          {draft?.mcp_server?.enabled && (
+            <div className="ml-6 space-y-2">
+              <Label htmlFor="mcp-server-port">
+                {t('settings.general.mcpServer.port.label')}
+              </Label>
+              <Input
+                id="mcp-server-port"
+                type="number"
+                min={1}
+                max={65535}
+                value={draft?.mcp_server?.port ?? 45677}
+                onChange={(e) => {
+                  const nextPort = Number.parseInt(e.target.value, 10);
+                  updateDraft({
+                    mcp_server: {
+                      ...(draft?.mcp_server ?? {
+                        enabled: true,
+                        port: 45677,
+                      }),
+                      port: Number.isNaN(nextPort) ? 45677 : nextPort,
+                    },
+                  });
+                }}
+              />
+              <p className="text-sm text-muted-foreground">
+                {t('settings.general.mcpServer.port.helper', {
+                  port: draft?.mcp_server?.port ?? 45677,
+                })}
+              </p>
+            </div>
+          )}
         </CardContent>
       </Card>
 

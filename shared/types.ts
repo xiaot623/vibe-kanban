@@ -76,6 +76,8 @@ export type Workspace = { id: string, task_id: string, container_ref: string | n
 
 export type WorkspaceWithStatus = { is_running: boolean, is_errored: boolean, id: string, task_id: string, container_ref: string | null, branch: string, agent_working_dir: string | null, setup_completed_at: string | null, created_at: string, updated_at: string, archived: boolean, pinned: boolean, name: string | null, };
 
+export type ReviewCommand = { markdown_text: string, solved: boolean, reason: string | null, created_at: string, updated_at: string, };
+
 export type Session = { id: string, workspace_id: string, executor: string | null, created_at: string, updated_at: string, };
 
 export type ExecutionProcess = { id: string, session_id: string, run_reason: ExecutionProcessRunReason, executor_action: ExecutorAction, status: ExecutionProcessStatus, exit_code: bigint | null, 
@@ -224,6 +226,10 @@ conflicted_files: Array<string>, };
 
 export type RunScriptError = { "type": "no_script_configured" } | { "type": "process_already_running" };
 
+export type SaveReviewCommandRequest = { markdown_text: string, reason: string | null, };
+
+export type UpdateReviewCommandStatusRequest = { solved: boolean, reason: string | null, };
+
 export type AttachPrResponse = { pr_attached: boolean, pr_url: string | null, pr_number: bigint | null, pr_status: MergeStatus | null, };
 
 export type AttachExistingPrRequest = { repo_id: string, };
@@ -308,7 +314,7 @@ export type DirectoryListResponse = { entries: Array<DirectoryEntry>, current_pa
 
 export type SearchMode = "taskform" | "settings";
 
-export type Config = { config_version: string, theme: ThemeMode, executor_profile: ExecutorProfileId, disclaimer_acknowledged: boolean, onboarding_acknowledged: boolean, notifications: NotificationConfig, editor: EditorConfig, github: GitHubConfig, analytics_enabled: boolean, workspace_dir: string | null, last_app_version: string | null, show_release_notes: boolean, language: UiLanguage, git_branch_prefix: string, showcases: ShowcaseState, pr_auto_description_enabled: boolean, pr_auto_description_prompt: string | null, beta_workspaces: boolean, beta_workspaces_invitation_sent: boolean, local_network_access: boolean, local_network_password: string | null, commit_reminder: boolean, proxy: ProxyConfig, telegram: TelegramConfig, power_mode: PowerMode, };
+export type Config = { config_version: string, theme: ThemeMode, executor_profile: ExecutorProfileId, disclaimer_acknowledged: boolean, onboarding_acknowledged: boolean, notifications: NotificationConfig, editor: EditorConfig, github: GitHubConfig, analytics_enabled: boolean, workspace_dir: string | null, last_app_version: string | null, show_release_notes: boolean, language: UiLanguage, git_branch_prefix: string, showcases: ShowcaseState, pr_auto_description_enabled: boolean, pr_auto_description_prompt: string | null, beta_workspaces: boolean, beta_workspaces_invitation_sent: boolean, local_network_access: boolean, local_network_password: string | null, commit_reminder: boolean, proxy: ProxyConfig, telegram: TelegramConfig, mcp_server: McpServerConfig, power_mode: PowerMode, };
 
 export type NotificationConfig = { sound_enabled: boolean, push_enabled: boolean, sound_file: SoundFile, };
 
@@ -333,6 +339,8 @@ export type ShowcaseState = { seen_features: Array<string>, };
 export type ProxyConfig = { http_proxy: string | null, https_proxy: string | null, no_proxy: string | null, };
 
 export type TelegramConfig = { enabled: boolean, bot_token: string | null, chat_id: bigint | null, default_executor: string, default_mode: string, };
+
+export type McpServerConfig = { enabled: boolean, port: number, };
 
 export type GitBranch = { name: string, is_current: boolean, is_remote: boolean, last_commit_date: Date, };
 

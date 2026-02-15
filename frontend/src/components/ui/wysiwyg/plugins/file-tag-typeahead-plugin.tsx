@@ -13,17 +13,30 @@ import {
 } from 'lexical';
 import { Tag as TagIcon, FileText } from 'lucide-react';
 import { usePortalContainer } from '@/contexts/PortalContainerContext';
+import { attemptsApi } from '@/lib/api';
 import {
   searchTagsAndFiles,
   type SearchResultItem,
 } from '@/lib/searchTagsAndFiles';
 
-class FileTagOption extends MenuOption {
-  item: SearchResultItem;
+type ReviewDirectiveOptionItem = {
+  type: 'review';
+  label: string;
+  description: string;
+};
 
-  constructor(item: SearchResultItem) {
+type TypeaheadOptionItem = SearchResultItem | ReviewDirectiveOptionItem;
+
+class FileTagOption extends MenuOption {
+  item: TypeaheadOptionItem;
+
+  constructor(item: TypeaheadOptionItem) {
     const key =
-      item.type === 'tag' ? `tag-${item.tag!.id}` : `file-${item.file!.path}`;
+      item.type === 'tag'
+        ? `tag-${item.tag!.id}`
+        : item.type === 'file'
+          ? `file-${item.file!.path}`
+          : 'directive-review';
     super(key);
     this.item = item;
   }
@@ -139,8 +152,25 @@ export function FileTagTypeaheadPlugin({
           const remainingSlots = MAX_FILE_RESULTS - limitedLocalFiles.length;
           const limitedServerFiles = serverFileResults.slice(0, remainingSlots);
 
+          const shouldShowReviewDirective =
+            !!workspaceId &&
+            query.trim().length > 0 &&
+            'review'.startsWith(query.trim().toLowerCase());
+
+          const reviewDirectiveResults: TypeaheadOptionItem[] =
+            shouldShowReviewDirective
+              ? [
+                  {
+                    type: 'review',
+                    label: '@review',
+                    description: 'Insert all unsolved review commands',
+                  },
+                ]
+              : [];
+
           // Build merged results: tags, then local files (ranked higher), then server files
-          const mergedResults: SearchResultItem[] = [
+          const mergedResults: TypeaheadOptionItem[] = [
+            ...reviewDirectiveResults,
             ...tagResults,
             ...limitedLocalFiles.map((file) => ({
               type: 'file' as const,
@@ -174,20 +204,56 @@ export function FileTagTypeaheadPlugin({
       options={options}
       onQueryChange={onQueryChange}
       onSelectOption={(option, nodeToReplace, closeMenu) => {
+        const selectedItem = option.item;
+
+        if (selectedItem.type === 'review') {
+          closeMenu();
+          if (!workspaceId) return;
+          if (!nodeToReplace) return;
+
+          attemptsApi
+            .getUnsolvedReviewCommands(workspaceId)
+            .then((commands) => {
+              const markdown = commands
+                .map((command) => command.markdown_text.trim())
+                .filter(Boolean)
+                .join('\n\n');
+
+              editor.update(() => {
+                if (!nodeToReplace) return;
+                if (!markdown) {
+                  const textNode = $createTextNode('');
+                  nodeToReplace.replace(textNode);
+                  textNode.select(0, 0);
+                  return;
+                }
+
+                const textNode = $createTextNode(markdown);
+                nodeToReplace.replace(textNode);
+                textNode.select(markdown.length, markdown.length);
+              });
+            })
+            .catch((err) => {
+              console.error('Failed to load unsolved review commands', err);
+            });
+
+          return;
+        }
+
         editor.update(() => {
           if (!nodeToReplace) return;
 
-          if (option.item.type === 'tag') {
+          if (selectedItem.type === 'tag') {
             // For tags, keep the existing behavior (insert tag content as plain text)
-            const textToInsert = option.item.tag?.content ?? '';
+            const textToInsert = selectedItem.tag?.content ?? '';
             const textNode = $createTextNode(textToInsert);
             nodeToReplace.replace(textNode);
             textNode.select(textToInsert.length, textToInsert.length);
-          } else {
+          } else if (selectedItem.type === 'file') {
             // For files, insert filename as inline code at cursor,
             // and append full path as inline code at the bottom
-            const fileName = option.item.file?.name ?? '';
-            const fullPath = option.item.file?.path ?? '';
+            const fileName = selectedItem.file?.name ?? '';
+            const fullPath = selectedItem.file?.path ?? '';
 
             // Step 1: Insert filename as inline code at cursor position
             const fileNameNode = $createTextNode(fileName);
@@ -242,6 +308,9 @@ export function FileTagTypeaheadPlugin({
 
         const { top, bottom, left } = getMenuPosition(anchorRef.current);
 
+        const reviewDirectiveResults = options.filter(
+          (r) => r.item.type === 'review'
+        );
         const tagResults = options.filter((r) => r.item.type === 'tag');
         const fileResults = options.filter((r) => r.item.type === 'file');
 
@@ -262,15 +331,54 @@ export function FileTagTypeaheadPlugin({
               </div>
             ) : (
               <div className="py-1">
+                {reviewDirectiveResults.length > 0 && (
+                  <>
+                    <div className="px-3 py-1 text-xs font-semibold text-muted-foreground uppercase">
+                      Commands
+                    </div>
+                    {reviewDirectiveResults.map((option) => {
+                      const index = options.indexOf(option);
+                      const reviewOption = option.item as ReviewDirectiveOptionItem;
+                      return (
+                        <div
+                          key={option.key}
+                          className={`px-3 py-2 cursor-pointer text-sm border-l-2 ${
+                            index === selectedIndex
+                              ? 'bg-muted bg-secondary border-l-brand text-high'
+                              : 'hover:bg-muted border-l-transparent text-muted-foreground'
+                          }`}
+                          onMouseMove={(e) => {
+                            const pos = { x: e.clientX, y: e.clientY };
+                            const last = lastMousePositionRef.current;
+                            if (!last || last.x !== pos.x || last.y !== pos.y) {
+                              lastMousePositionRef.current = pos;
+                              setHighlightedIndex(index);
+                            }
+                          }}
+                          onClick={() => selectOptionAndCleanUp(option)}
+                        >
+                          <div className="font-medium">{reviewOption.label}</div>
+                          <div className="text-xs mt-0.5">
+                            {reviewOption.description}
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </>
+                )}
+
                 {/* Tags Section */}
                 {tagResults.length > 0 && (
                   <>
+                    {reviewDirectiveResults.length > 0 && (
+                      <div className="border-t my-1" />
+                    )}
                     <div className="px-3 py-1 text-xs font-semibold text-muted-foreground uppercase">
                       Tags
                     </div>
                     {tagResults.map((option) => {
                       const index = options.indexOf(option);
-                      const tag = option.item.tag!;
+                      const tag = (option.item as SearchResultItem).tag!;
                       return (
                         <div
                           key={option.key}
@@ -314,7 +422,7 @@ export function FileTagTypeaheadPlugin({
                     </div>
                     {fileResults.map((option) => {
                       const index = options.indexOf(option);
-                      const file = option.item.file!;
+                      const file = (option.item as SearchResultItem).file!;
                       return (
                         <div
                           key={option.key}

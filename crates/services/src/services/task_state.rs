@@ -10,9 +10,11 @@
 
 use std::sync::Arc;
 
-use db::models::task::{Task, TaskStatus};
+use db::{
+    models::task::{Task, TaskStatus},
+    task_state::dispatcher::{TaskStateDispatcher, shared_dispatcher},
+};
 use sqlx::SqlitePool;
-use db::task_state::dispatcher::{TaskStateDispatcher, shared_dispatcher};
 
 /// Service for managing task state transitions with event dispatch.
 ///
@@ -64,7 +66,9 @@ impl TaskStateService {
     }
 
     /// Subscribe to state transitions.
-    pub fn subscribe(&self) -> tokio::sync::broadcast::Receiver<db::task_state::TaskStateTransition> {
+    pub fn subscribe(
+        &self,
+    ) -> tokio::sync::broadcast::Receiver<db::task_state::TaskStateTransition> {
         self.dispatcher.subscribe()
     }
 }

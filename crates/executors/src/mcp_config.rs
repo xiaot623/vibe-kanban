@@ -8,9 +8,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use tokio::fs;
 use ts_rs::TS;
+use workspace_utils::assets::default_mcp;
 
 use crate::executors::{CodingAgent, ExecutorError};
-use workspace_utils::assets::default_mcp;
 
 pub static PRECONFIGURED_MCP_SERVERS: LazyLock<Value> = LazyLock::new(|| {
     let mcp_bytes = default_mcp();
@@ -258,8 +258,31 @@ fn apply_adapter(adapter: Adapter, canonical: Value) -> Value {
     }
 }
 
+fn inject_mcp_port(value: &mut Value, port: u16) {
+    replace_placeholder(value, "{{MCP_PORT}}", &port.to_string());
+}
+
+fn replace_placeholder(value: &mut Value, placeholder: &str, replacement: &str) {
+    match value {
+        Value::String(s) if s.contains(placeholder) => {
+            *s = s.replace(placeholder, replacement);
+        }
+        Value::Object(map) => {
+            for nested in map.values_mut() {
+                replace_placeholder(nested, placeholder, replacement);
+            }
+        }
+        Value::Array(items) => {
+            for nested in items {
+                replace_placeholder(nested, placeholder, replacement);
+            }
+        }
+        _ => {}
+    }
+}
+
 impl CodingAgent {
-    pub fn preconfigured_mcp(&self) -> Value {
+    pub fn preconfigured_mcp(&self, mcp_port: u16) -> Value {
         use Adapter::*;
 
         let adapter = match self {
@@ -271,7 +294,8 @@ impl CodingAgent {
             CodingAgent::QaMock(_) => Passthrough, // QA mock doesn't need MCP
         };
 
-        let canonical = PRECONFIGURED_MCP_SERVERS.clone();
+        let mut canonical = PRECONFIGURED_MCP_SERVERS.clone();
+        inject_mcp_port(&mut canonical, mcp_port);
         apply_adapter(adapter, canonical)
     }
 }

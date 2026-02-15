@@ -1,12 +1,12 @@
 import { useCallback, useState } from 'react';
-import { sessionsApi } from '@/lib/api';
+import { attemptsApi, sessionsApi } from '@/lib/api';
 import type { CreateFollowUpAttempt } from 'shared/types';
 
 type Args = {
   sessionId?: string;
+  workspaceId?: string;
   message: string;
   conflictMarkdown: string | null;
-  reviewMarkdown: string;
   clickedMarkdown?: string;
   selectedVariant: string | null;
   clearComments: () => void;
@@ -16,9 +16,9 @@ type Args = {
 
 export function useFollowUpSend({
   sessionId,
+  workspaceId,
   message,
   conflictMarkdown,
-  reviewMarkdown,
   clickedMarkdown,
   selectedVariant,
   clearComments,
@@ -30,19 +30,27 @@ export function useFollowUpSend({
 
   const onSendFollowUp = useCallback(async () => {
     if (!sessionId) return;
-    const extraMessage = message.trim();
-    const finalPrompt = [
-      conflictMarkdown,
-      clickedMarkdown?.trim(),
-      reviewMarkdown?.trim(),
-      extraMessage,
-    ]
-      .filter(Boolean)
-      .join('\n\n');
-    if (!finalPrompt) return;
     try {
       setIsSendingFollowUp(true);
       setFollowUpError(null);
+      const unsolvedReviewCommandMarkdowns = workspaceId
+        ? (
+            await attemptsApi.getUnsolvedReviewCommands(workspaceId)
+          ).map((command) => command.markdown_text.trim())
+        : [];
+      const extraMessage = message.trim();
+      const baseParts = [
+        conflictMarkdown,
+        clickedMarkdown?.trim(),
+        extraMessage,
+      ].filter(Boolean) as string[];
+      const commandParts = unsolvedReviewCommandMarkdowns.filter(
+        (commandMarkdown) =>
+          commandMarkdown &&
+          !baseParts.some((part) => part.includes(commandMarkdown))
+      );
+      const finalPrompt = [...baseParts, ...commandParts].join('\n\n');
+      if (!finalPrompt) return;
       const body: CreateFollowUpAttempt = {
         prompt: finalPrompt,
         variant: selectedVariant,
@@ -65,9 +73,9 @@ export function useFollowUpSend({
     }
   }, [
     sessionId,
+    workspaceId,
     message,
     conflictMarkdown,
-    reviewMarkdown,
     clickedMarkdown,
     selectedVariant,
     clearComments,

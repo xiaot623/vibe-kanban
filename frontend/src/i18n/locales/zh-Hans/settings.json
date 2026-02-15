@@ -212,6 +212,16 @@
           "helper": "telegram bot 执行 executor 使用的默认模式。"
         }
       },
+      "mcpServer": {
+        "enabled": {
+          "label": "启用 MCP 服务器（Beta）",
+          "helper": "在本地暴露可通过 URL 连接的 MCP 端点。"
+        },
+        "port": {
+          "label": "MCP 服务器端口",
+          "helper": "代理可连接到 http://127.0.0.1:{{port}}/mcp。"
+        }
+      },
       "privacy": {
         "title": "隐私",
         "description": "通过共享匿名使用数据帮助改进 Vibe-Kanban。",

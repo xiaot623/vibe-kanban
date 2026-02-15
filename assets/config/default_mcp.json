@@ -1,11 +1,7 @@
 {
   "vibe_kanban": {
-    "command": "npx",
-    "args": [
-      "-y",
-      "vibe-kanban@latest",
-      "--mcp"
-    ]
+    "type": "http",
+    "url": "http://127.0.0.1:{{MCP_PORT}}/mcp"
   },
   "context7": {
     "type": "http",

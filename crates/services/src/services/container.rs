@@ -161,11 +161,10 @@ pub trait ContainerService {
     }
 
     /// Finalize task execution by updating status to InReview and sending notifications
-    async fn finalize_task(
-        &self,
-        ctx: &ExecutionContext,
-    ) {
-        if let Err(e) = Task::update_status(&self.db().pool, ctx.task.id, TaskStatus::InReview).await {
+    async fn finalize_task(&self, ctx: &ExecutionContext) {
+        if let Err(e) =
+            Task::update_status(&self.db().pool, ctx.task.id, TaskStatus::InReview).await
+        {
             tracing::error!("Failed to update task status to InReview: {e}");
         }
 
@@ -259,7 +258,9 @@ pub trait ContainerService {
                     Workspace::find_by_id(&self.db().pool, session.workspace_id).await
                 && let Ok(Some(task)) = workspace.parent_task(&self.db().pool).await
             {
-                if let Err(e) = Task::update_status(&self.db().pool, task.id, TaskStatus::InReview).await {
+                if let Err(e) =
+                    Task::update_status(&self.db().pool, task.id, TaskStatus::InReview).await
+                {
                     tracing::error!(
                         "Failed to update task status to InReview for orphaned session: {}",
                         e

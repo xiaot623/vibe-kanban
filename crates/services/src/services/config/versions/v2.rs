@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use strum_macros::EnumString;
 use ts_rs::TS;
 use utils::{
-    assets::{default_config, SoundAssets},
+    assets::{SoundAssets, default_config},
     cache_dir,
 };
 
@@ -49,6 +49,26 @@ impl Default for TelegramConfig {
     }
 }
 
+fn default_mcp_server_port() -> u16 {
+    45677
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, TS)]
+pub struct McpServerConfig {
+    pub enabled: bool,
+    #[serde(default = "default_mcp_server_port")]
+    pub port: u16,
+}
+
+impl Default for McpServerConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            port: default_mcp_server_port(),
+        }
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, TS, Default)]
 pub struct ShowcaseState {
     #[serde(default)]
@@ -77,12 +97,12 @@ impl Default for ThemeMode {
 pub enum UiLanguage {
     #[default]
     Browser, // Detect from browser
-    En,      // Force English
-    Ja,      // Force Japanese
-    Es,      // Force Spanish
-    Ko,      // Force Korean
-    ZhHans,  // Force Simplified Chinese
-    ZhHant,  // Force Traditional Chinese
+    En,     // Force English
+    Ja,     // Force Japanese
+    Es,     // Force Spanish
+    Ko,     // Force Korean
+    ZhHans, // Force Simplified Chinese
+    ZhHant, // Force Traditional Chinese
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, TS, Default, PartialEq, Eq)]
@@ -222,7 +242,7 @@ impl SoundFile {
     }
 }
 
-/// V2 Config - adds local_network_access, local_network_password, and telegram fields
+/// V2 Config - includes local network, telegram bot, and embedded MCP server settings
 #[derive(Clone, Debug, Serialize, Deserialize, TS)]
 pub struct Config {
     pub config_version: String,
@@ -261,6 +281,8 @@ pub struct Config {
     pub proxy: ProxyConfig,
     #[serde(default)]
     pub telegram: TelegramConfig,
+    #[serde(default)]
+    pub mcp_server: McpServerConfig,
     #[serde(default)]
     pub power_mode: PowerMode,
 }
@@ -337,6 +359,7 @@ impl From<super::v1::Config> for Config {
             local_network_access: false,
             local_network_password: None,
             telegram: TelegramConfig::default(),
+            mcp_server: McpServerConfig::default(),
             power_mode: PowerMode::default(),
         }
     }

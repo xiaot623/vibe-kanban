@@ -19,7 +19,7 @@ use axum::{
     http::StatusCode,
     middleware::from_fn_with_state,
     response::{IntoResponse, Json as ResponseJson},
-    routing::{get, post, put},
+    routing::{get, patch, post, put},
 };
 use db::models::{
     coding_agent_turn::CodingAgentTurn,
@@ -29,7 +29,7 @@ use db::models::{
     repo::{Repo, RepoError},
     session::{CreateSession, Session},
     task::{Task, TaskRelationships, TaskStatus},
-    workspace::{CreateWorkspace, Workspace, WorkspaceError},
+    workspace::{CreateWorkspace, ReviewCommand, Workspace, WorkspaceError},
     workspace_repo::{CreateWorkspaceRepo, RepoWithTargetBranch, WorkspaceRepo},
 };
 use deployment::Deployment;
@@ -103,6 +103,18 @@ pub struct UpdateWorkspace {
     pub name: Option<String>,
 }
 
+#[derive(Debug, Deserialize, Serialize, TS)]
+pub struct SaveReviewCommandRequest {
+    pub markdown_text: String,
+    pub reason: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Serialize, TS)]
+pub struct UpdateReviewCommandStatusRequest {
+    pub solved: bool,
+    pub reason: Option<String>,
+}
+
 pub async fn get_task_attempts(
     State(deployment): State<DeploymentImpl>,
     Query(query): Query<TaskAttemptQuery>,
@@ -146,11 +158,87 @@ pub async fn update_workspace(
     Ok(ResponseJson(ApiResponse::success(updated)))
 }
 
+pub async fn get_review_command(
+    Extension(workspace): Extension<Workspace>,
+    State(deployment): State<DeploymentImpl>,
+) -> Result<ResponseJson<ApiResponse<Option<ReviewCommand>>>, ApiError> {
+    let pool = &deployment.db().pool;
+    let command = Workspace::get_review_command(pool, workspace.id).await?;
+    Ok(ResponseJson(ApiResponse::success(command)))
+}
+
+pub async fn get_unsolved_review_command(
+    Extension(workspace): Extension<Workspace>,
+    State(deployment): State<DeploymentImpl>,
+) -> Result<ResponseJson<ApiResponse<Vec<ReviewCommand>>>, ApiError> {
+    let pool = &deployment.db().pool;
+    let commands = Workspace::list_unsolved_review_commands(pool, workspace.id).await?;
+    Ok(ResponseJson(ApiResponse::success(commands)))
+}
+
+pub async fn save_review_command(
+    Extension(workspace): Extension<Workspace>,
+    State(deployment): State<DeploymentImpl>,
+    Json(payload): Json<SaveReviewCommandRequest>,
+) -> Result<ResponseJson<ApiResponse<ReviewCommand>>, ApiError> {
+    let markdown_text = payload.markdown_text.trim();
+    if markdown_text.is_empty() {
+        return Err(ApiError::BadRequest(
+            "Review command markdown must not be empty".to_string(),
+        ));
+    }
+
+    let reason = payload
+        .reason
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    let pool = &deployment.db().pool;
+    let command = Workspace::save_review_command(pool, workspace.id, markdown_text, reason).await?;
+    Ok(ResponseJson(ApiResponse::success(command)))
+}
+
+pub async fn delete_review_command(
+    Extension(workspace): Extension<Workspace>,
+    State(deployment): State<DeploymentImpl>,
+) -> Result<ResponseJson<ApiResponse<()>>, ApiError> {
+    let pool = &deployment.db().pool;
+    Workspace::clear_review_command(pool, workspace.id).await?;
+    Ok(ResponseJson(ApiResponse::success(())))
+}
+
+pub async fn update_review_command_status(
+    Extension(workspace): Extension<Workspace>,
+    State(deployment): State<DeploymentImpl>,
+    Json(payload): Json<UpdateReviewCommandStatusRequest>,
+) -> Result<ResponseJson<ApiResponse<ReviewCommand>>, ApiError> {
+    let reason = payload
+        .reason
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    let pool = &deployment.db().pool;
+    let command = Workspace::set_review_command_status(pool, workspace.id, payload.solved, reason)
+        .await
+        .map_err(|e| match e {
+            sqlx::Error::RowNotFound => {
+                ApiError::BadRequest("Review command not found for this workspace".to_string())
+            }
+            other => ApiError::Database(other),
+        })?;
+    Ok(ResponseJson(ApiResponse::success(command)))
+}
+
 #[derive(Debug, Serialize, Deserialize, ts_rs::TS)]
 pub struct CreateTaskAttemptBody {
     pub task_id: Uuid,
     pub executor_profile_id: ExecutorProfileId,
     pub repos: Vec<WorkspaceRepoInput>,
+}
+
+#[derive(Debug, Deserialize, Default)]
+pub struct CreateTaskAttemptQuery {
+    pub expected_task_status: Option<TaskStatus>,
 }
 
 #[derive(Debug, Serialize, Deserialize, ts_rs::TS)]
@@ -170,6 +258,7 @@ pub struct RunAgentSetupResponse {}
 #[axum::debug_handler]
 pub async fn create_task_attempt(
     State(deployment): State<DeploymentImpl>,
+    Query(query): Query<CreateTaskAttemptQuery>,
     Json(payload): Json<CreateTaskAttemptBody>,
 ) -> Result<ResponseJson<ApiResponse<Workspace>>, ApiError> {
     let executor_profile_id = payload.executor_profile_id.clone();
@@ -184,6 +273,15 @@ pub async fn create_task_attempt(
     let task = Task::find_by_id(&deployment.db().pool, payload.task_id)
         .await?
         .ok_or(SqlxError::RowNotFound)?;
+
+    if let Some(expected_status) = query.expected_task_status
+        && task.status != expected_status
+    {
+        return Err(ApiError::BadRequest(format!(
+            "Task status must be '{}' for this operation",
+            expected_status
+        )));
+    }
 
     // Compute agent_working_dir based on repo count:
     // - Single repo: use repo name as working dir (agent runs in repo directory)
@@ -1808,6 +1906,17 @@ pub fn router(deployment: &DeploymentImpl) -> Router<DeploymentImpl> {
         .route("/search", get(search_workspace_files))
         .route("/first-message", get(get_first_user_message))
         .route("/mark-seen", put(mark_seen))
+        .route(
+            "/review-command",
+            get(get_review_command)
+                .put(save_review_command)
+                .delete(delete_review_command),
+        )
+        .route("/review-command/unsolved", get(get_unsolved_review_command))
+        .route(
+            "/review-command/status",
+            patch(update_review_command_status),
+        )
         .layer(from_fn_with_state(
             deployment.clone(),
             load_workspace_middleware,

@@ -218,7 +218,7 @@ pub struct UpdateMcpServersBody {
 }
 
 async fn get_mcp_servers(
-    State(_deployment): State<DeploymentImpl>,
+    State(deployment): State<DeploymentImpl>,
     Query(query): Query<McpServerQuery>,
 ) -> Result<ResponseJson<ApiResponse<GetMcpServerResponse>>, ApiError> {
     let coding_agent = ExecutorConfigs::get_cached()
@@ -243,7 +243,8 @@ async fn get_mcp_servers(
         }
     };
 
-    let mut mcpc = coding_agent.get_mcp_config();
+    let mcp_port = deployment.config().read().await.mcp_server.port;
+    let mut mcpc = coding_agent.get_mcp_config(mcp_port);
     let raw_config = read_agent_config(&config_path, &mcpc).await?;
     let servers = get_mcp_servers_from_config_path(&raw_config, &mcpc.servers_path);
     mcpc.set_servers(servers);
@@ -254,7 +255,7 @@ async fn get_mcp_servers(
 }
 
 async fn update_mcp_servers(
-    State(_deployment): State<DeploymentImpl>,
+    State(deployment): State<DeploymentImpl>,
     Query(query): Query<McpServerQuery>,
     Json(payload): Json<UpdateMcpServersBody>,
 ) -> Result<ResponseJson<ApiResponse<String>>, ApiError> {
@@ -281,7 +282,8 @@ async fn update_mcp_servers(
         }
     };
 
-    let mcpc = agent.get_mcp_config();
+    let mcp_port = deployment.config().read().await.mcp_server.port;
+    let mcpc = agent.get_mcp_config(mcp_port);
     match update_mcp_servers_in_config(&config_path, &mcpc, payload.servers).await {
         Ok(message) => Ok(ResponseJson(ApiResponse::success(message))),
         Err(e) => Ok(ResponseJson(ApiResponse::error(&format!(
