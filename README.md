@@ -25,6 +25,10 @@
 - [x] add integration telegram
 - [x] add powermode manage feature
 - [x] add local network visting with auth 
+- [ ] create a global context bus for sharing between different agent (P0)
+- [ ] chat mode and auto router to different agent (P1)
+- [ ] skills manager (P0)
+- [ ] configure sync (by using git repo) (P1)
 - [ ] better experience of telegram bot(interactive mode refactor)
 - [ ] perf for long task log
 - [ ] acp protocol wrapper to link with any agent
