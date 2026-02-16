@@ -87,7 +87,8 @@ impl Deployment for LocalDeployment {
 
             if stored_version != Some(current_version) {
                 // Show release notes only if this is an upgrade (not first install)
-                raw_config.show_release_notes = stored_version.is_some();
+                // Temporarily disabled: always set to false to suppress release notes dialog
+                raw_config.show_release_notes = false;
                 raw_config.last_app_version = Some(current_version.to_string());
             }
         }
