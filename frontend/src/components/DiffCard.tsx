@@ -73,6 +73,27 @@ function readPlainLine(
   }
 }
 
+function normalizePathForMatch(path: string): string {
+  return path
+    .replace(/\\/g, '/')
+    .replace(/^\.\/+/, '')
+    .replace(/^\/+/, '')
+    .replace(/\/{2,}/g, '/');
+}
+
+function commentPathMatchesDiffFile(diffPath: string, commentPath: string): boolean {
+  const normalizedDiffPath = normalizePathForMatch(diffPath);
+  const normalizedCommentPath = normalizePathForMatch(commentPath);
+
+  if (!normalizedDiffPath || !normalizedCommentPath) return false;
+
+  return (
+    normalizedDiffPath === normalizedCommentPath ||
+    normalizedDiffPath.endsWith(`/${normalizedCommentPath}`) ||
+    normalizedCommentPath.endsWith(`/${normalizedDiffPath}`)
+  );
+}
+
 export default function DiffCard({
   diff,
   expanded,
@@ -147,7 +168,7 @@ export default function DiffCard({
   // Review functionality
   const filePath = newName || oldName || 'unknown';
   const commentsForFile = useMemo(
-    () => comments.filter((c) => c.filePath === filePath),
+    () => comments.filter((c) => commentPathMatchesDiffFile(filePath, c.filePath)),
     [comments, filePath]
   );
 

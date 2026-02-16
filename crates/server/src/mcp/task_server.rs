@@ -3,6 +3,7 @@ use std::future::Future;
 use db::models::{
     tag::Tag,
     task::{CreateTask, Task, TaskStatus, TaskWithAttemptStatus, UpdateTask},
+    workspace::ReviewCommand,
 };
 use regex::Regex;
 use rmcp::{
@@ -145,6 +146,50 @@ pub struct DeleteTaskRequest {
 #[derive(Debug, Serialize, schemars::JsonSchema)]
 pub struct DeleteTaskResponse {
     pub deleted_task_id: String,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct SaveReviewCommandRequest {
+    #[schemars(
+        description = "The task attempt/workspace ID to save the review command for. In agent runtimes this is usually available in VK_WORKSPACE_ID."
+    )]
+    pub workspace_id: Uuid,
+    #[schemars(description = "Markdown content to save as the review command.")]
+    pub markdown_text: String,
+    #[schemars(description = "Optional reason for why this review command is being saved.")]
+    pub reason: Option<String>,
+}
+
+#[derive(Debug, Serialize, schemars::JsonSchema)]
+pub struct ReviewCommandDetails {
+    #[schemars(description = "Markdown content for the review command.")]
+    pub markdown_text: String,
+    #[schemars(description = "Whether the review command has been marked as solved.")]
+    pub solved: bool,
+    #[schemars(description = "Optional reason attached to this review command.")]
+    pub reason: Option<String>,
+    #[schemars(description = "When the review command was first created.")]
+    pub created_at: String,
+    #[schemars(description = "When the review command was last updated.")]
+    pub updated_at: String,
+}
+
+impl ReviewCommandDetails {
+    fn from_review_command(command: ReviewCommand) -> Self {
+        Self {
+            markdown_text: command.markdown_text,
+            solved: command.solved,
+            reason: command.reason,
+            created_at: command.created_at.to_rfc3339(),
+            updated_at: command.updated_at.to_rfc3339(),
+        }
+    }
+}
+
+#[derive(Debug, Serialize, schemars::JsonSchema)]
+pub struct SaveReviewCommandResponse {
+    pub workspace_id: String,
+    pub review_command: ReviewCommandDetails,
 }
 
 #[derive(Debug, Clone)]
@@ -472,12 +517,59 @@ impl TaskServer {
             deleted_task_id: task_id.to_string(),
         })
     }
+
+    #[tool(
+        description = "Save markdown review feedback for a task attempt/workspace so it can be reused later (for example via @review)."
+    )]
+    async fn save_review_command(
+        &self,
+        Parameters(SaveReviewCommandRequest {
+            workspace_id,
+            markdown_text,
+            reason,
+        }): Parameters<SaveReviewCommandRequest>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let markdown_text = markdown_text.trim().to_string();
+        if markdown_text.is_empty() {
+            return Self::err(
+                "Review command markdown must not be empty.".to_string(),
+                None::<String>,
+            );
+        }
+
+        #[derive(Serialize)]
+        struct SaveReviewCommandApiPayload {
+            markdown_text: String,
+            reason: Option<String>,
+        }
+
+        let payload = SaveReviewCommandApiPayload {
+            markdown_text,
+            reason: reason
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(ToOwned::to_owned),
+        };
+
+        let url = self.url(&format!("/api/task-attempts/{workspace_id}/review-command"));
+        let review_command: ReviewCommand =
+            match self.send_json(self.client.put(&url).json(&payload)).await {
+                Ok(command) => command,
+                Err(err) => return Ok(err),
+            };
+
+        TaskServer::success(&SaveReviewCommandResponse {
+            workspace_id: workspace_id.to_string(),
+            review_command: ReviewCommandDetails::from_review_command(review_command),
+        })
+    }
 }
 
 #[tool_handler]
 impl ServerHandler for TaskServer {
     fn get_info(&self) -> ServerInfo {
-        let instruction = "A TODO-task management MCP server for Vibe Kanban. Use 'list_tasks' to read TODO tasks for a project (project_id is usually available as VK_PROJECT_ID in the runtime environment). Use 'add_task', 'edit_task', and 'delete_task' to manage tasks. Editing and deleting are restricted to tasks currently in TODO state.".to_string();
+        let instruction = "A TODO-task management MCP server for Vibe Kanban. Use 'list_tasks' to read TODO tasks for a project (project_id is usually available as VK_PROJECT_ID in the runtime environment). Use 'add_task', 'edit_task', and 'delete_task' to manage tasks. Editing and deleting are restricted to tasks currently in TODO state. Use 'save_review_command' to persist markdown review feedback for a task attempt/workspace (workspace_id is usually available as VK_WORKSPACE_ID in the runtime environment).".to_string();
 
         ServerInfo {
             protocol_version: ProtocolVersion::V_2025_03_26,
