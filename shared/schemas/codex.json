@@ -97,6 +97,12 @@
         "null"
       ]
     },
+    "plan": {
+      "type": [
+        "boolean",
+        "null"
+      ]
+    },
     "base_instructions": {
       "type": [
         "string",

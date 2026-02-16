@@ -7,8 +7,9 @@ use std::{
 use codex_app_server_protocol::{
     JSONRPCNotification, JSONRPCResponse, NewConversationResponse, ServerNotification,
 };
-use codex_mcp_types::ContentBlock;
 use codex_protocol::{
+    config_types::ModeKind,
+    items::TurnItem,
     openai_models::ReasoningEffort,
     plan_tool::{StepStatus, UpdatePlanArgs},
     protocol::{
@@ -207,14 +208,42 @@ impl ToNormalizedEntry for PatchEntry {
     }
 }
 
+#[derive(Default)]
+struct PlanState {
+    index: Option<usize>,
+    plan: String,
+}
+
+impl PlanState {
+    fn to_normalized_entry(&self, call_id: &str) -> NormalizedEntry {
+        NormalizedEntry {
+            timestamp: None,
+            entry_type: NormalizedEntryType::ToolUse {
+                tool_name: "ExitPlanMode".to_string(),
+                action_type: ActionType::PlanPresentation {
+                    plan: self.plan.clone(),
+                },
+                status: ToolStatus::Created,
+            },
+            content: self.plan.clone(),
+            metadata: serde_json::to_value(ToolCallMetadata {
+                tool_call_id: call_id.to_string(),
+            })
+            .ok(),
+        }
+    }
+}
+
 struct LogState {
     entry_index: EntryIndexProvider,
     assistant: Option<StreamingText>,
     thinking: Option<StreamingText>,
+    plans: HashMap<String, PlanState>,
     commands: HashMap<String, CommandState>,
     mcp_tools: HashMap<String, McpToolState>,
     patches: HashMap<String, PatchState>,
     web_searches: HashMap<String, WebSearchState>,
+    in_plan_mode: bool,
 }
 
 enum StreamingTextKind {
@@ -228,10 +257,12 @@ impl LogState {
             entry_index,
             assistant: None,
             thinking: None,
+            plans: HashMap::new(),
             commands: HashMap::new(),
             mcp_tools: HashMap::new(),
             patches: HashMap::new(),
             web_searches: HashMap::new(),
+            in_plan_mode: false,
         }
     }
 
@@ -301,6 +332,38 @@ impl LogState {
 
     fn thinking(&mut self, content: String) -> (NormalizedEntry, usize, bool) {
         self.streaming_text_set(content, StreamingTextKind::Thinking)
+    }
+
+    fn plan_update(
+        &mut self,
+        call_id: String,
+        content: String,
+        mode: UpdateMode,
+    ) -> (NormalizedEntry, usize, bool) {
+        let plan_state = self.plans.entry(call_id.clone()).or_default();
+        let is_new = plan_state.index.is_none();
+        let index = if let Some(index) = plan_state.index {
+            match mode {
+                UpdateMode::Append => plan_state.plan.push_str(&content),
+                UpdateMode::Set => plan_state.plan = content,
+            }
+            index
+        } else {
+            let index = self.entry_index.next();
+            plan_state.index = Some(index);
+            plan_state.plan = content;
+            index
+        };
+
+        (plan_state.to_normalized_entry(&call_id), index, is_new)
+    }
+
+    fn plan_append(&mut self, call_id: String, content: String) -> (NormalizedEntry, usize, bool) {
+        self.plan_update(call_id, content, UpdateMode::Append)
+    }
+
+    fn plan_set(&mut self, call_id: String, content: String) -> (NormalizedEntry, usize, bool) {
+        self.plan_update(call_id, content, UpdateMode::Set)
     }
 }
 
@@ -432,6 +495,18 @@ pub fn normalize_logs(msg_store: Arc<MsgStore>, worktree_path: &Path) {
                         &entry_index,
                     );
                 }
+                EventMsg::TurnStarted(payload) => {
+                    state.in_plan_mode = matches!(payload.collaboration_mode_kind, ModeKind::Plan);
+                    state.assistant = None;
+                    state.thinking = None;
+                    state.plans.clear();
+                }
+                EventMsg::TurnComplete(_) | EventMsg::TurnAborted(_) => {
+                    state.assistant = None;
+                    state.thinking = None;
+                    state.in_plan_mode = false;
+                    state.plans.clear();
+                }
                 EventMsg::AgentMessageDelta(AgentMessageDeltaEvent { delta }) => {
                     state.thinking = None;
                     let (entry, index, is_new) = state.assistant_message_append(delta);
@@ -439,8 +514,10 @@ pub fn normalize_logs(msg_store: Arc<MsgStore>, worktree_path: &Path) {
                 }
                 EventMsg::AgentReasoningDelta(AgentReasoningDeltaEvent { delta }) => {
                     state.assistant = None;
-                    let (entry, index, is_new) = state.thinking_append(delta);
-                    upsert_normalized_entry(&msg_store, index, entry, is_new);
+                    if !state.in_plan_mode {
+                        let (entry, index, is_new) = state.thinking_append(delta);
+                        upsert_normalized_entry(&msg_store, index, entry, is_new);
+                    }
                 }
                 EventMsg::AgentMessage(AgentMessageEvent { message }) => {
                     state.thinking = None;
@@ -450,8 +527,10 @@ pub fn normalize_logs(msg_store: Arc<MsgStore>, worktree_path: &Path) {
                 }
                 EventMsg::AgentReasoning(AgentReasoningEvent { text }) => {
                     state.assistant = None;
-                    let (entry, index, is_new) = state.thinking(text);
-                    upsert_normalized_entry(&msg_store, index, entry, is_new);
+                    if !state.in_plan_mode {
+                        let (entry, index, is_new) = state.thinking(text);
+                        upsert_normalized_entry(&msg_store, index, entry, is_new);
+                    }
                     state.thinking = None;
                 }
                 EventMsg::AgentReasoningSectionBreak(AgentReasoningSectionBreakEvent {
@@ -469,6 +548,7 @@ pub fn normalize_logs(msg_store: Arc<MsgStore>, worktree_path: &Path) {
                     reason,
                     parsed_cmd: _,
                     proposed_execpolicy_amendment: _,
+                    ..
                 }) => {
                     state.assistant = None;
                     state.thinking = None;
@@ -617,6 +697,7 @@ pub fn normalize_logs(msg_store: Arc<MsgStore>, worktree_path: &Path) {
                     duration: _,
                     formatted_output,
                     process_id: _,
+                    ..
                 }) => {
                     if let Some(mut command_state) = state.commands.remove(&call_id) {
                         command_state.formatted_output = Some(formatted_output);
@@ -653,6 +734,7 @@ pub fn normalize_logs(msg_store: Arc<MsgStore>, worktree_path: &Path) {
                 EventMsg::StreamError(StreamErrorEvent {
                     message,
                     codex_error_info,
+                    ..
                 }) => {
                     add_normalized_entry(
                         &msg_store,
@@ -704,7 +786,7 @@ pub fn normalize_logs(msg_store: Arc<MsgStore>, worktree_path: &Path) {
                                 if value
                                     .content
                                     .iter()
-                                    .all(|block| matches!(block, ContentBlock::TextContent(_)))
+                                    .all(|block| extract_mcp_text_content(block).is_some())
                                 {
                                     mcp_tool_state.result = Some(ToolResult {
                                         r#type: ToolResultValueType::Markdown,
@@ -712,15 +794,7 @@ pub fn normalize_logs(msg_store: Arc<MsgStore>, worktree_path: &Path) {
                                             value
                                                 .content
                                                 .iter()
-                                                .map(|block| {
-                                                    if let ContentBlock::TextContent(content) =
-                                                        block
-                                                    {
-                                                        content.text.clone()
-                                                    } else {
-                                                        unreachable!()
-                                                    }
-                                                })
+                                                .filter_map(extract_mcp_text_content)
                                                 .collect::<Vec<String>>()
                                                 .join("\n"),
                                         ),
@@ -860,7 +934,7 @@ pub fn normalize_logs(msg_store: Arc<MsgStore>, worktree_path: &Path) {
                     let index = add_normalized_entry(&msg_store, &entry_index, normalized_entry);
                     web_search_state.index = Some(index);
                 }
-                EventMsg::WebSearchEnd(WebSearchEndEvent { call_id, query }) => {
+                EventMsg::WebSearchEnd(WebSearchEndEvent { call_id, query, .. }) => {
                     state.assistant = None;
                     state.thinking = None;
                     if let Some(mut entry) = state.web_searches.remove(&call_id) {
@@ -936,6 +1010,23 @@ pub fn normalize_logs(msg_store: Arc<MsgStore>, worktree_path: &Path) {
                         },
                     );
                 }
+                EventMsg::PlanDelta(event) => {
+                    state.assistant = None;
+                    state.thinking = None;
+                    let (entry, index, is_new) = state.plan_append(event.item_id, event.delta);
+                    upsert_normalized_entry(&msg_store, index, entry, is_new);
+                }
+                EventMsg::ItemCompleted(event) => {
+                    if let TurnItem::Plan(plan_item) = event.item {
+                        let text = plan_item.text.trim().to_string();
+                        if !text.is_empty() {
+                            state.assistant = None;
+                            state.thinking = None;
+                            let (entry, index, is_new) = state.plan_set(plan_item.id, text);
+                            upsert_normalized_entry(&msg_store, index, entry, is_new);
+                        }
+                    }
+                }
                 EventMsg::Warning(WarningEvent { message }) => {
                     add_normalized_entry(
                         &msg_store,
@@ -1005,32 +1096,7 @@ pub fn normalize_logs(msg_store: Arc<MsgStore>, worktree_path: &Path) {
                         },
                     );
                 }
-                EventMsg::AgentReasoningRawContent(..)
-                | EventMsg::AgentReasoningRawContentDelta(..)
-                | EventMsg::TaskStarted(..)
-                | EventMsg::UserMessage(..)
-                | EventMsg::TurnDiff(..)
-                | EventMsg::GetHistoryEntryResponse(..)
-                | EventMsg::McpListToolsResponse(..)
-                | EventMsg::McpStartupComplete(..)
-                | EventMsg::McpStartupUpdate(..)
-                | EventMsg::DeprecationNotice(..)
-                | EventMsg::UndoCompleted(..)
-                | EventMsg::UndoStarted(..)
-                | EventMsg::RawResponseItem(..)
-                | EventMsg::ItemStarted(..)
-                | EventMsg::ItemCompleted(..)
-                | EventMsg::AgentMessageContentDelta(..)
-                | EventMsg::ReasoningContentDelta(..)
-                | EventMsg::ReasoningRawContentDelta(..)
-                | EventMsg::ListCustomPromptsResponse(..)
-                | EventMsg::TurnAborted(..)
-                | EventMsg::ShutdownComplete
-                | EventMsg::EnteredReviewMode(..)
-                | EventMsg::ExitedReviewMode(..)
-                | EventMsg::TerminalInteraction(..)
-                | EventMsg::ElicitationRequest(..)
-                | EventMsg::TaskComplete(..) => {}
+                _ => {}
             }
         }
     });
@@ -1103,6 +1169,16 @@ fn build_command_output(stdout: Option<&str>, stderr: Option<&str>) -> Option<St
     } else {
         Some(sections.join("\n\n"))
     }
+}
+
+fn extract_mcp_text_content(block: &Value) -> Option<String> {
+    if block.get("type").and_then(Value::as_str) != Some("text") {
+        return None;
+    }
+    block
+        .get("text")
+        .and_then(Value::as_str)
+        .map(str::to_string)
 }
 
 static SESSION_ID: LazyLock<Regex> = LazyLock::new(|| {

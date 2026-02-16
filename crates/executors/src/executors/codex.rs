@@ -39,7 +39,12 @@ pub fn codex_home() -> Option<PathBuf> {
 use async_trait::async_trait;
 use codex_app_server_protocol::{NewConversationParams, ReviewTarget};
 use codex_protocol::{
-    config_types::SandboxMode as CodexSandboxMode, protocol::AskForApproval as CodexAskForApproval,
+    config_types::{
+        CollaborationMode as CodexCollaborationMode, ModeKind as CodexCollaborationModeKind,
+        SandboxMode as CodexSandboxMode, Settings as CodexCollaborationModeSettings,
+    },
+    openai_models::ReasoningEffort as CodexReasoningEffort,
+    protocol::AskForApproval as CodexAskForApproval,
 };
 use command_group::AsyncCommandGroup;
 use derivative::Derivative;
@@ -159,6 +164,8 @@ pub struct Codex {
     pub model_reasoning_summary_format: Option<ReasoningSummaryFormat>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub profile: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plan: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub base_instructions: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -321,6 +328,34 @@ impl StandardCodingAgentExecutor for Codex {
 }
 
 impl Codex {
+    fn to_codex_reasoning_effort(effort: &ReasoningEffort) -> CodexReasoningEffort {
+        match effort {
+            ReasoningEffort::Low => CodexReasoningEffort::Low,
+            ReasoningEffort::Medium => CodexReasoningEffort::Medium,
+            ReasoningEffort::High => CodexReasoningEffort::High,
+            ReasoningEffort::Xhigh => CodexReasoningEffort::XHigh,
+        }
+    }
+
+    fn build_plan_collaboration_mode(
+        plan_mode: bool,
+        model: String,
+        reasoning_effort: Option<CodexReasoningEffort>,
+    ) -> Option<CodexCollaborationMode> {
+        if !plan_mode {
+            return None;
+        }
+
+        Some(CodexCollaborationMode {
+            mode: CodexCollaborationModeKind::Plan,
+            settings: CodexCollaborationModeSettings {
+                model,
+                reasoning_effort,
+                developer_instructions: None,
+            },
+        })
+    }
+
     fn build_command_builder_with_base(
         &self,
         base: &str,
@@ -469,6 +504,11 @@ impl Codex {
 
         let params = self.build_new_conversation_params(current_dir);
         let resume_session = resume_session.map(|s| s.to_string());
+        let plan_mode = self.plan.unwrap_or(false);
+        let plan_reasoning_effort = self
+            .model_reasoning_effort
+            .as_ref()
+            .map(Self::to_codex_reasoning_effort);
         let auto_approve = matches!(
             (&self.sandbox, &self.ask_for_approval),
             (Some(SandboxMode::DangerFullAccess), None)
@@ -487,6 +527,8 @@ impl Codex {
                         child_stdin,
                         log_writer.clone(),
                         exit_signal_tx.clone(),
+                        plan_mode,
+                        plan_reasoning_effort,
                         approvals,
                         auto_approve,
                     )
@@ -557,6 +599,8 @@ impl Codex {
         child_stdin: tokio::process::ChildStdin,
         log_writer: LogWriter,
         exit_signal_tx: ExitSignalSender,
+        plan_mode: bool,
+        plan_reasoning_effort: Option<CodexReasoningEffort>,
         approvals: Option<Arc<dyn ExecutorApprovalService>>,
         auto_approve: bool,
     ) -> Result<(), ExecutorError> {
@@ -576,10 +620,15 @@ impl Codex {
                 let params = conversation_params;
                 let response = client.new_conversation(params).await?;
                 let conversation_id = response.conversation_id;
+                let collaboration_mode = Self::build_plan_collaboration_mode(
+                    plan_mode,
+                    response.model,
+                    response.reasoning_effort.or(plan_reasoning_effort),
+                );
                 client.register_session(&conversation_id).await?;
                 client.add_conversation_listener(conversation_id).await?;
                 client
-                    .send_user_message(conversation_id, combined_prompt)
+                    .start_turn(conversation_id, combined_prompt, collaboration_mode)
                     .await?;
             }
             Some(session_id) => {
@@ -596,10 +645,15 @@ impl Codex {
                     response
                 );
                 let conversation_id = response.conversation_id;
+                let collaboration_mode = Self::build_plan_collaboration_mode(
+                    plan_mode,
+                    response.model,
+                    plan_reasoning_effort,
+                );
                 client.register_session(&conversation_id).await?;
                 client.add_conversation_listener(conversation_id).await?;
                 client
-                    .send_user_message(conversation_id, combined_prompt)
+                    .start_turn(conversation_id, combined_prompt, collaboration_mode)
                     .await?;
             }
         }
