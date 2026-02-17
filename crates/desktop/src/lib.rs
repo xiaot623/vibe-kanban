@@ -8,6 +8,10 @@
 #[cfg(target_os = "android")]
 mod android;
 #[cfg(not(target_os = "android"))]
+mod cli;
+#[cfg(not(target_os = "android"))]
+mod cli_install;
+#[cfg(not(target_os = "android"))]
 mod desktop;
 
 use serde::{Deserialize, Serialize};
@@ -33,20 +37,71 @@ pub(crate) struct DiscoveryBeacon {
     pub fingerprint: String,
 }
 
+#[cfg(not(target_os = "android"))]
+#[derive(Debug)]
+pub enum LaunchError {
+    Cli(cli::CliError),
+    Runtime(anyhow::Error),
+}
+
+#[cfg(not(target_os = "android"))]
+impl LaunchError {
+    pub fn exit_code(&self) -> i32 {
+        match self {
+            Self::Cli(_) => 2,
+            Self::Runtime(_) => 1,
+        }
+    }
+}
+
+#[cfg(not(target_os = "android"))]
+impl std::fmt::Display for LaunchError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Cli(err) => write!(f, "{err}"),
+            Self::Runtime(err) => write!(f, "{err}"),
+        }
+    }
+}
+
+#[cfg(not(target_os = "android"))]
+impl std::error::Error for LaunchError {}
+
+/// Entry point for desktop binaries that support `--server` mode.
+#[cfg(not(target_os = "android"))]
+pub fn run_from_cli_env() -> Result<(), LaunchError> {
+    let args = cli::CliArgs::parse_env().map_err(LaunchError::Cli)?;
+
+    if args.server {
+        install_rustls_provider();
+        init_logging();
+        return desktop::run_server_mode_blocking(args.port).map_err(LaunchError::Runtime);
+    }
+
+    run();
+    Ok(())
+}
+
 /// Entry point for the Tauri application.
 #[cfg_attr(
     any(target_os = "android", target_os = "ios"),
     tauri::mobile_entry_point
 )]
 pub fn run() {
-    // Install rustls crypto provider before any TLS operations
-    rustls::crypto::aws_lc_rs::default_provider()
-        .install_default()
-        .expect("Failed to install rustls crypto provider");
+    install_rustls_provider();
 
     // Initialize logging
     init_logging();
 
+    #[cfg(not(target_os = "android"))]
+    if let Err(err) = cli_install::bootstrap_cli_path() {
+        tracing::warn!("Failed to bootstrap desktop CLI in PATH: {err}");
+    }
+
+    run_tauri_app();
+}
+
+fn run_tauri_app() {
     let builder = tauri::Builder::default();
 
     #[cfg(target_os = "android")]
@@ -75,6 +130,13 @@ pub fn run() {
         })
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+fn install_rustls_provider() {
+    // Install rustls crypto provider before any TLS operations
+    rustls::crypto::aws_lc_rs::default_provider()
+        .install_default()
+        .expect("Failed to install rustls crypto provider");
 }
 
 /// Initialize the logging/tracing subsystem.

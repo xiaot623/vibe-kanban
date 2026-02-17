@@ -260,6 +260,39 @@ fn forbidden_response() -> Response {
     response
 }
 
+/// Wait for Ctrl+C or SIGTERM, whichever arrives first.
+pub async fn wait_for_shutdown_signal() {
+    let ctrl_c = async {
+        if let Err(err) = tokio::signal::ctrl_c().await {
+            tracing::error!("Failed to install Ctrl+C handler: {err}");
+        }
+    };
+
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{SignalKind, signal};
+
+        let terminate = async {
+            if let Ok(mut sigterm) = signal(SignalKind::terminate()) {
+                sigterm.recv().await;
+            } else {
+                tracing::error!("Failed to install SIGTERM handler");
+                std::future::pending::<()>().await;
+            }
+        };
+
+        tokio::select! {
+            _ = ctrl_c => {},
+            _ = terminate => {},
+        }
+    }
+
+    #[cfg(not(unix))]
+    {
+        ctrl_c.await;
+    }
+}
+
 /// Perform cleanup actions (kill running processes)
 pub async fn cleanup(deployment: &DeploymentImpl) {
     deployment

@@ -24,7 +24,7 @@ async fn main() -> Result<(), StartupError> {
     let (_port, server_handle) = startup::start_server(deployment.clone(), config).await?;
 
     // Wait for shutdown signal
-    shutdown_signal().await;
+    startup::wait_for_shutdown_signal().await;
 
     // Abort the server task
     server_handle.abort();
@@ -32,42 +32,6 @@ async fn main() -> Result<(), StartupError> {
     startup::cleanup(&deployment).await;
 
     Ok(())
-}
-
-pub async fn shutdown_signal() {
-    // Always wait for Ctrl+C
-    let ctrl_c = async {
-        if let Err(e) = tokio::signal::ctrl_c().await {
-            tracing::error!("Failed to install Ctrl+C handler: {e}");
-        }
-    };
-
-    #[cfg(unix)]
-    {
-        use tokio::signal::unix::{SignalKind, signal};
-
-        // Try to install SIGTERM handler, but don't panic if it fails
-        let terminate = async {
-            if let Ok(mut sigterm) = signal(SignalKind::terminate()) {
-                sigterm.recv().await;
-            } else {
-                tracing::error!("Failed to install SIGTERM handler");
-                // Fallback: never resolves
-                std::future::pending::<()>().await;
-            }
-        };
-
-        tokio::select! {
-            _ = ctrl_c => {},
-            _ = terminate => {},
-        }
-    }
-
-    #[cfg(not(unix))]
-    {
-        // Only ctrl_c is available, so just await it
-        ctrl_c.await;
-    }
 }
 
 fn resolve_port() -> u16 {

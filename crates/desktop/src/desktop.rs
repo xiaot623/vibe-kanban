@@ -76,6 +76,38 @@ impl KeepAwakeState {
     }
 }
 
+/// Run desktop server mode (`kanban --server`) without launching Tauri windows.
+pub fn run_server_mode_blocking(port_override: Option<u16>) -> anyhow::Result<()> {
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?;
+    runtime.block_on(run_server_mode(port_override))
+}
+
+/// Start the backend in headless mode and wait for Ctrl+C / SIGTERM.
+pub async fn run_server_mode(port_override: Option<u16>) -> anyhow::Result<()> {
+    let deployment = startup::initialize_deployment().await?;
+    startup::spawn_background_services(&deployment, "desktop-server").await;
+
+    let config = ServerConfig {
+        port: resolve_server_mode_port(port_override),
+        host: "127.0.0.1".to_string(),
+        open_browser: true,
+        write_port_file: true,
+        local_network_auth: false,
+    };
+
+    let (_port, server_handle) = startup::start_server(deployment.clone(), config)
+        .await
+        .map_err(anyhow::Error::from)?;
+
+    startup::wait_for_shutdown_signal().await;
+    server_handle.abort();
+    startup::cleanup(&deployment).await;
+
+    Ok(())
+}
+
 /// Start the embedded server and set up the desktop application.
 pub async fn start_embedded_server(app_handle: &tauri::AppHandle) -> anyhow::Result<()> {
     // Initialize deployment
@@ -178,6 +210,30 @@ async fn start_desktop_server(
     startup::start_server(deployment.clone(), config)
         .await
         .map_err(anyhow::Error::from)
+}
+
+fn resolve_server_mode_port(cli_port: Option<u16>) -> u16 {
+    cli_port
+        .or_else(|| parse_port_from_env("BACKEND_PORT"))
+        .or_else(|| parse_port_from_env("PORT"))
+        .unwrap_or_else(|| {
+            tracing::info!(
+                "No --port, BACKEND_PORT, or PORT provided; using port 0 for auto-assignment"
+            );
+            0
+        })
+}
+
+fn parse_port_from_env(name: &str) -> Option<u16> {
+    let raw = std::env::var(name).ok()?;
+    let trimmed = raw.trim();
+    match trimmed.parse::<u16>() {
+        Ok(port) => Some(port),
+        Err(err) => {
+            tracing::warn!("Ignoring invalid {name} value '{trimmed}': {err}");
+            None
+        }
+    }
 }
 
 /// LAN server: binds to 0.0.0.0, requires Basic auth for non-loopback requests.

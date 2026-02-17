@@ -13,6 +13,18 @@
     ```
 4. Now you can open the app normally
 
+## Desktop CLI command (`kanban`)
+- On first desktop launch, the app bootstraps `~/.kanban/bin` and installs:
+  - `kanban` (default command)
+  - `vibe-kanban` (compat alias)
+- The launcher also adds a managed PATH block to `~/.zshrc` and `~/.bashrc`.
+- If PATH changed, open a new terminal session before running commands.
+
+```bash
+kanban --server
+kanban --server --port 8080
+```
+
 ## Stage One: feature for local environment `Local Version`
 - [x] using agent cli in system path rather than npx
 - [x] add start port configure by using "--port" flag
