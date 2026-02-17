@@ -591,13 +591,13 @@ impl AppServerClient {
         }
     }
 
-    async fn request_pending_plan_approval(&self) -> Result<(), ExecutorError> {
+    async fn request_pending_plan_approval(&self) -> Result<bool, ExecutorError> {
         // Plan approvals always require user review — bypass auto_approve.
         let approvals = match &self.approvals {
             Some(a) => a.clone(),
             None => {
                 self.clear_pending_plan().await;
-                return Ok(());
+                return Ok(true);
             }
         };
 
@@ -606,12 +606,12 @@ impl AppServerClient {
             guard.take()
         };
         let Some(proposal) = proposal else {
-            return Ok(());
+            return Ok(true);
         };
 
         let plan_text = proposal.text.trim().to_string();
         if plan_text.is_empty() {
-            return Ok(());
+            return Ok(true);
         }
 
         tokio::time::sleep(std::time::Duration::from_millis(20)).await;
@@ -637,12 +637,27 @@ impl AppServerClient {
                 &Approval::approval_response(
                     proposal.item_id,
                     EXIT_PLAN_MODE_NAME.to_string(),
-                    status,
+                    status.clone(),
                 )
                 .raw(),
             )
             .await?;
-        Ok(())
+
+        match status {
+            ApprovalStatus::Approved => Ok(true),
+            ApprovalStatus::Denied { reason } => {
+                let feedback = reason
+                    .as_ref()
+                    .map(|s| s.trim())
+                    .filter(|s| !s.is_empty())
+                    .map(|s| s.to_string())
+                    .unwrap_or_else(|| "User denied the plan".to_string());
+                tracing::debug!("plan denied; queueing feedback: {feedback}");
+                self.enqueue_feedback(feedback).await;
+                Ok(false)
+            }
+            _ => Ok(false),
+        }
     }
 
     fn spawn_feedback_message(&self, conversation_id: ThreadId, feedback: String) {
@@ -758,7 +773,13 @@ impl JsonRpcCallbacks for AppServerClient {
             .is_some_and(|suffix| matches!(suffix, "task_complete" | "turn_complete"));
 
         if has_finished {
-            self.request_pending_plan_approval().await?;
+            let plan_approved = self.request_pending_plan_approval().await?;
+            if !plan_approved {
+                // Plan was denied — send the queued feedback to Codex so it
+                // can generate a revised plan in a new turn.
+                self.flush_pending_feedback().await;
+                return Ok(false);
+            }
         }
 
         Ok(has_finished)

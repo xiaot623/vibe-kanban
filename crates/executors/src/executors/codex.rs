@@ -509,10 +509,12 @@ impl Codex {
             .model_reasoning_effort
             .as_ref()
             .map(Self::to_codex_reasoning_effort);
-        let auto_approve = matches!(
-            (&self.sandbox, &self.ask_for_approval),
-            (Some(SandboxMode::DangerFullAccess), None)
-        );
+        let auto_approve = plan_mode
+            || self.approvals.is_none()
+            || matches!(
+                (&self.sandbox, &self.ask_for_approval),
+                (Some(SandboxMode::DangerFullAccess), None)
+            );
         let approvals = self.approvals.clone();
         tokio::spawn(async move {
             let exit_signal_tx = ExitSignalSender::new(exit_signal_tx);
