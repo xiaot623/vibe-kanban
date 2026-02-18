@@ -96,6 +96,7 @@ jobs:
           fi
 
           codesign --force --deep --sign - "$APP_PATH"
+          mkdir -p "$DMG_DIR"
           rm -f "$DMG_DIR"/*.dmg
           hdiutil create -volname "$APP_NAME" -srcfolder "$APP_PATH" -ov -format UDZO "$DMG_DIR/$APP_NAME.dmg"
 
