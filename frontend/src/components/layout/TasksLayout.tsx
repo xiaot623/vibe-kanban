@@ -104,7 +104,10 @@ function FullscreenView({
         <div className="shrink-0 sticky top-0 z-20 bg-background border-b flex items-center">
           <div className="flex-1">{rightHeader}</div>
           <div className="px-2">
-            <FullscreenToggle isFullscreen={true} onToggle={onFullscreenToggle} />
+            <FullscreenToggle
+              isFullscreen={true}
+              onToggle={onFullscreenToggle}
+            />
           </div>
         </div>
       )}

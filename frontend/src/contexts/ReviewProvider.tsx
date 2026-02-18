@@ -97,7 +97,9 @@ export function ReviewProvider({
 
       return sections
         .map((section) => {
-          const headerMatch = section.match(/^\*\*(.+?)\*\*\s+\(Line\s+(\d+)\)\s*/);
+          const headerMatch = section.match(
+            /^\*\*(.+?)\*\*\s+\(Line\s+(\d+)\)\s*/
+          );
           if (!headerMatch) return null;
 
           const filePath = headerMatch[1].trim();
@@ -175,7 +177,10 @@ export function ReviewProvider({
       })
       .catch((error) => {
         if (cancelled) return;
-        console.error('Failed to load persisted review command comments', error);
+        console.error(
+          'Failed to load persisted review command comments',
+          error
+        );
       });
 
     return () => {

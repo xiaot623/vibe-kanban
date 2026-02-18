@@ -245,7 +245,10 @@ export function SkillsAllSettings() {
                             <TooltipTrigger asChild>
                               <Info className="hidden h-3.5 w-3.5 shrink-0 cursor-pointer text-muted-foreground hover:text-foreground sm:block" />
                             </TooltipTrigger>
-                            <TooltipContent side="bottom" className="max-w-[420px]">
+                            <TooltipContent
+                              side="bottom"
+                              className="max-w-[420px]"
+                            >
                               {skill.path}
                             </TooltipContent>
                           </Tooltip>
@@ -302,9 +305,7 @@ export function SkillsAllSettings() {
                 <ChevronRight
                   className={`h-3 w-3 transition-transform ${showImportAdvancedOptions ? 'rotate-90' : ''}`}
                 />
-                <span>
-                  {t('settings.skills.importDialog.advancedOptions')}
-                </span>
+                <span>{t('settings.skills.importDialog.advancedOptions')}</span>
               </button>
 
               {showImportAdvancedOptions && (

@@ -28,10 +28,7 @@ interface ActionsDropdownProps {
   attempt?: WorkspaceWithSession | null;
 }
 
-export function ActionsDropdown({
-  task,
-  attempt,
-}: ActionsDropdownProps) {
+export function ActionsDropdown({ task, attempt }: ActionsDropdownProps) {
   const { t } = useTranslation('tasks');
   const { projectId } = useProject();
   const openInEditor = useOpenInEditor(attempt?.id);
@@ -195,10 +192,7 @@ export function ActionsDropdown({
           {hasTaskActions && (
             <>
               <DropdownMenuLabel>{t('actionsMenu.task')}</DropdownMenuLabel>
-              <DropdownMenuItem
-                disabled={!projectId}
-                onClick={handleEdit}
-              >
+              <DropdownMenuItem disabled={!projectId} onClick={handleEdit}>
                 {t('common:buttons.edit')}
               </DropdownMenuItem>
               <DropdownMenuItem disabled={!projectId} onClick={handleDuplicate}>

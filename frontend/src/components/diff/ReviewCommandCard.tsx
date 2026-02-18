@@ -17,7 +17,6 @@ const toDisplayTime = (time: string) => {
   return date.toLocaleString();
 };
 
-
 export function ReviewCommandCard({ attemptId }: ReviewCommandCardProps) {
   const queryClient = useQueryClient();
   const { data: command, isLoading } = useQuery({

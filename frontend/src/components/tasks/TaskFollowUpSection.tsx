@@ -273,7 +273,11 @@ export function TaskFollowUpSection({
     if (persistedMarkdown) {
       lastSavedReviewMarkdownRef.current = persistedMarkdown;
     }
-  }, [workspaceId, persistedReviewCommand?.markdown_text, persistedReviewCommand?.updated_at]);
+  }, [
+    workspaceId,
+    persistedReviewCommand?.markdown_text,
+    persistedReviewCommand?.updated_at,
+  ]);
 
   const isQueued = queueStatus.status === 'queued';
   const queuedMessage = isQueued
@@ -442,48 +446,51 @@ export function TaskFollowUpSection({
     }
   }, [workspaceId, isAttemptRunning]);
 
-  const persistReviewCommand = useCallback(async (markdown: string) => {
-    if (!workspaceId) return true;
-    if (!markdown) {
-      if (comments.length > 0 && hasPersistedReviewCommand) {
-        try {
-          await attemptsApi.deleteReviewCommand(workspaceId);
-          lastSavedReviewMarkdownRef.current = null;
-          queryClient.invalidateQueries({
-            queryKey: ['review-command', workspaceId],
-          });
-        } catch (error) {
-          console.error('Failed to delete review command:', error);
-          setFollowUpError('Failed to delete review command');
-          return false;
+  const persistReviewCommand = useCallback(
+    async (markdown: string) => {
+      if (!workspaceId) return true;
+      if (!markdown) {
+        if (comments.length > 0 && hasPersistedReviewCommand) {
+          try {
+            await attemptsApi.deleteReviewCommand(workspaceId);
+            lastSavedReviewMarkdownRef.current = null;
+            queryClient.invalidateQueries({
+              queryKey: ['review-command', workspaceId],
+            });
+          } catch (error) {
+            console.error('Failed to delete review command:', error);
+            setFollowUpError('Failed to delete review command');
+            return false;
+          }
         }
+        return true;
       }
-      return true;
-    }
-    if (markdown === lastSavedReviewMarkdownRef.current) return true;
+      if (markdown === lastSavedReviewMarkdownRef.current) return true;
 
-    try {
-      await attemptsApi.saveReviewCommand(workspaceId, {
-        markdown_text: markdown,
-        reason: null,
-      });
-      lastSavedReviewMarkdownRef.current = markdown;
-      queryClient.invalidateQueries({
-        queryKey: ['review-command', workspaceId],
-      });
-      return true;
-    } catch (error) {
-      console.error('Failed to save review command:', error);
-      setFollowUpError('Failed to save review command');
-      return false;
-    }
-  }, [
-    workspaceId,
-    comments.length,
-    hasPersistedReviewCommand,
-    queryClient,
-    setFollowUpError,
-  ]);
+      try {
+        await attemptsApi.saveReviewCommand(workspaceId, {
+          markdown_text: markdown,
+          reason: null,
+        });
+        lastSavedReviewMarkdownRef.current = markdown;
+        queryClient.invalidateQueries({
+          queryKey: ['review-command', workspaceId],
+        });
+        return true;
+      } catch (error) {
+        console.error('Failed to save review command:', error);
+        setFollowUpError('Failed to save review command');
+        return false;
+      }
+    },
+    [
+      workspaceId,
+      comments.length,
+      hasPersistedReviewCommand,
+      queryClient,
+      setFollowUpError,
+    ]
+  );
 
   const persistReviewCommandIfNeeded = useCallback(
     () => persistReviewCommand(reviewMarkdown.trim()),
@@ -563,9 +570,9 @@ export function TaskFollowUpSection({
       ].filter(Boolean) as string[];
 
       const unsolvedReviewCommandMarkdowns = workspaceId
-        ? (
-            await attemptsApi.getUnsolvedReviewCommands(workspaceId)
-          ).map((command) => command.markdown_text.trim())
+        ? (await attemptsApi.getUnsolvedReviewCommands(workspaceId)).map(
+            (command) => command.markdown_text.trim()
+          )
         : [];
 
       const commandParts = unsolvedReviewCommandMarkdowns.filter(
@@ -627,7 +634,11 @@ export function TaskFollowUpSection({
     const saved = await persistReviewCommandIfNeeded();
     if (!saved) return;
     await onSendFollowUp();
-  }, [cancelPersistReviewCommand, persistReviewCommandIfNeeded, onSendFollowUp]);
+  }, [
+    cancelPersistReviewCommand,
+    persistReviewCommandIfNeeded,
+    onSendFollowUp,
+  ]);
 
   // Keyboard shortcut handler - send follow-up or queue depending on state
   const handleSubmitShortcut = useCallback(
@@ -776,7 +787,9 @@ export function TaskFollowUpSection({
 
   // Memoize placeholder to avoid re-renders
   const hasExtraContext = !!(
-    reviewMarkdown || hasPersistedReviewCommand || conflictResolutionInstructions
+    reviewMarkdown ||
+    hasPersistedReviewCommand ||
+    conflictResolutionInstructions
   );
   const editorPlaceholder = useMemo(
     () =>

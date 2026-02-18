@@ -1073,7 +1073,9 @@ export function GeneralSettings() {
                     </SelectTrigger>
                     <SelectContent>
                       <SelectItem value="DEFAULT">
-                        {t('settings.general.telegram.defaultMode.defaultLabel')}
+                        {t(
+                          'settings.general.telegram.defaultMode.defaultLabel'
+                        )}
                       </SelectItem>
                       {telegramModeOptions.map((mode) => (
                         <SelectItem key={mode} value={mode}>

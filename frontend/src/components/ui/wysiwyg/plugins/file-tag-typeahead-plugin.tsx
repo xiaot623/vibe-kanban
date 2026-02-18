@@ -338,7 +338,8 @@ export function FileTagTypeaheadPlugin({
                     </div>
                     {reviewDirectiveResults.map((option) => {
                       const index = options.indexOf(option);
-                      const reviewOption = option.item as ReviewDirectiveOptionItem;
+                      const reviewOption =
+                        option.item as ReviewDirectiveOptionItem;
                       return (
                         <div
                           key={option.key}
@@ -357,7 +358,9 @@ export function FileTagTypeaheadPlugin({
                           }}
                           onClick={() => selectOptionAndCleanUp(option)}
                         >
-                          <div className="font-medium">{reviewOption.label}</div>
+                          <div className="font-medium">
+                            {reviewOption.label}
+                          </div>
                           <div className="text-xs mt-0.5">
                             {reviewOption.description}
                           </div>

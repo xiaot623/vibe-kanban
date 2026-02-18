@@ -46,9 +46,7 @@ import TaskKanbanBoard, {
   type KanbanColumnItem,
 } from '@/components/tasks/TaskKanbanBoard';
 import type { DragEndEvent } from '@/components/ui/shadcn-io/kanban';
-import {
-  useProjectTasks,
-} from '@/hooks/useProjectTasks';
+import { useProjectTasks } from '@/hooks/useProjectTasks';
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
 import { useHotkeysContext } from 'react-hotkeys-hook';
 import { TasksLayout, type LayoutMode } from '@/components/layout/TasksLayout';

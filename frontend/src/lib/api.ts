@@ -694,7 +694,9 @@ export const attemptsApi = {
     return handleApiResponse<void>(response);
   },
 
-  getReviewCommand: async (attemptId: string): Promise<ReviewCommand | null> => {
+  getReviewCommand: async (
+    attemptId: string
+  ): Promise<ReviewCommand | null> => {
     const response = await makeRequest(
       `/api/task-attempts/${attemptId}/review-command`
     );
@@ -985,9 +987,13 @@ export const skillsApi = {
     const response = await makeRequest('/api/skills');
     return handleApiResponse<GetSkillsResponse>(response);
   },
-  listLinks: async (executor: BaseCodingAgent): Promise<GetSkillLinksResponse> => {
+  listLinks: async (
+    executor: BaseCodingAgent
+  ): Promise<GetSkillLinksResponse> => {
     const params = new URLSearchParams({ executor });
-    const response = await makeRequest(`/api/skills/links?${params.toString()}`);
+    const response = await makeRequest(
+      `/api/skills/links?${params.toString()}`
+    );
     return handleApiResponse<GetSkillLinksResponse>(response);
   },
   link: async (
@@ -995,10 +1001,13 @@ export const skillsApi = {
     data: LinkSkillsBody
   ): Promise<GetSkillLinksResponse> => {
     const params = new URLSearchParams({ executor });
-    const response = await makeRequest(`/api/skills/links?${params.toString()}`, {
-      method: 'POST',
-      body: JSON.stringify(data),
-    });
+    const response = await makeRequest(
+      `/api/skills/links?${params.toString()}`,
+      {
+        method: 'POST',
+        body: JSON.stringify(data),
+      }
+    );
     return handleApiResponse<GetSkillLinksResponse>(response);
   },
   unlink: async (
@@ -1009,9 +1018,12 @@ export const skillsApi = {
       executor,
       skill_name: skillName,
     });
-    const response = await makeRequest(`/api/skills/links?${params.toString()}`, {
-      method: 'DELETE',
-    });
+    const response = await makeRequest(
+      `/api/skills/links?${params.toString()}`,
+      {
+        method: 'DELETE',
+      }
+    );
     return handleApiResponse<GetSkillLinksResponse>(response);
   },
   importFromGit: async (

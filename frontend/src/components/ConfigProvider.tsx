@@ -89,10 +89,7 @@ export function UserSystemProvider({ children }: UserSystemProviderProps) {
 
   // Show config parse error dialog if there's an error
   useEffect(() => {
-    if (
-      configParseError &&
-      configParseError !== parseErrorShownRef.current
-    ) {
+    if (configParseError && configParseError !== parseErrorShownRef.current) {
       parseErrorShownRef.current = configParseError;
       ConfigParseErrorDialog.show({ errorMessage: configParseError });
     }

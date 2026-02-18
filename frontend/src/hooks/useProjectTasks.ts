@@ -1,9 +1,6 @@
 import { useCallback, useMemo } from 'react';
 import { useJsonPatchWsStream } from './useJsonPatchWsStream';
-import type {
-  TaskStatus,
-  TaskWithAttemptStatus,
-} from 'shared/types';
+import type { TaskStatus, TaskWithAttemptStatus } from 'shared/types';
 
 type TasksState = {
   tasks: Record<string, TaskWithAttemptStatus>;

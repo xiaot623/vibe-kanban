@@ -419,7 +419,9 @@ const TaskFormDialogImpl = NiceModal.create<TaskFormDialogProps>((props) => {
             aria-label={
               isFullscreen ? 'Exit fullscreen mode' : 'Enter fullscreen mode'
             }
-            title={isFullscreen ? 'Exit fullscreen mode' : 'Enter fullscreen mode'}
+            title={
+              isFullscreen ? 'Exit fullscreen mode' : 'Enter fullscreen mode'
+            }
           >
             {isFullscreen ? (
               <Minimize2 className="h-4 w-4" />

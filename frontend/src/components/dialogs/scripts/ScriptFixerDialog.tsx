@@ -40,10 +40,14 @@ function SimpleLogs({
   error?: string | null;
 }) {
   if (error) {
-    return <div className="p-2 text-error text-sm">Error loading logs: {error}</div>;
+    return (
+      <div className="p-2 text-error text-sm">Error loading logs: {error}</div>
+    );
   }
   if (logs.length === 0) {
-    return <div className="p-2 text-muted-foreground text-sm">No logs available</div>;
+    return (
+      <div className="p-2 text-muted-foreground text-sm">No logs available</div>
+    );
   }
   return (
     <div className="h-full overflow-auto p-2 font-mono text-xs">

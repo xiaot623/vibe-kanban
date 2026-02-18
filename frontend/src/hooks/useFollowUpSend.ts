@@ -34,9 +34,9 @@ export function useFollowUpSend({
       setIsSendingFollowUp(true);
       setFollowUpError(null);
       const unsolvedReviewCommandMarkdowns = workspaceId
-        ? (
-            await attemptsApi.getUnsolvedReviewCommands(workspaceId)
-          ).map((command) => command.markdown_text.trim())
+        ? (await attemptsApi.getUnsolvedReviewCommands(workspaceId)).map(
+            (command) => command.markdown_text.trim()
+          )
         : [];
       const extraMessage = message.trim();
       const baseParts = [

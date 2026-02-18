@@ -15,8 +15,8 @@ interface ConfigParseErrorDialogProps {
   errorMessage: string;
 }
 
-const ConfigParseErrorDialogImpl = NiceModal.create<ConfigParseErrorDialogProps>(
-  ({ errorMessage }) => {
+const ConfigParseErrorDialogImpl =
+  NiceModal.create<ConfigParseErrorDialogProps>(({ errorMessage }) => {
     const modal = useModal();
 
     const handleClose = () => {
@@ -25,7 +25,10 @@ const ConfigParseErrorDialogImpl = NiceModal.create<ConfigParseErrorDialogProps>
     };
 
     return (
-      <Dialog open={modal.visible} onOpenChange={(open) => !open && handleClose()}>
+      <Dialog
+        open={modal.visible}
+        onOpenChange={(open) => !open && handleClose()}
+      >
         <DialogContent className="sm:max-w-[600px]">
           <DialogHeader>
             <div className="flex items-center gap-3">
@@ -50,8 +53,8 @@ const ConfigParseErrorDialogImpl = NiceModal.create<ConfigParseErrorDialogProps>
               </p>
               <p className="text-sm text-muted-foreground">
                 <AlertTriangle className="inline h-4 w-4 mr-1" />
-                Tip: Check for syntax errors like missing commas, unclosed brackets,
-                or invalid JSON values in your config file.
+                Tip: Check for syntax errors like missing commas, unclosed
+                brackets, or invalid JSON values in your config file.
               </p>
             </DialogDescription>
           </DialogHeader>
@@ -63,8 +66,7 @@ const ConfigParseErrorDialogImpl = NiceModal.create<ConfigParseErrorDialogProps>
         </DialogContent>
       </Dialog>
     );
-  }
-);
+  });
 
 export const ConfigParseErrorDialog = defineModal<
   ConfigParseErrorDialogProps,

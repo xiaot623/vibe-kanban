@@ -81,7 +81,10 @@ function normalizePathForMatch(path: string): string {
     .replace(/\/{2,}/g, '/');
 }
 
-function commentPathMatchesDiffFile(diffPath: string, commentPath: string): boolean {
+function commentPathMatchesDiffFile(
+  diffPath: string,
+  commentPath: string
+): boolean {
   const normalizedDiffPath = normalizePathForMatch(diffPath);
   const normalizedCommentPath = normalizePathForMatch(commentPath);
 
@@ -168,7 +171,8 @@ export default function DiffCard({
   // Review functionality
   const filePath = newName || oldName || 'unknown';
   const commentsForFile = useMemo(
-    () => comments.filter((c) => commentPathMatchesDiffFile(filePath, c.filePath)),
+    () =>
+      comments.filter((c) => commentPathMatchesDiffFile(filePath, c.filePath)),
     [comments, filePath]
   );
 
