@@ -29,6 +29,28 @@ jobs:
         with:
           toolchain: nightly-2025-12-04
 
+      - name: Install Linux system dependencies
+        run: |
+          sudo apt-get update
+          if apt-cache show libwebkit2gtk-4.1-dev >/dev/null 2>&1; then
+            WEBKIT_PACKAGE=libwebkit2gtk-4.1-dev
+          else
+            WEBKIT_PACKAGE=libwebkit2gtk-4.0-dev
+          fi
+          if apt-cache show libayatana-appindicator3-dev >/dev/null 2>&1; then
+            APPINDICATOR_PACKAGE=libayatana-appindicator3-dev
+          else
+            APPINDICATOR_PACKAGE=libappindicator3-dev
+          fi
+          sudo apt-get install -y \
+            pkg-config \
+            libglib2.0-dev \
+            libgtk-3-dev \
+            "${WEBKIT_PACKAGE}" \
+            "${APPINDICATOR_PACKAGE}" \
+            librsvg2-dev \
+            patchelf
+
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
