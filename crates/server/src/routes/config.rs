@@ -202,10 +202,8 @@ async fn handle_mcp_server_changes(deployment: &DeploymentImpl, old: &Config, ne
         }
         (true, false) => {
             // Disabled — stop the server
-            crate::mcp::http_service::McpHttpService::stop(
-                deployment.mcp_server_handle().clone(),
-            )
-            .await;
+            crate::mcp::http_service::McpHttpService::stop(deployment.mcp_server_handle().clone())
+                .await;
         }
         (true, true) if port_changed => {
             // Port changed while enabled — restart on new port

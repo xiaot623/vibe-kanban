@@ -17,6 +17,7 @@ pub mod projects;
 pub mod repo;
 pub mod scratch;
 pub mod sessions;
+pub mod skills;
 pub mod tags;
 pub mod task_attempts;
 pub mod tasks;
@@ -40,6 +41,7 @@ pub fn router(deployment: DeploymentImpl) -> Router {
         .merge(approvals::router())
         .merge(scratch::router(&deployment))
         .merge(sessions::router(&deployment))
+        .merge(skills::router())
         .merge(terminal::router())
         .nest("/images", images::routes());
 

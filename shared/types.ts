@@ -156,6 +156,22 @@ export type UpdateMcpServersBody = { servers: { [key in string]?: JsonValue }, }
 
 export type GetMcpServerResponse = { mcp_config: McpConfig, config_path: string, };
 
+export type SkillInfo = { name: string, description: string, path: string, };
+
+export enum SkillLinkState { LINKED = "LINKED", NOT_LINKED = "NOT_LINKED" }
+
+export type AgentSkillLinkInfo = { skill_name: string, description: string, state: SkillLinkState, agent_path: string, canonical_path: string, is_legacy: boolean, };
+
+export type GetSkillsResponse = { skills: Array<SkillInfo>, canonical_dir: string, };
+
+export type GetSkillLinksResponse = { executor: BaseCodingAgent, agent_dir: string, links: Array<AgentSkillLinkInfo>, };
+
+export type LinkSkillsBody = { skill_names: Array<string>, };
+
+export type ImportSkillsBody = { source: string, git_ref: string | null, subpath: string | null, skill_filter: string | null, };
+
+export type ImportSkillsResponse = { imported: Array<SkillInfo>, skipped: Array<string>, warnings: Array<string>, };
+
 export type CheckEditorAvailabilityQuery = { editor_type: EditorType, };
 
 export type CheckEditorAvailabilityResponse = { available: boolean, };

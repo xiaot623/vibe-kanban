@@ -17,6 +17,7 @@ import {
   ProjectSettings,
   ReposSettings,
   SettingsLayout,
+  SkillsSettingsLayout,
 } from '@/pages/settings/';
 import { UserSystemProvider, useUserSystem } from '@/components/ConfigProvider';
 import { ThemeProvider } from '@/components/ThemeProvider';
@@ -156,6 +157,7 @@ function AppContent() {
                 <Route path="repos" element={<ReposSettings />} />
                 <Route path="agents" element={<AgentSettings />} />
                 <Route path="mcp" element={<McpSettings />} />
+                <Route path="skills" element={<SkillsSettingsLayout />} />
               </Route>
               <Route
                 path="/mcp-servers"

@@ -11,6 +11,8 @@
         "reposDesc": "仓库脚本和配置",
         "agents": "代理",
         "agentsDesc": "编码代理配置",
+        "skills": "技能",
+        "skillsDesc": "管理全局技能与代理链接",
         "mcp": "MCP 服务器",
         "mcpDesc": "模型上下文协议服务器",
         "organizations": "组织设置",
@@ -397,6 +399,81 @@
         "success": "设置已保存！",
         "successMessage": "✓ MCP 配置保存成功！",
         "loading": "加载当前 MCP 服务器配置..."
+      }
+    },
+    "skills": {
+      "title": "技能",
+      "loading": "加载中...",
+      "nav": {
+        "all": "全部",
+        "claude": "Claude",
+        "codex": "Codex"
+      },
+      "all": {
+        "title": "全局技能",
+        "description": "管理保存在 ~/.kanban/skills 中的全局技能。",
+        "canonicalPath": "全局路径"
+      },
+      "agent": {
+        "title": "{{agent}} 技能链接",
+        "description": "为 {{agent}} 添加或取消全局技能链接。",
+        "agentDir": "代理技能目录"
+      },
+      "table": {
+        "name": "名称",
+        "description": "描述",
+        "path": "路径",
+        "actions": "操作"
+      },
+      "labels": {
+        "legacy": "历史",
+        "legacyDescription": "历史安装的 skills"
+      },
+      "actions": {
+        "import": "从 Git/GitHub 导入",
+        "importing": "导入中...",
+        "cancel": "取消",
+        "add": "添加",
+        "addSelected": "添加所选",
+        "adding": "添加中...",
+        "unlink": "取消链接"
+      },
+      "empty": {
+        "noSkills": "全局目录中没有找到技能。",
+        "noLinkedSkills": "暂无已链接技能。",
+        "noAddableSkills": "没有可添加的未链接技能。"
+      },
+      "errors": {
+        "loadFailed": "加载技能失败。",
+        "importFailed": "导入技能失败。",
+        "linkFailed": "链接技能失败。",
+        "unlinkFailed": "取消链接失败。",
+        "selectAtLeastOne": "请至少选择一个技能。"
+      },
+      "importSummary": {
+        "imported": "已导入：{{count}}",
+        "skipped": "已跳过：{{count}}",
+        "warnings": "警告：{{count}}"
+      },
+      "importDialog": {
+        "title": "从 Git/GitHub 导入技能",
+        "description": "导入包含 SKILL.md 的技能目录到 ~/.kanban/skills。",
+        "source": "来源",
+        "sourcePlaceholder": "owner/repo 或 git URL",
+        "advancedOptions": "高级选项",
+        "gitRef": "Git 引用（可选）",
+        "gitRefPlaceholder": "main",
+        "subpath": "子路径（可选）",
+        "subpathPlaceholder": "skills/.curated",
+        "skillFilter": "技能过滤（可选）",
+        "skillFilterPlaceholder": "名称包含...",
+        "errors": {
+          "sourceRequired": "来源不能为空。"
+        }
+      },
+      "addDialog": {
+        "title": "为 {{agent}} 添加技能",
+        "description": "选择一个或多个全局技能进行链接。"
       }
     },
     "projects": {

@@ -35,6 +35,11 @@ import {
   McpServerQuery,
   UpdateMcpServersBody,
   GetMcpServerResponse,
+  GetSkillsResponse,
+  GetSkillLinksResponse,
+  LinkSkillsBody,
+  ImportSkillsBody,
+  ImportSkillsResponse,
   ImageResponse,
   GitOperationError,
   ApprovalResponse,
@@ -971,6 +976,52 @@ export const mcpServersApi = {
         response
       );
     }
+  },
+};
+
+// Skills APIs
+export const skillsApi = {
+  list: async (): Promise<GetSkillsResponse> => {
+    const response = await makeRequest('/api/skills');
+    return handleApiResponse<GetSkillsResponse>(response);
+  },
+  listLinks: async (executor: BaseCodingAgent): Promise<GetSkillLinksResponse> => {
+    const params = new URLSearchParams({ executor });
+    const response = await makeRequest(`/api/skills/links?${params.toString()}`);
+    return handleApiResponse<GetSkillLinksResponse>(response);
+  },
+  link: async (
+    executor: BaseCodingAgent,
+    data: LinkSkillsBody
+  ): Promise<GetSkillLinksResponse> => {
+    const params = new URLSearchParams({ executor });
+    const response = await makeRequest(`/api/skills/links?${params.toString()}`, {
+      method: 'POST',
+      body: JSON.stringify(data),
+    });
+    return handleApiResponse<GetSkillLinksResponse>(response);
+  },
+  unlink: async (
+    executor: BaseCodingAgent,
+    skillName: string
+  ): Promise<GetSkillLinksResponse> => {
+    const params = new URLSearchParams({
+      executor,
+      skill_name: skillName,
+    });
+    const response = await makeRequest(`/api/skills/links?${params.toString()}`, {
+      method: 'DELETE',
+    });
+    return handleApiResponse<GetSkillLinksResponse>(response);
+  },
+  importFromGit: async (
+    data: ImportSkillsBody
+  ): Promise<ImportSkillsResponse> => {
+    const response = await makeRequest('/api/skills/import', {
+      method: 'POST',
+      body: JSON.stringify(data),
+    });
+    return handleApiResponse<ImportSkillsResponse>(response);
   },
 };
 

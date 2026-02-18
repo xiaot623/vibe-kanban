@@ -11,6 +11,8 @@
         "reposDesc": "Repository scripts and configuration",
         "agents": "Agents",
         "agentsDesc": "Coding agent configurations",
+        "skills": "Skills",
+        "skillsDesc": "Canonical and agent-linked skills",
         "mcp": "MCP Servers",
         "mcpDesc": "Model Context Protocol servers",
         "organizations": "Organization Settings",
@@ -397,6 +399,81 @@
         "success": "Settings Saved!",
         "successMessage": "✓ MCP configuration saved successfully!",
         "loading": "Loading current MCP server configuration..."
+      }
+    },
+    "skills": {
+      "title": "Skills",
+      "loading": "Loading...",
+      "nav": {
+        "all": "All",
+        "claude": "Claude",
+        "codex": "Codex"
+      },
+      "all": {
+        "title": "Canonical Skills",
+        "description": "Manage skills stored in the canonical ~/.kanban/skills directory.",
+        "canonicalPath": "Canonical path"
+      },
+      "agent": {
+        "title": "{{agent}} Skill Links",
+        "description": "Link and unlink canonical skills for {{agent}}.",
+        "agentDir": "Agent skills directory"
+      },
+      "table": {
+        "name": "Name",
+        "description": "Description",
+        "path": "Path",
+        "actions": "Actions"
+      },
+      "labels": {
+        "legacy": "Legacy",
+        "legacyDescription": "Linked from an existing agent skill path."
+      },
+      "actions": {
+        "import": "Import from Git/GitHub",
+        "importing": "Importing...",
+        "cancel": "Cancel",
+        "add": "Add",
+        "addSelected": "Add Selected",
+        "adding": "Adding...",
+        "unlink": "Unlink"
+      },
+      "empty": {
+        "noSkills": "No skills found in the canonical directory.",
+        "noLinkedSkills": "No linked skills yet.",
+        "noAddableSkills": "No unlinked canonical skills available."
+      },
+      "errors": {
+        "loadFailed": "Failed to load skills.",
+        "importFailed": "Failed to import skills.",
+        "linkFailed": "Failed to link skills.",
+        "unlinkFailed": "Failed to unlink skill.",
+        "selectAtLeastOne": "Select at least one skill."
+      },
+      "importSummary": {
+        "imported": "Imported: {{count}}",
+        "skipped": "Skipped: {{count}}",
+        "warnings": "Warnings: {{count}}"
+      },
+      "importDialog": {
+        "title": "Import Skills from Git/GitHub",
+        "description": "Import skill directories containing SKILL.md into ~/.kanban/skills.",
+        "source": "Source",
+        "sourcePlaceholder": "owner/repo or git URL",
+        "advancedOptions": "Advanced options",
+        "gitRef": "Git ref (optional)",
+        "gitRefPlaceholder": "main",
+        "subpath": "Subpath (optional)",
+        "subpathPlaceholder": "skills/.curated",
+        "skillFilter": "Skill filter (optional)",
+        "skillFilterPlaceholder": "name contains...",
+        "errors": {
+          "sourceRequired": "Source is required."
+        }
+      },
+      "addDialog": {
+        "title": "Add Skills to {{agent}}",
+        "description": "Select one or more canonical skills to link."
       }
     },
     "projects": {

@@ -7,6 +7,7 @@ import {
   X,
   FolderOpen,
   GitBranch,
+  Wrench,
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { Button } from '@/components/ui/button';
@@ -32,6 +33,10 @@ const settingsNavigation = [
   {
     path: 'agents',
     icon: Cpu,
+  },
+  {
+    path: 'skills',
+    icon: Wrench,
   },
   {
     path: 'mcp',
@@ -83,7 +88,7 @@ export function SettingsLayout() {
                     <NavLink
                       key={item.path}
                       to={item.path}
-                      end
+                      end={item.path !== 'skills'}
                       className={({ isActive }) =>
                         cn(
                           'flex items-start gap-3 px-3 py-2 text-sm transition-colors',
