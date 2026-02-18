@@ -15,6 +15,11 @@ permissions:
 env:
   NODE_VERSION: 22
   PNPM_VERSION: 10.13.1
+  # Reduce peak memory usage on GitHub-hosted runners during release builds.
+  CARGO_BUILD_JOBS: 1
+  CARGO_INCREMENTAL: 0
+  RUSTFLAGS: "-C debuginfo=0"
+  NODE_OPTIONS: "--max-old-space-size=4096"
 
 jobs:
   build-and-release:
