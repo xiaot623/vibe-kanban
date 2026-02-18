@@ -1,16 +1,14 @@
-name: Build Desktop Release
+name: Build Desktop (Manual)
 
 on:
-  push:
-    tags:
-      - "**"
+  workflow_dispatch:
 
 concurrency:
-  group: release-${{ github.ref }}
+  group: build-${{ github.ref }}
   cancel-in-progress: true
 
 permissions:
-  contents: write
+  contents: read
 
 env:
   NODE_VERSION: 22
@@ -99,70 +97,53 @@ jobs:
           rm -f "$DMG_DIR"/*.dmg
           hdiutil create -volname "$APP_NAME" -srcfolder "$APP_PATH" -ov -format UDZO "$DMG_DIR/$APP_NAME.dmg"
 
-      - name: Prepare macOS release asset
+      - name: Prepare macOS build asset
         if: matrix.platform == 'macos'
         run: |
           mkdir -p release-assets
+          safe_ref="${GITHUB_REF_NAME//\//-}"
           dmg_path=$(find target/release/bundle -type f -name '*.dmg' | head -n 1)
           if [ -z "$dmg_path" ]; then
             echo "No dmg found in target/release/bundle"
             exit 1
           fi
-          cp "$dmg_path" "release-assets/vibe-kanban-${GITHUB_REF_NAME}-macos.dmg"
+          cp "$dmg_path" "release-assets/vibe-kanban-${safe_ref}-macos.dmg"
 
-      - name: Prepare Linux release assets
+      - name: Prepare Linux build assets
         if: matrix.platform == 'linux'
         run: |
           mkdir -p release-assets
+          safe_ref="${GITHUB_REF_NAME//\//-}"
 
           appimage_path=$(find target/release/bundle -type f -name '*.AppImage' | head -n 1)
           if [ -z "$appimage_path" ]; then
             echo "No AppImage found in target/release/bundle"
             exit 1
           fi
-          cp "$appimage_path" "release-assets/vibe-kanban-${GITHUB_REF_NAME}-linux.AppImage"
+          cp "$appimage_path" "release-assets/vibe-kanban-${safe_ref}-linux.AppImage"
 
           deb_path=$(find target/release/bundle -type f -name '*.deb' | head -n 1)
           if [ -z "$deb_path" ]; then
             echo "No deb found in target/release/bundle"
             exit 1
           fi
-          cp "$deb_path" "release-assets/vibe-kanban-${GITHUB_REF_NAME}-linux.deb"
+          cp "$deb_path" "release-assets/vibe-kanban-${safe_ref}-linux.deb"
 
-      - name: Prepare Windows release asset
+      - name: Prepare Windows build asset
         if: matrix.platform == 'windows'
         run: |
           mkdir -p release-assets
+          safe_ref="${GITHUB_REF_NAME//\//-}"
           exe_path=$(find target/release/bundle -type f -name '*.exe' | head -n 1)
           if [ -z "$exe_path" ]; then
             echo "No exe found in target/release/bundle"
             exit 1
           fi
-          cp "$exe_path" "release-assets/vibe-kanban-${GITHUB_REF_NAME}-windows.exe"
+          cp "$exe_path" "release-assets/vibe-kanban-${safe_ref}-windows.exe"
 
-      - name: Upload release assets
+      - name: Upload build assets
         uses: actions/upload-artifact@v4
         with:
-          name: release-assets-${{ matrix.platform }}
+          name: build-assets-${{ matrix.platform }}
           path: release-assets/*
           if-no-files-found: error
-
-  publish-release:
-    name: Publish GitHub release
-    runs-on: ubuntu-latest
-    needs: build-desktop
-    steps:
-      - name: Download release assets
-        uses: actions/download-artifact@v4
-        with:
-          pattern: release-assets-*
-          path: release-assets
-          merge-multiple: true
-
-      - name: Publish GitHub release
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: ${{ github.ref_name }}
-          name: ${{ github.ref_name }}
-          generate_release_notes: false
-          files: release-assets/*
