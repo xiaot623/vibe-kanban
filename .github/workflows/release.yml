@@ -1,0 +1,74 @@
+name: Build Desktop Release
+
+on:
+  push:
+    tags:
+      - "**"
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+
+env:
+  NODE_VERSION: 22
+  PNPM_VERSION: 10.13.1
+
+jobs:
+  build-and-release:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: ./.github/actions/setup-node
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: nightly-2025-12-04
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build frontend
+        run: pnpm run frontend:build
+
+      - name: Build desktop app bundle
+        run: cd crates/desktop && pnpm exec tauri build
+
+      - name: Sign app and recreate dmg
+        run: |
+          APP_NAME='Vibe Kanban'
+          BUNDLE_DIR='target/release/bundle'
+          APP_PATH="$BUNDLE_DIR/macos/$APP_NAME.app"
+          DMG_DIR="$BUNDLE_DIR/dmg"
+
+          if [ ! -d "$APP_PATH" ]; then
+            echo "App bundle not found: $APP_PATH"
+            exit 1
+          fi
+
+          codesign --force --deep --sign - "$APP_PATH"
+          rm -f "$DMG_DIR"/*.dmg
+          hdiutil create -volname "$APP_NAME" -srcfolder "$APP_PATH" -ov -format UDZO "$DMG_DIR/$APP_NAME.dmg"
+
+      - name: Prepare release assets
+        run: |
+          mkdir -p release-assets
+          dmg_path=$(find target/release/bundle/dmg -maxdepth 1 -name '*.dmg' | head -n 1)
+          if [ -z "$dmg_path" ]; then
+            echo "No dmg found in target/release/bundle/dmg"
+            exit 1
+          fi
+          cp "$dmg_path" "release-assets/vibe-kanban-${GITHUB_REF_NAME}-macos.dmg"
+
+      - name: Publish GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: ${{ github.ref_name }}
+          generate_release_notes: false
+          files: release-assets/*

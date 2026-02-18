@@ -30,7 +30,7 @@
     "build:npx": "bash ./local-build.sh",
     "prepack": "npm run build:npx",
     "desktop:dev": "npm run frontend:build && cd crates/desktop && pnpm exec tauri dev",
-    "desktop:build": "npm run frontend:build && cd crates/desktop && pnpm exec tauri build && cd ../.. && bash scripts/sign-dmg.sh",
+    "desktop:build": "npm run frontend:build && cd crates/desktop && pnpm exec tauri build",
     "desktop:build:debug": "npm run frontend:build && cd crates/desktop && pnpm exec tauri build --debug",
     "android:dev": "npm run mobile:build && cd crates/desktop && pnpm exec tauri android dev",
     "android:build": "npm run mobile:build && cd crates/desktop && pnpm exec tauri android build --target aarch64",
