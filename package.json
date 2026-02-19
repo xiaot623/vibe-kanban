@@ -1,6 +1,6 @@
 {
   "name": "vibe-kanban",
-  "version": "0.1.8",
+  "version": "0.1.9",
   "private": true,
   "scripts": {
     "frontend:lint": "cd frontend && npm run lint",
@@ -29,6 +29,7 @@
     "version:bump": "node scripts/sync-version.js bump",
     "build:npx": "bash ./local-build.sh",
     "prepack": "npm run build:npx",
+    "release": "pnpm run check && pnpm run desktop:build && git add -A && git commit -m \"chore: release v$npm_package_version\" && git push origin release:release && git tag -a \"v$npm_package_version\" -m \"Release v$npm_package_version\" && git push origin \"v$npm_package_version\"",
     "desktop:dev": "npm run frontend:build && cd crates/desktop && pnpm exec tauri dev",
     "desktop:build": "npm run frontend:build && cd crates/desktop && pnpm exec tauri build",
     "desktop:build:debug": "npm run frontend:build && cd crates/desktop && pnpm exec tauri build --debug",
