@@ -544,7 +544,7 @@ export function ProjectTasks() {
       if (attemptIdToShow) {
         navigateWithSearch(paths.attempt(projectId, task.id, attemptIdToShow));
       } else {
-        navigateWithSearch(`${paths.task(projectId, task.id)}/attempts/latest`);
+        navigateWithSearch(paths.task(projectId, task.id));
       }
     },
     [projectId, navigateWithSearch]

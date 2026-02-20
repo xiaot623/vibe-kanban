@@ -1,7 +1,6 @@
 import { useTranslation } from 'react-i18next';
 import { useProject } from '@/contexts/ProjectContext';
 import { useTaskAttemptsWithSessions } from '@/hooks/useTaskAttempts';
-import { useTaskAttemptWithSession } from '@/hooks/useTaskAttempt';
 import { useNavigateWithSearch } from '@/hooks';
 import { paths } from '@/lib/paths';
 import type { TaskWithAttemptStatus } from 'shared/types';
@@ -10,8 +9,8 @@ import { NewCardContent } from '../ui/new-card';
 import { Button } from '../ui/button';
 import { PlusIcon } from 'lucide-react';
 import { CreateAttemptDialog } from '@/components/dialogs/tasks/CreateAttemptDialog';
-import WYSIWYGEditor from '@/components/ui/wysiwyg';
 import { DataTable, type ColumnDef } from '@/components/ui/table';
+import WYSIWYGEditor from '@/components/ui/wysiwyg';
 
 interface TaskPanelProps {
   task: TaskWithAttemptStatus | null;
@@ -27,9 +26,6 @@ const TaskPanel = ({ task }: TaskPanelProps) => {
     isLoading: isAttemptsLoading,
     isError: isAttemptsError,
   } = useTaskAttemptsWithSessions(task?.id);
-
-  const { data: parentAttempt, isLoading: isParentLoading } =
-    useTaskAttemptWithSession(task?.parent_workspace_id || undefined);
 
   const formatTimeAgo = (iso: string) => {
     const d = new Date(iso);
@@ -81,7 +77,7 @@ const TaskPanel = ({ task }: TaskPanelProps) => {
       id: 'executor',
       header: '',
       accessor: (attempt) => attempt.session?.executor || 'Base Agent',
-      className: 'pr-4',
+      className: 'pr-4 text-muted-foreground',
     },
     {
       id: 'branch',
@@ -93,15 +89,24 @@ const TaskPanel = ({ task }: TaskPanelProps) => {
       id: 'time',
       header: '',
       accessor: (attempt) => formatTimeAgo(attempt.created_at),
-      className: 'pr-0 text-right',
+      className: 'pr-0 text-right text-muted-foreground whitespace-nowrap',
     },
   ];
 
+  const attemptsData = isAttemptsError ? [] : displayedAttempts;
+  const attemptsEmptyState = isAttemptsError ? (
+    <span className="text-destructive">
+      {t('taskPanel.errorLoadingAttempts')}
+    </span>
+  ) : (
+    t('taskPanel.noAttempts')
+  );
+
   return (
-    <>
-      <NewCardContent>
-        <div className="p-6 flex flex-col h-full max-h-[calc(100vh-8rem)]">
-          <div className="space-y-3 overflow-y-auto flex-shrink min-h-0">
+    <NewCardContent>
+      <div className="h-full max-h-[calc(100vh-8rem)] overflow-y-auto p-6">
+        <div className="mx-auto w-full max-w-[50rem] space-y-10">
+          <div className="space-y-3">
             <WYSIWYGEditor value={titleContent} disabled taskId={task.id} />
             {descriptionContent && (
               <WYSIWYGEditor
@@ -112,70 +117,42 @@ const TaskPanel = ({ task }: TaskPanelProps) => {
             )}
           </div>
 
-          <div className="mt-6 flex-shrink-0 space-y-4">
-            {task.parent_workspace_id && (
-              <DataTable
-                data={parentAttempt ? [parentAttempt] : []}
-                columns={attemptColumns}
-                keyExtractor={(attempt) => attempt.id}
-                onRowClick={(attempt) => {
-                  if (projectId) {
-                    navigate(
-                      paths.attempt(projectId, attempt.task_id, attempt.id)
-                    );
-                  }
-                }}
-                isLoading={isParentLoading}
-                headerContent="Parent Attempt"
-              />
-            )}
-
-            {isAttemptsLoading ? (
-              <div className="text-muted-foreground">
-                {t('taskPanel.loadingAttempts')}
-              </div>
-            ) : isAttemptsError ? (
-              <div className="text-destructive">
-                {t('taskPanel.errorLoadingAttempts')}
-              </div>
-            ) : (
-              <DataTable
-                data={displayedAttempts}
-                columns={attemptColumns}
-                keyExtractor={(attempt) => attempt.id}
-                onRowClick={(attempt) => {
-                  if (projectId && task.id) {
-                    navigate(paths.attempt(projectId, task.id, attempt.id));
-                  }
-                }}
-                emptyState={t('taskPanel.noAttempts')}
-                headerContent={
-                  <div className="w-full flex text-left">
-                    <span className="flex-1">
-                      {t('taskPanel.attemptsCount', {
-                        count: displayedAttempts.length,
-                      })}
-                    </span>
-                    <span>
-                      <Button
-                        variant="icon"
-                        onClick={() =>
-                          CreateAttemptDialog.show({
-                            taskId: task.id,
-                          })
-                        }
-                      >
-                        <PlusIcon size={16} />
-                      </Button>
-                    </span>
-                  </div>
+          <div>
+            <DataTable
+              data={attemptsData}
+              columns={attemptColumns}
+              keyExtractor={(attempt) => attempt.id}
+              onRowClick={(attempt) => {
+                if (projectId && task.id) {
+                  navigate(paths.attempt(projectId, task.id, attempt.id));
                 }
-              />
-            )}
+              }}
+              isLoading={isAttemptsLoading && !isAttemptsError}
+              emptyState={attemptsEmptyState}
+              headerContent={
+                <div className="w-full flex items-center gap-2 text-left text-foreground">
+                  <span className="flex-1 text-lg font-semibold tracking-wide">
+                    {t('taskPanel.attemptsCount', {
+                      count: displayedAttempts.length,
+                    })}
+                  </span>
+                  <Button
+                    variant="icon"
+                    onClick={() =>
+                      CreateAttemptDialog.show({
+                        taskId: task.id,
+                      })
+                    }
+                  >
+                    <PlusIcon size={18} />
+                  </Button>
+                </div>
+              }
+            />
           </div>
         </div>
-      </NewCardContent>
-    </>
+      </div>
+    </NewCardContent>
   );
 };
 
