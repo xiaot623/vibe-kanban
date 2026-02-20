@@ -12,8 +12,9 @@ use db::models::{
 };
 use deployment::Deployment;
 use serde::{Deserialize, Serialize};
-use services::services::git_host::{
-    self, GitHostError, GitHostProvider, ProviderKind, UnifiedPrComment,
+use services::services::{
+    context_archive,
+    git_host::{self, GitHostError, GitHostProvider, ProviderKind, UnifiedPrComment},
 };
 use ts_rs::TS;
 use utils::response::ApiResponse;
@@ -162,7 +163,16 @@ pub async fn attach_existing_pr(
 
         // If PR is merged, mark task as done and archive workspace
         if matches!(pr_info.status, MergeStatus::Merged) {
-            Task::update_status(pool, task.id, TaskStatus::Done).await?;
+            let done_task = Task::update_status(pool, task.id, TaskStatus::Done).await?;
+            if let Err(err) =
+                context_archive::mark_task_done_diff(pool, &done_task, &workspace.branch).await
+            {
+                tracing::warn!(
+                    "Failed to sync Done diff archive meta for task {}: {}",
+                    done_task.id,
+                    err
+                );
+            }
             if !workspace.pinned {
                 Workspace::set_archived(pool, workspace.id, true).await?;
             }

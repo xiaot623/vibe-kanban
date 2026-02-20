@@ -23,7 +23,9 @@ use deployment::Deployment;
 use executors::profile::ExecutorProfileId;
 use futures_util::{SinkExt, StreamExt, TryStreamExt};
 use serde::{Deserialize, Serialize};
-use services::services::{container::ContainerService, workspace_manager::WorkspaceManager};
+use services::services::{
+    container::ContainerService, context_archive, workspace_manager::WorkspaceManager,
+};
 use sqlx::Error as SqlxError;
 use ts_rs::TS;
 use utils::response::ApiResponse;
@@ -319,6 +321,22 @@ pub async fn delete_task(
             tracing::error!("Failed to fetch task attempts for task {}: {}", task.id, e);
             ApiError::Workspace(e)
         })?;
+
+    if let Ok(Some(project)) = task.parent_project(pool).await {
+        for workspace in &attempts {
+            if let Err(err) =
+                context_archive::ensure_archive_files(pool, &project, &task, &workspace.branch)
+                    .await
+            {
+                tracing::warn!(
+                    "Failed to ensure archive files while deleting task {} workspace {}: {}",
+                    task.id,
+                    workspace.id,
+                    err
+                );
+            }
+        }
+    }
 
     // Stop any running execution processes before deletion
     for workspace in &attempts {

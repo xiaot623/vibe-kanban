@@ -1,5 +1,5 @@
 use std::{
-    collections::HashMap,
+    collections::{BTreeMap, HashMap},
     io,
     path::{Path, PathBuf},
     str::FromStr,
@@ -35,7 +35,9 @@ use executors::{
     approvals::{ExecutorApprovalService, NoopExecutorApprovalService},
     env::{ExecutionEnv, RepoContext},
     executors::{BaseCodingAgent, ExecutorExitResult, ExecutorExitSignal, InterruptSender},
-    logs::{NormalizedEntryType, utils::patch::extract_normalized_entry_from_patch},
+    logs::{
+        NormalizedEntry, NormalizedEntryType, utils::patch::extract_normalized_entry_from_patch,
+    },
     profile::ExecutorProfileId,
 };
 use futures::{FutureExt, TryStreamExt, stream::select};
@@ -45,6 +47,7 @@ use services::services::{
     approvals::{Approvals, executor_approvals::ExecutorApprovalBridge},
     config::{Config, ProxyConfig},
     container::{ContainerError, ContainerRef, ContainerService},
+    context_archive,
     diff_stream::{self, DiffStreamHandle},
     git::{GitCli, GitService},
     image::ImageService,
@@ -140,6 +143,19 @@ impl LocalContainerService {
     }
 
     pub async fn cleanup_workspace(db: &DBService, workspace: &Workspace) {
+        if let Ok(Some(task)) = workspace.parent_task(&db.pool).await
+            && let Ok(Some(project)) = task.parent_project(&db.pool).await
+            && let Err(err) =
+                context_archive::ensure_archive_files(&db.pool, &project, &task, &workspace.branch)
+                    .await
+        {
+            tracing::warn!(
+                "Failed to ensure archive files during workspace cleanup {}: {}",
+                workspace.id,
+                err
+            );
+        }
+
         let Some(container_ref) = &workspace.container_ref else {
             return;
         };
@@ -550,6 +566,21 @@ impl LocalContainerService {
                     }
                 }
 
+                let normalized_entries = container.collect_normalized_entries(&exec_id);
+                if let Err(err) = context_archive::append_execution_context(
+                    &db.pool,
+                    exec_id,
+                    &normalized_entries,
+                )
+                .await
+                {
+                    tracing::warn!(
+                        "Failed to append execution context to archive for {}: {}",
+                        exec_id,
+                        err
+                    );
+                }
+
                 // Fire analytics event when CodingAgent execution has finished
                 if config.read().await.analytics_enabled
                     && matches!(
@@ -669,30 +700,41 @@ impl LocalContainerService {
             .map_err(|e| ContainerError::Other(anyhow!("{e}")))
     }
 
+    fn collect_normalized_entries(&self, exec_id: &Uuid) -> Vec<NormalizedEntry> {
+        let Ok(msg_stores) = self.msg_stores.try_read() else {
+            return Vec::new();
+        };
+        let Some(msg_store) = msg_stores.get(exec_id) else {
+            return Vec::new();
+        };
+
+        // Build a stable final snapshot by upserting latest entry per index.
+        let history = msg_store.get_history();
+        let mut entries = BTreeMap::new();
+        for msg in &history {
+            if let LogMsg::JsonPatch(patch) = msg
+                && let Some((idx, entry)) = extract_normalized_entry_from_patch(patch)
+            {
+                entries.insert(idx, entry);
+            }
+        }
+
+        entries.into_values().collect()
+    }
+
     /// Extract the last assistant message from the MsgStore history
     fn extract_last_assistant_message(&self, exec_id: &Uuid) -> Option<String> {
-        // Get the MsgStore for this execution
-        let msg_stores = self.msg_stores.try_read().ok()?;
-        let msg_store = msg_stores.get(exec_id)?;
-
-        // Get the history and scan in reverse for the last assistant message
-        let history = msg_store.get_history();
-
-        for msg in history.iter().rev() {
-            if let LogMsg::JsonPatch(patch) = msg {
-                // Try to extract a NormalizedEntry from the patch
-                if let Some((_, entry)) = extract_normalized_entry_from_patch(patch)
-                    && matches!(entry.entry_type, NormalizedEntryType::AssistantMessage)
-                {
-                    let content = entry.content.trim();
-                    if !content.is_empty() {
-                        const MAX_SUMMARY_LENGTH: usize = 4096;
-                        if content.len() > MAX_SUMMARY_LENGTH {
-                            let truncated = truncate_to_char_boundary(content, MAX_SUMMARY_LENGTH);
-                            return Some(format!("{truncated}..."));
-                        }
-                        return Some(content.to_string());
+        let entries = self.collect_normalized_entries(exec_id);
+        for entry in entries.iter().rev() {
+            if matches!(entry.entry_type, NormalizedEntryType::AssistantMessage) {
+                let content = entry.content.trim();
+                if !content.is_empty() {
+                    const MAX_SUMMARY_LENGTH: usize = 4096;
+                    if content.len() > MAX_SUMMARY_LENGTH {
+                        let truncated = truncate_to_char_boundary(content, MAX_SUMMARY_LENGTH);
+                        return Some(format!("{truncated}..."));
                     }
+                    return Some(content.to_string());
                 }
             }
         }

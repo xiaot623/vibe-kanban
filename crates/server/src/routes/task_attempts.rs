@@ -45,6 +45,7 @@ use git2::BranchType;
 use serde::{Deserialize, Serialize};
 use services::services::{
     container::ContainerService,
+    context_archive,
     file_search::SearchQuery,
     git::{ConflictOp, DiffTarget, GitCliError, GitServiceError},
     workspace_manager::WorkspaceManager,
@@ -578,7 +579,16 @@ pub async fn merge_task_attempt(
     if let Some((added, removed)) = diff_stats {
         let _ = Task::update_diff_stats(pool, task.id, added as i32, removed as i32).await;
     }
-    Task::update_status(pool, task.id, TaskStatus::Done).await?;
+    let done_task = Task::update_status(pool, task.id, TaskStatus::Done).await?;
+    if let Err(err) =
+        context_archive::mark_task_done_diff(pool, &done_task, &workspace.branch).await
+    {
+        tracing::warn!(
+            "Failed to sync Done diff archive meta for task {}: {}",
+            done_task.id,
+            err
+        );
+    }
     if !workspace.pinned {
         Workspace::set_archived(pool, workspace.id, true).await?;
     }
@@ -1769,6 +1779,18 @@ pub async fn delete_workspace(
     // Gather data needed for background cleanup
     let workspace_dir = workspace.container_ref.clone().map(PathBuf::from);
     let repositories = WorkspaceRepo::find_repos_for_workspace(pool, workspace.id).await?;
+
+    if let Ok(Some(task)) = workspace.parent_task(pool).await
+        && let Ok(Some(project)) = task.parent_project(pool).await
+        && let Err(err) =
+            context_archive::ensure_archive_files(pool, &project, &task, &workspace.branch).await
+    {
+        tracing::warn!(
+            "Failed to ensure archive files while deleting workspace {}: {}",
+            workspace.id,
+            err
+        );
+    }
 
     // Nullify parent_workspace_id for any child tasks before deletion
     let children_affected = Task::nullify_children_by_workspace_id(pool, workspace.id).await?;

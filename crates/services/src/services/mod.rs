@@ -3,6 +3,7 @@ pub mod approvals;
 pub mod auth;
 pub mod config;
 pub mod container;
+pub mod context_archive;
 pub mod diff_stream;
 pub mod events;
 pub mod file_ranker;
