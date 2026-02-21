@@ -1,4 +1,4 @@
-import { Bot, ArrowDown } from 'lucide-react';
+import { Bot, ChevronDown } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import {
   DropdownMenu,
@@ -7,6 +7,7 @@ import {
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu';
 import { Label } from '@/components/ui/label';
+import { cn } from '@/lib/utils';
 import type { ExecutorProfileId, BaseCodingAgent } from 'shared/types';
 
 interface AgentSelectorProps {
@@ -34,7 +35,7 @@ export function AgentSelector({
   if (!profiles) return null;
 
   return (
-    <div className="flex-1">
+    <div className={showLabel ? 'flex-1' : 'shrink-0'}>
       {showLabel && (
         <Label htmlFor="executor-profile" className="text-sm font-medium">
           Agent
@@ -43,17 +44,21 @@ export function AgentSelector({
       <DropdownMenu>
         <DropdownMenuTrigger asChild>
           <Button
-            variant="outline"
+            variant="secondary"
             size="sm"
-            className={`w-full justify-between text-xs ${showLabel ? 'mt-1.5' : ''} ${className}`}
+            className={cn(
+              'px-2 flex items-center justify-between transition-all',
+              showLabel && 'w-full mt-1.5',
+              className
+            )}
             disabled={disabled}
             aria-label="Select agent"
           >
-            <div className="flex items-center gap-1.5 w-full">
-              <Bot className="h-3 w-3" />
-              <span className="truncate">{selectedAgent || 'Agent'}</span>
-            </div>
-            <ArrowDown className="h-3 w-3" />
+            <Bot className="h-3 w-3 mr-1 flex-shrink-0" />
+            <span className="text-xs truncate flex-1 text-left">
+              {selectedAgent || 'Agent'}
+            </span>
+            <ChevronDown className="h-3 w-3 ml-1 flex-shrink-0" />
           </Button>
         </DropdownMenuTrigger>
         <DropdownMenuContent className="w-60">

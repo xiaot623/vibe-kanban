@@ -45,7 +45,11 @@ const VariantSelectorInner = forwardRef<HTMLButtonElement, Props>(
             className
           )}
           disabled
-        />
+        >
+          <Settings2 className="h-3 w-3 mr-1 flex-shrink-0" />
+          <span className="text-xs truncate flex-1 text-left">DEFAULT</span>
+          <ChevronDown className="h-3 w-3 ml-1 flex-shrink-0" />
+        </Button>
       );
     }
 
