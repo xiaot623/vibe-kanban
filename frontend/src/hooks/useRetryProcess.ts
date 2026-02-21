@@ -53,6 +53,7 @@ export function useRetryProcess(
       await sessionsApi.followUp(sessionId, {
         prompt: message,
         variant,
+        executor: null,
         retry_process_id: executionProcessId,
         force_when_dirty: modalResult.forceWhenDirty ?? false,
         perform_git_reset: modalResult.performGitReset ?? true,

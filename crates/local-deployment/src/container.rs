@@ -865,7 +865,7 @@ impl LocalContainerService {
         queued_data: &DraftFollowUpData,
     ) -> Result<ExecutionProcess, ContainerError> {
         // Get executor from the latest CodingAgent process, or fall back to session's executor
-        let base_executor = match ExecutionProcess::latest_executor_profile_for_session(
+        let current_executor = match ExecutionProcess::latest_executor_profile_for_session(
             &self.db.pool,
             ctx.session.id,
         )
@@ -887,17 +887,45 @@ impl LocalContainerService {
             }
         };
 
+        let switch_decision =
+            context_archive::resolve_executor_switch(current_executor, queued_data.executor);
         let executor_profile_id = ExecutorProfileId {
-            executor: base_executor,
+            executor: switch_decision.requested_executor,
             variant: queued_data.variant.clone(),
         };
 
         // Get latest agent session ID for session continuity (from coding agent turns)
-        let latest_agent_session_id = ExecutionProcess::find_latest_coding_agent_turn_session_id(
-            &self.db.pool,
-            ctx.session.id,
-        )
-        .await?;
+        let latest_agent_session_id = if switch_decision.switched {
+            None
+        } else {
+            ExecutionProcess::find_latest_coding_agent_turn_session_id(
+                &self.db.pool,
+                ctx.session.id,
+            )
+            .await?
+        };
+
+        let prompt = if switch_decision.switched {
+            match context_archive::build_executor_switch_prompt_for_workspace(
+                &self.db.pool,
+                &ctx.workspace,
+                &queued_data.message,
+            )
+            .await
+            {
+                Ok(switch_prompt) => switch_prompt,
+                Err(err) => {
+                    tracing::warn!(
+                        "Failed to build archive-context prompt for queued executor switch on session {}: {}",
+                        ctx.session.id,
+                        err
+                    );
+                    queued_data.message.clone()
+                }
+            }
+        } else {
+            queued_data.message.clone()
+        };
 
         let repos =
             WorkspaceRepo::find_repos_for_workspace(&self.db.pool, ctx.workspace.id).await?;
@@ -912,14 +940,14 @@ impl LocalContainerService {
 
         let action_type = if let Some(agent_session_id) = latest_agent_session_id {
             ExecutorActionType::CodingAgentFollowUpRequest(CodingAgentFollowUpRequest {
-                prompt: queued_data.message.clone(),
+                prompt: prompt.clone(),
                 session_id: agent_session_id,
                 executor_profile_id: executor_profile_id.clone(),
                 working_dir: working_dir.clone(),
             })
         } else {
             ExecutorActionType::CodingAgentInitialRequest(CodingAgentInitialRequest {
-                prompt: queued_data.message.clone(),
+                prompt,
                 executor_profile_id: executor_profile_id.clone(),
                 working_dir,
             })

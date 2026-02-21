@@ -46,9 +46,13 @@ import { ClickedElementsBanner } from '@/components/tasks/ClickedElementsBanner'
 import WYSIWYGEditor from '@/components/ui/wysiwyg';
 import { useRetryUi } from '@/contexts/RetryUiContext';
 import { useFollowUpSend } from '@/hooks/useFollowUpSend';
-import { useVariant } from '@/hooks/useVariant';
-import type { DraftFollowUpData, ExecutorProfileId } from 'shared/types';
-import { extractProfileFromAction } from '@/utils/executor';
+import { AgentSelector } from '@/components/tasks/AgentSelector';
+import type {
+  BaseCodingAgent,
+  DraftFollowUpData,
+  ExecutorProfileId,
+} from 'shared/types';
+import { extractProfileFromAction, getVariantOptions } from '@/utils/executor';
 import { buildResolveConflictsInstructions } from '@/lib/conflicts';
 import { useTranslation } from 'react-i18next';
 import { useScratch } from '@/hooks/useScratch';
@@ -147,7 +151,7 @@ export function TaskFollowUpSection({
   const [localMessage, setLocalMessage] = useState('');
   const lastSavedReviewMarkdownRef = useRef<string | null>(null);
 
-  // Variant selection - derive default from latest process
+  // Executor/variant selection - derive defaults from latest process
   const latestProfileId = useMemo<ExecutorProfileId | null>(() => {
     if (!processes?.length) return null;
     return (
@@ -159,25 +163,64 @@ export function TaskFollowUpSection({
     );
   }, [processes]);
 
+  const processExecutor = latestProfileId?.executor ?? null;
   const processVariant = latestProfileId?.variant ?? null;
+  const [userSelectedExecutor, setUserSelectedExecutor] = useState<
+    BaseCodingAgent | null | undefined
+  >(undefined);
+  const [userSelectedVariant, setUserSelectedVariant] = useState<
+    string | null | undefined
+  >(undefined);
+  const selectedExecutor =
+    userSelectedExecutor ?? scratchData?.executor ?? processExecutor ?? null;
 
   const currentProfile = useMemo(() => {
-    if (!latestProfileId) return null;
-    return profiles?.[latestProfileId.executor] ?? null;
-  }, [latestProfileId, profiles]);
+    if (!selectedExecutor) return null;
+    return profiles?.[selectedExecutor] ?? null;
+  }, [selectedExecutor, profiles]);
 
-  // Variant selection with priority: user selection > scratch > process
-  const { selectedVariant, setSelectedVariant: setVariantFromHook } =
-    useVariant({
-      processVariant,
-      scratchVariant: scratchData?.variant,
-    });
+  const variantOptions = useMemo(
+    () => getVariantOptions(selectedExecutor, profiles),
+    [selectedExecutor, profiles]
+  );
 
-  // Ref to track current variant for use in message save callback
+  const normalizeVariantForOptions = useCallback(
+    (variant: string | null | undefined, options: string[]) => {
+      if (variant == null) return null;
+      if (options.includes(variant)) return variant;
+      if (options.includes('DEFAULT')) return 'DEFAULT';
+      return options[0] ?? null;
+    },
+    []
+  );
+
+  const scratchVariant = scratchData ? scratchData.variant : undefined;
+  const selectedVariant = useMemo(() => {
+    const preferredVariant =
+      userSelectedVariant !== undefined
+        ? userSelectedVariant
+        : scratchVariant !== undefined
+          ? scratchVariant
+          : processVariant;
+
+    return normalizeVariantForOptions(preferredVariant, variantOptions);
+  }, [
+    userSelectedVariant,
+    scratchVariant,
+    processVariant,
+    normalizeVariantForOptions,
+    variantOptions,
+  ]);
+
+  // Refs to track current variant/executor for message save callback
   const variantRef = useRef<string | null>(selectedVariant);
   useEffect(() => {
     variantRef.current = selectedVariant;
   }, [selectedVariant]);
+  const executorRef = useRef<BaseCodingAgent | null>(selectedExecutor);
+  useEffect(() => {
+    executorRef.current = selectedExecutor;
+  }, [selectedExecutor]);
 
   // Refs to stabilize callbacks - avoid re-creating callbacks when these values change
   const scratchRef = useRef(scratch);
@@ -188,16 +231,21 @@ export function TaskFollowUpSection({
   // Save scratch helper (used for both message and variant changes)
   // Uses scratchRef to avoid callback invalidation when scratch updates
   const saveToScratch = useCallback(
-    async (message: string, variant: string | null) => {
+    async (
+      message: string,
+      variant: string | null,
+      executor: BaseCodingAgent | null
+    ) => {
       if (!workspaceId) return;
       // Don't create empty scratch entries - only save if there's actual content,
-      // a variant is selected, or scratch already exists (to allow clearing a draft)
-      if (!message.trim() && !variant && !scratchRef.current) return;
+      // a profile override is selected, or scratch already exists (to allow clearing a draft)
+      if (!message.trim() && !variant && !executor && !scratchRef.current)
+        return;
       try {
         await updateScratch({
           payload: {
             type: 'DRAFT_FOLLOW_UP',
-            data: { message, variant },
+            data: { message, variant, executor },
           },
         });
       } catch (e) {
@@ -210,18 +258,48 @@ export function TaskFollowUpSection({
   // Wrapper to update variant and save to scratch immediately
   const setSelectedVariant = useCallback(
     (variant: string | null) => {
-      setVariantFromHook(variant);
+      const normalizedVariant = normalizeVariantForOptions(variant, variantOptions);
+      setUserSelectedVariant(normalizedVariant);
       // Save immediately when user changes variant
-      saveToScratch(localMessage, variant);
+      saveToScratch(localMessage, normalizedVariant, selectedExecutor);
     },
-    [setVariantFromHook, saveToScratch, localMessage]
+    [
+      normalizeVariantForOptions,
+      variantOptions,
+      saveToScratch,
+      localMessage,
+      selectedExecutor,
+    ]
   );
 
-  // Debounced save for message changes (uses current variant from ref)
+  const setSelectedExecutor = useCallback(
+    (profile: ExecutorProfileId) => {
+      const nextExecutor = profile.executor;
+      const nextVariantOptions = getVariantOptions(nextExecutor, profiles);
+      const nextVariant = normalizeVariantForOptions(
+        selectedVariant,
+        nextVariantOptions
+      );
+
+      setUserSelectedExecutor(nextExecutor);
+      setUserSelectedVariant(nextVariant);
+      saveToScratch(localMessage, nextVariant, nextExecutor);
+    },
+    [
+      profiles,
+      normalizeVariantForOptions,
+      selectedVariant,
+      saveToScratch,
+      localMessage,
+    ]
+  );
+
+  // Debounced save for message changes (uses current profile state from refs)
   const { debounced: setFollowUpMessage, cancel: cancelDebouncedSave } =
     useDebouncedCallback(
       useCallback(
-        (value: string) => saveToScratch(value, variantRef.current),
+        (value: string) =>
+          saveToScratch(value, variantRef.current, executorRef.current),
         [saveToScratch]
       ),
       500
@@ -288,10 +366,12 @@ export function TaskFollowUpSection({
     mutationFn: ({
       message,
       variant,
+      executor,
     }: {
       message: string;
       variant: string | null;
-    }) => queueApi.queue(sessionId!, { message, variant }),
+      executor: BaseCodingAgent | null;
+    }) => queueApi.queue(sessionId!, { message, variant, executor }),
     onSuccess: (status) => {
       queryClient.setQueryData([QUEUE_STATUS_KEY, sessionId], status);
     },
@@ -305,9 +385,13 @@ export function TaskFollowUpSection({
   });
 
   const queueMessage = useCallback(
-    async (message: string, variant: string | null) => {
+    async (
+      message: string,
+      variant: string | null,
+      executor: BaseCodingAgent | null
+    ) => {
       if (!sessionId) return;
-      await queueMutation.mutateAsync({ message, variant });
+      await queueMutation.mutateAsync({ message, variant, executor });
     },
     [sessionId, queueMutation]
   );
@@ -376,6 +460,7 @@ export function TaskFollowUpSection({
       conflictMarkdown: conflictResolutionInstructions,
       clickedMarkdown,
       selectedVariant,
+      selectedExecutor,
       clearComments,
       clearClickedElements,
       onAfterSendCleanup: () => {
@@ -561,7 +646,7 @@ export function TaskFollowUpSection({
       // Cancel any pending debounced save and save immediately before queueing
       // This prevents the race condition where the debounce fires after queueing
       cancelDebouncedSave();
-      await saveToScratch(localMessage, selectedVariant);
+      await saveToScratch(localMessage, selectedVariant, selectedExecutor);
 
       const baseParts = [
         conflictResolutionInstructions,
@@ -583,7 +668,7 @@ export function TaskFollowUpSection({
 
       const combinedMessage = [...baseParts, ...commandParts].join('\n\n');
       if (!combinedMessage) return;
-      await queueMessage(combinedMessage, selectedVariant);
+      await queueMessage(combinedMessage, selectedVariant, selectedExecutor);
     } catch (error) {
       console.error('Failed to queue follow-up message:', error);
       setFollowUpError('Failed to queue follow-up message');
@@ -595,6 +680,7 @@ export function TaskFollowUpSection({
     clickedMarkdown,
     hasPersistedReviewCommand,
     selectedVariant,
+    selectedExecutor,
     persistReviewCommandIfNeeded,
     workspaceId,
     queueMessage,
@@ -940,6 +1026,19 @@ export function TaskFollowUpSection({
       <div className="p-4">
         <div className="flex flex-row gap-2 items-center">
           <div className="flex-1 flex gap-2">
+            <AgentSelector
+              profiles={profiles}
+              selectedExecutorProfile={
+                selectedExecutor
+                  ? {
+                      executor: selectedExecutor,
+                      variant: selectedVariant,
+                    }
+                  : null
+              }
+              onChange={setSelectedExecutor}
+              disabled={!isEditable}
+            />
             <VariantSelector
               currentProfile={currentProfile}
               selectedVariant={selectedVariant}

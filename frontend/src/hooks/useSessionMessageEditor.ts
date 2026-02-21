@@ -1,5 +1,9 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { ScratchType, type DraftFollowUpData } from 'shared/types';
+import {
+  ScratchType,
+  type BaseCodingAgent,
+  type DraftFollowUpData,
+} from 'shared/types';
 import { useScratch } from './useScratch';
 import { useDebouncedCallback } from './useDebouncedCallback';
 
@@ -20,13 +24,21 @@ interface UseSessionMessageEditorResult {
   /** Whether the initial value has been applied from scratch */
   hasInitialValue: boolean;
   /** Save message and variant to scratch */
-  saveToScratch: (message: string, variant: string | null) => Promise<void>;
+  saveToScratch: (
+    message: string,
+    variant: string | null,
+    executor: BaseCodingAgent | null
+  ) => Promise<void>;
   /** Delete the draft scratch */
   clearDraft: () => Promise<void>;
   /** Cancel pending debounced save */
   cancelDebouncedSave: () => void;
   /** Handle message change with debounced save */
-  handleMessageChange: (value: string, currentVariant: string | null) => void;
+  handleMessageChange: (
+    value: string,
+    currentVariant: string | null,
+    currentExecutor: BaseCodingAgent | null
+  ) => void;
 }
 
 /**
@@ -52,13 +64,17 @@ export function useSessionMessageEditor({
   const [hasInitialValue, setHasInitialValue] = useState(false);
 
   const saveToScratch = useCallback(
-    async (message: string, variant: string | null) => {
+    async (
+      message: string,
+      variant: string | null,
+      executor: BaseCodingAgent | null
+    ) => {
       if (!scratchId) return;
       try {
         await updateScratch({
           payload: {
             type: 'DRAFT_FOLLOW_UP',
-            data: { message, variant },
+            data: { message, variant, executor },
           },
         });
       } catch (e) {
@@ -91,11 +107,15 @@ export function useSessionMessageEditor({
   }, [isScratchLoading, scratchData?.message]);
 
   // Handle message change with debounced save
-  // Pass variant at call-time to avoid stale closure
+  // Pass profile fields at call-time to avoid stale closure
   const handleMessageChange = useCallback(
-    (value: string, currentVariant: string | null) => {
+    (
+      value: string,
+      currentVariant: string | null,
+      currentExecutor: BaseCodingAgent | null
+    ) => {
       setLocalMessage(value);
-      debouncedSave(value, currentVariant);
+      debouncedSave(value, currentVariant, currentExecutor);
     },
     [debouncedSave]
   );

@@ -26,7 +26,7 @@ use executors::{
     profile::ExecutorProfileId,
 };
 use serde::Deserialize;
-use services::services::container::ContainerService;
+use services::services::{container::ContainerService, context_archive};
 use ts_rs::TS;
 use utils::response::ApiResponse;
 use uuid::Uuid;
@@ -92,6 +92,8 @@ pub async fn create_session(
 pub struct CreateFollowUpAttempt {
     pub prompt: String,
     pub variant: Option<String>,
+    #[serde(default)]
+    pub executor: Option<BaseCodingAgent>,
     pub retry_process_id: Option<Uuid>,
     pub force_when_dirty: Option<bool>,
     pub perform_git_reset: Option<bool>,
@@ -119,7 +121,7 @@ pub async fn follow_up(
         .await?;
 
     // Get executor from the latest CodingAgent process, or fall back to session's executor
-    let base_executor =
+    let current_executor =
         match ExecutionProcess::latest_executor_profile_for_session(pool, session.id).await? {
             Some(profile) => profile.executor,
             None => {
@@ -139,9 +141,11 @@ pub async fn follow_up(
             }
         };
 
+    let switch_decision =
+        context_archive::resolve_executor_switch(current_executor, payload.executor);
     let executor_profile_id = ExecutorProfileId {
-        executor: base_executor,
-        variant: payload.variant,
+        executor: switch_decision.requested_executor,
+        variant: payload.variant.clone(),
     };
 
     // If retry settings provided, perform replace-logic before proceeding
@@ -179,10 +183,33 @@ pub async fn follow_up(
         let _ = ExecutionProcess::drop_at_and_after(pool, process.session_id, proc_id).await?;
     }
 
-    let latest_agent_session_id =
-        ExecutionProcess::find_latest_coding_agent_turn_session_id(pool, session.id).await?;
+    let latest_agent_session_id = if switch_decision.switched {
+        None
+    } else {
+        ExecutionProcess::find_latest_coding_agent_turn_session_id(pool, session.id).await?
+    };
 
-    let prompt = payload.prompt;
+    let prompt = if switch_decision.switched {
+        match context_archive::build_executor_switch_prompt_for_workspace(
+            pool,
+            &workspace,
+            &payload.prompt,
+        )
+        .await
+        {
+            Ok(switch_prompt) => switch_prompt,
+            Err(err) => {
+                tracing::warn!(
+                    "Failed to build archive-context prompt for executor switch on session {}: {}",
+                    session.id,
+                    err
+                );
+                payload.prompt.clone()
+            }
+        }
+    } else {
+        payload.prompt.clone()
+    };
 
     let repos = WorkspaceRepo::find_repos_for_workspace(pool, workspace.id).await?;
     let cleanup_action = deployment.container().cleanup_actions_for_repos(&repos);

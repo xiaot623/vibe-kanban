@@ -10,7 +10,10 @@ use db::models::{
     coding_agent_turn::CodingAgentTurn, execution_process::ExecutionProcess, project::Project,
     task::Task, workspace::Workspace,
 };
-use executors::logs::{ActionType, NormalizedEntry, NormalizedEntryType, ToolStatus};
+use executors::{
+    executors::BaseCodingAgent,
+    logs::{ActionType, NormalizedEntry, NormalizedEntryType, ToolStatus},
+};
 use serde_json::{Map, Value, json};
 use sqlx::SqlitePool;
 use tokio::io::AsyncWriteExt;
@@ -22,6 +25,7 @@ const META_SCHEMA_VERSION: u64 = 1;
 const MAX_CONVERSATION_ENTRIES: usize = 8;
 const MAX_TOOL_ENTRIES: usize = 16;
 const MAX_TEXT_CHARS: usize = 1_500;
+const SWITCH_ARCHIVE_CONTEXT_CHAR_LIMIT: usize = 24_000;
 
 #[derive(Debug, Clone)]
 pub struct ArchiveFiles {
@@ -31,12 +35,83 @@ pub struct ArchiveFiles {
     pub archive_task_id: Uuid,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ExecutorSwitchDecision {
+    pub requested_executor: BaseCodingAgent,
+    pub switched: bool,
+}
+
 pub fn archive_root_dir() -> PathBuf {
     utils::assets::asset_dir().join("archive")
 }
 
 pub fn archive_task_id(task_id: Uuid, parent_task_id: Option<Uuid>) -> Uuid {
     parent_task_id.unwrap_or(task_id)
+}
+
+pub fn resolve_executor_switch(
+    current_executor: BaseCodingAgent,
+    requested_executor: Option<BaseCodingAgent>,
+) -> ExecutorSwitchDecision {
+    let requested_executor = requested_executor.unwrap_or(current_executor);
+    ExecutorSwitchDecision {
+        requested_executor,
+        switched: requested_executor != current_executor,
+    }
+}
+
+pub fn compose_executor_switch_prompt(user_prompt: &str, archive_context: Option<&str>) -> String {
+    compose_executor_switch_prompt_with_limit(
+        user_prompt,
+        archive_context,
+        SWITCH_ARCHIVE_CONTEXT_CHAR_LIMIT,
+    )
+}
+
+pub async fn load_archive_context_for_workspace(
+    pool: &SqlitePool,
+    workspace: &Workspace,
+) -> anyhow::Result<Option<String>> {
+    let task = workspace
+        .parent_task(pool)
+        .await
+        .with_context(|| format!("failed to load task for workspace {}", workspace.id))?
+        .ok_or_else(|| anyhow!("task not found for workspace {}", workspace.id))?;
+
+    let project = task
+        .parent_project(pool)
+        .await
+        .with_context(|| format!("failed to load project for task {}", task.id))?
+        .ok_or_else(|| anyhow!("project not found for task {}", task.id))?;
+
+    let archive_files = ensure_archive_files(pool, &project, &task, &workspace.branch).await?;
+
+    let context = match tokio::fs::read_to_string(&archive_files.context_path).await {
+        Ok(content) => content,
+        Err(err) if err.kind() == ErrorKind::NotFound => return Ok(None),
+        Err(err) => {
+            return Err(err).with_context(|| {
+                format!(
+                    "failed to read archive context {}",
+                    archive_files.context_path.display()
+                )
+            });
+        }
+    };
+
+    Ok(non_empty(&context).map(ToOwned::to_owned))
+}
+
+pub async fn build_executor_switch_prompt_for_workspace(
+    pool: &SqlitePool,
+    workspace: &Workspace,
+    user_prompt: &str,
+) -> anyhow::Result<String> {
+    let archive_context = load_archive_context_for_workspace(pool, workspace).await?;
+    Ok(compose_executor_switch_prompt(
+        user_prompt,
+        archive_context.as_deref(),
+    ))
 }
 
 pub async fn resolve_archive_task_id(pool: &SqlitePool, task: &Task) -> anyhow::Result<Uuid> {
@@ -575,6 +650,34 @@ fn find_last_assistant_message(entries: &[NormalizedEntry]) -> Option<String> {
         .map(|content| compact_multiline(content, MAX_TEXT_CHARS))
 }
 
+fn compose_executor_switch_prompt_with_limit(
+    user_prompt: &str,
+    archive_context: Option<&str>,
+    archive_context_char_limit: usize,
+) -> String {
+    let Some(archive_context) = archive_context.and_then(non_empty) else {
+        return user_prompt.to_string();
+    };
+
+    let truncated_context = tail_truncate_chars(archive_context, archive_context_char_limit);
+
+    format!(
+        "Continue this task in the same app session with a different executor.
+
+Archived execution history (most recent context):
+```markdown
+{truncated_context}
+```
+
+Latest user request:
+```text
+{user_prompt}
+```
+
+Continue from the current workspace state. Reuse completed work and only do what is still needed."
+    )
+}
+
 fn non_empty(value: &str) -> Option<&str> {
     let trimmed = value.trim();
     if trimmed.is_empty() {
@@ -604,6 +707,19 @@ fn truncate_chars(value: &str, max_chars: usize) -> String {
 
     let truncated: String = value.chars().take(max_chars).collect();
     format!("{truncated}...")
+}
+
+fn tail_truncate_chars(value: &str, max_chars: usize) -> String {
+    if max_chars == 0 {
+        return String::new();
+    }
+
+    let total_chars = value.chars().count();
+    if total_chars <= max_chars {
+        return value.to_string();
+    }
+
+    value.chars().skip(total_chars - max_chars).collect()
 }
 
 async fn read_meta_map(meta_path: &Path) -> anyhow::Result<Map<String, Value>> {
@@ -636,6 +752,7 @@ async fn write_json_file(path: &Path, value: &Value) -> anyhow::Result<()> {
 
 #[cfg(test)]
 mod tests {
+    use executors::executors::BaseCodingAgent;
     use tempfile::tempdir;
 
     use super::*;
@@ -770,5 +887,53 @@ mod tests {
             meta["archived_execution_ids"],
             Value::Array(vec![Value::String(execution_id.to_string())])
         );
+    }
+
+    #[test]
+    fn resolve_executor_switch_marks_unchanged_executor() {
+        let decision = resolve_executor_switch(BaseCodingAgent::Codex, None);
+        assert_eq!(decision.requested_executor, BaseCodingAgent::Codex);
+        assert!(!decision.switched);
+    }
+
+    #[test]
+    fn resolve_executor_switch_marks_changed_executor() {
+        let decision =
+            resolve_executor_switch(BaseCodingAgent::Codex, Some(BaseCodingAgent::ClaudeCode));
+        assert_eq!(decision.requested_executor, BaseCodingAgent::ClaudeCode);
+        assert!(decision.switched);
+    }
+
+    #[test]
+    fn compose_executor_switch_prompt_includes_archive_context() {
+        let prompt = compose_executor_switch_prompt_with_limit(
+            "Please add tests.",
+            Some("Execution A\nExecution B"),
+            10_000,
+        );
+
+        assert!(prompt.contains("Archived execution history"));
+        assert!(prompt.contains("Execution A\nExecution B"));
+        assert!(prompt.contains("Please add tests."));
+    }
+
+    #[test]
+    fn compose_executor_switch_prompt_falls_back_when_archive_context_empty() {
+        let user_prompt = "Only this message should remain";
+        assert_eq!(
+            compose_executor_switch_prompt(user_prompt, None),
+            user_prompt
+        );
+        assert_eq!(
+            compose_executor_switch_prompt(user_prompt, Some("   \n  ")),
+            user_prompt
+        );
+    }
+
+    #[test]
+    fn compose_executor_switch_prompt_tail_truncates_archive_context() {
+        let prompt = compose_executor_switch_prompt_with_limit("Continue", Some("0123456789"), 4);
+        assert!(prompt.contains("6789"));
+        assert!(!prompt.contains("012345"));
     }
 }

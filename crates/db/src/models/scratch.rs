@@ -1,5 +1,5 @@
 use chrono::{DateTime, Utc};
-use executors::profile::ExecutorProfileId;
+use executors::{executors::BaseCodingAgent, profile::ExecutorProfileId};
 use serde::{Deserialize, Serialize};
 use sqlx::{FromRow, SqlitePool};
 use strum_macros::{Display, EnumDiscriminants, EnumString};
@@ -23,6 +23,8 @@ pub struct DraftFollowUpData {
     pub message: String,
     #[serde(default)]
     pub variant: Option<String>,
+    #[serde(default)]
+    pub executor: Option<BaseCodingAgent>,
 }
 
 /// Data for preview settings scratch (URL override and screen size)

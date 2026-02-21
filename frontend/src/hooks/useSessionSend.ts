@@ -85,6 +85,7 @@ export function useSessionSend({
           await sessionsApi.followUp(sessionId, {
             prompt: trimmed,
             variant,
+            executor: null,
             retry_process_id: null,
             force_when_dirty: null,
             perform_git_reset: null,
