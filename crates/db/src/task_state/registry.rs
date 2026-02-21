@@ -34,20 +34,30 @@ impl HandlerRegistry {
         self.handlers.push(handler);
     }
 
+    /// Get all handlers that match a transition.
+    pub fn matching_handlers(
+        &self,
+        transition: &TaskStateTransition,
+    ) -> Vec<Arc<dyn TaskStateHandler>> {
+        self.handlers
+            .iter()
+            .filter(|handler| handler.filter().matches(transition))
+            .cloned()
+            .collect()
+    }
+
     /// Dispatch a transition to all matching handlers.
     pub async fn dispatch(&self, ctx: &HandlerContext, transition: &TaskStateTransition) {
-        for handler in &self.handlers {
-            if handler.filter().matches(transition) {
-                tracing::debug!(
-                    handler = handler.name(),
-                    task_id = %transition.task_id(),
-                    from = ?transition.from_status(),
-                    to = ?transition.to_status(),
-                    "Dispatching task state transition"
-                );
+        for handler in self.matching_handlers(transition) {
+            tracing::debug!(
+                handler = handler.name(),
+                task_id = %transition.task_id(),
+                from = ?transition.from_status(),
+                to = ?transition.to_status(),
+                "Dispatching task state transition"
+            );
 
-                handler.handle(ctx, transition).await;
-            }
+            handler.handle(ctx, transition).await;
         }
     }
 

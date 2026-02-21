@@ -28,7 +28,7 @@ pub fn shared_dispatcher() -> Arc<TaskStateDispatcher> {
 /// Dispatch a task state transition using the global dispatcher.
 ///
 /// This is a convenience function for dispatching transitions from the db layer.
-/// It creates a HandlerContext from the pool and dispatches the transition.
+/// It creates a HandlerContext from the pool and schedules handler execution.
 pub async fn dispatch_task_transition(
     pool: &sqlx::SqlitePool,
     task: Task,
@@ -77,7 +77,7 @@ impl TaskStateDispatcher {
     /// This method:
     /// 1. Creates a TaskStateTransition from the task and old status
     /// 2. Broadcasts to all subscribers
-    /// 3. Dispatches to all matching handlers
+    /// 3. Dispatches all matching handlers in a detached async task
     pub async fn transition(
         &self,
         ctx: &HandlerContext,
@@ -106,9 +106,41 @@ impl TaskStateDispatcher {
         // Broadcast to subscribers (ignore errors if no receivers)
         let _ = self.tx.send(transition.clone());
 
-        // Dispatch to registered handlers
-        let registry = self.registry.read().await;
-        registry.dispatch(ctx, &transition).await;
+        // Snapshot handlers quickly, then execute them in the background so
+        // status updates are not blocked by slow handlers.
+        let handlers = {
+            let registry = self.registry.read().await;
+            registry.matching_handlers(&transition)
+        };
+
+        if handlers.is_empty() {
+            tracing::trace!(
+                task_id = %transition.task_id(),
+                "No task state handlers matched transition"
+            );
+            return;
+        }
+
+        tracing::trace!(
+            task_id = %transition.task_id(),
+            handler_count = handlers.len(),
+            "Scheduling async task state handler dispatch"
+        );
+
+        let ctx = ctx.clone();
+        let _dispatch_task = tokio::spawn(async move {
+            for handler in handlers {
+                tracing::debug!(
+                    handler = handler.name(),
+                    task_id = %transition.task_id(),
+                    from = ?transition.from_status(),
+                    to = ?transition.to_status(),
+                    "Dispatching task state transition asynchronously"
+                );
+
+                handler.handle(&ctx, &transition).await;
+            }
+        });
     }
 
     /// Register a runtime handler.
