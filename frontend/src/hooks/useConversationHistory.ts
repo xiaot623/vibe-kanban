@@ -94,8 +94,11 @@ export const useConversationHistory = ({
   attempt,
   onEntriesUpdated,
 }: UseConversationHistoryParams): UseConversationHistoryResult => {
-  const { executionProcessesVisible: executionProcessesRaw } =
-    useExecutionProcessesContext();
+  const {
+    executionProcessesVisible: executionProcessesRaw,
+    isLoading: isExecutionProcessesLoading,
+    isConnected: isExecutionProcessesConnected,
+  } = useExecutionProcessesContext();
   const executionProcesses = useRef<ExecutionProcess[]>(executionProcessesRaw);
   const displayedExecutionProcesses = useRef<ExecutionProcessStateStore>({});
   const loadedInitialEntries = useRef(false);
@@ -459,15 +462,34 @@ export const useConversationHistory = ({
             const patchesWithKey = entries.map((entry, index) =>
               patchWithKey(entry, executionProcess.id, index)
             );
+            let shouldEmit = true;
+            mergeIntoDisplayed((state) => {
+              const previousEntries = state[executionProcess.id]?.entries ?? [];
+              if (patchesWithKey.length === 0 && previousEntries.length > 0) {
+                // Keep already-rendered history if the live stream briefly
+                // reconnects and reports an empty snapshot.
+                shouldEmit = false;
+                return;
+              }
+              state[executionProcess.id] = {
+                executionProcess,
+                entries: patchesWithKey,
+              };
+            });
+            if (shouldEmit) {
+              emitEntries(displayedExecutionProcesses.current, 'running', false);
+            }
+          },
+          onFinished: (entries) => {
+            const patchesWithKey = entries.map((entry, index) =>
+              patchWithKey(entry, executionProcess.id, index)
+            );
             mergeIntoDisplayed((state) => {
               state[executionProcess.id] = {
                 executionProcess,
                 entries: patchesWithKey,
               };
             });
-            emitEntries(displayedExecutionProcesses.current, 'running', false);
-          },
-          onFinished: () => {
             emitEntries(displayedExecutionProcesses.current, 'running', false);
             controller.close();
             resolve();
@@ -605,6 +627,7 @@ export const useConversationHistory = ({
       // Waiting for execution processes to load
       if (
         executionProcesses?.current.length === 0 ||
+        isExecutionProcessesLoading ||
         loadedInitialEntries.current
       )
         return;
@@ -637,6 +660,7 @@ export const useConversationHistory = ({
     loadInitialEntries,
     loadRemainingEntriesInBatches,
     emitEntries,
+    isExecutionProcessesLoading,
   ]); // include idListKey so new processes trigger reload
 
   useEffect(() => {
@@ -677,7 +701,13 @@ export const useConversationHistory = ({
 
   // If an execution process is removed, remove it from the state
   useEffect(() => {
-    if (!executionProcessesRaw) return;
+    if (
+      !executionProcessesRaw ||
+      isExecutionProcessesLoading ||
+      !isExecutionProcessesConnected
+    ) {
+      return;
+    }
 
     const removedProcessIds = Object.keys(
       displayedExecutionProcesses.current
@@ -689,8 +719,16 @@ export const useConversationHistory = ({
           delete state[id];
         });
       });
+      emitEntries(displayedExecutionProcesses.current, 'historic', false);
     }
-  }, [attempt.id, idListKey, executionProcessesRaw]);
+  }, [
+    attempt.id,
+    idListKey,
+    executionProcessesRaw,
+    isExecutionProcessesLoading,
+    isExecutionProcessesConnected,
+    emitEntries,
+  ]);
 
   // Reset state when attempt changes
   useEffect(() => {
