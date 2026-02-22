@@ -260,7 +260,7 @@ pub fn cancel_keyboard() -> InlineKeyboardMarkup {
 /// Build a skip+cancel keyboard for optional dialogue steps.
 pub fn skip_cancel_keyboard() -> InlineKeyboardMarkup {
     InlineKeyboardMarkup::new(vec![vec![
-        btn("⏭️ Skip", CallbackAction::Noop),
+        btn("⏭️ Skip", CallbackAction::Skip),
         btn("❌ Cancel", CallbackAction::Cancel),
     ]])
 }

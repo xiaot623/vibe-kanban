@@ -199,7 +199,7 @@ async fn handle_callback(
         }
     };
 
-    // Reset dialogue state for non-dialogue actions
+    // Handle actions that complete immediately.
     match &action {
         CallbackAction::Cancel => {
             dialogue.reset().await.ok();
@@ -211,6 +211,42 @@ async fn handle_callback(
                 Some(keyboard::home_keyboard()),
             )
             .await?;
+            return Ok(());
+        }
+        CallbackAction::Skip => {
+            let state = match dialogue.get().await {
+                Ok(Some(state)) => state,
+                _ => return Ok(()),
+            };
+
+            match state {
+                DialogueState::CreatingTaskDescription {
+                    project_id,
+                    project_name: _,
+                    title,
+                } => {
+                    dialogue.reset().await.ok();
+                    handle_create_task_finish(&bot, chat_id, &service, project_id, &title, None)
+                        .await?;
+                }
+                DialogueState::EditingTaskDescription {
+                    task_id,
+                    title,
+                    current_description,
+                } => {
+                    dialogue.reset().await.ok();
+                    handle_edit_task_finish(
+                        &bot,
+                        chat_id,
+                        &service,
+                        task_id,
+                        &title,
+                        current_description.as_deref(),
+                    )
+                    .await?;
+                }
+                _ => {}
+            }
             return Ok(());
         }
         CallbackAction::Noop => {
@@ -295,7 +331,7 @@ async fn handle_callback(
         CallbackAction::NewTaskProject { project_id } => {
             handle_new_task_project(&bot, chat_id, &service, project_id, &dialogue).await?;
         }
-        CallbackAction::Cancel | CallbackAction::Noop => {
+        CallbackAction::Cancel | CallbackAction::Skip | CallbackAction::Noop => {
             // Already handled above
         }
     }

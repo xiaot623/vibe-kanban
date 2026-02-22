@@ -53,6 +53,8 @@ pub enum CallbackAction {
     TaskPage { project_id: Uuid, page: u16 },
     /// Cancel current dialogue and go home
     Cancel,
+    /// Skip current optional dialogue input
+    Skip,
     /// No-op acknowledgement (for already-handled buttons)
     Noop,
 }
@@ -79,6 +81,7 @@ impl CallbackAction {
             Self::Refresh { .. } => "rf",
             Self::TaskPage { .. } => "tp",
             Self::Cancel => "ca",
+            Self::Skip => "sk",
             Self::Noop => "no",
         }
     }
@@ -91,6 +94,7 @@ impl CallbackAction {
             | Self::Pending
             | Self::NewTask
             | Self::Cancel
+            | Self::Skip
             | Self::Noop => {
                 format!("v1|{}", self.tag())
             }
@@ -151,6 +155,7 @@ impl CallbackAction {
             "pe" => Some(Self::Pending),
             "nt" => Some(Self::NewTask),
             "ca" => Some(Self::Cancel),
+            "sk" => Some(Self::Skip),
             "no" => Some(Self::Noop),
             "ts" => {
                 let project_id = parse_short_uuid(parts.get(2)?)?;
@@ -262,6 +267,7 @@ mod tests {
             CallbackAction::Pending,
             CallbackAction::NewTask,
             CallbackAction::Cancel,
+            CallbackAction::Skip,
             CallbackAction::Noop,
         ] {
             let encoded = action.encode();
@@ -372,6 +378,7 @@ mod tests {
             CallbackAction::Pending,
             CallbackAction::NewTask,
             CallbackAction::Cancel,
+            CallbackAction::Skip,
             CallbackAction::Noop,
             CallbackAction::Tasks {
                 project_id: id,
