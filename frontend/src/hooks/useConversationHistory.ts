@@ -49,6 +49,15 @@ interface UseConversationHistoryResult {}
 
 const MIN_INITIAL_ENTRIES = 10;
 const REMAINING_BATCH_SIZE = 50;
+class StreamCancelledError extends Error {
+  constructor() {
+    super('stream-cancelled');
+    this.name = 'StreamCancelledError';
+  }
+}
+
+const isStreamCancelledError = (error: unknown): boolean =>
+  error instanceof StreamCancelledError;
 
 const makeLoadingPatch = (executionProcessId: string): PatchTypeWithKey => ({
   type: 'NORMALIZED_ENTRY',
@@ -103,6 +112,10 @@ export const useConversationHistory = ({
   const displayedExecutionProcesses = useRef<ExecutionProcessStateStore>({});
   const loadedInitialEntries = useRef(false);
   const streamingProcessIdsRef = useRef<Set<string>>(new Set());
+  const lifecycleGenerationRef = useRef(0);
+  const activeStreamCancelsRef = useRef<Map<string, Set<() => void>>>(
+    new Map()
+  );
   const onEntriesUpdatedRef = useRef<OnEntriesUpdated | null>(null);
 
   const mergeIntoDisplayed = (
@@ -111,6 +124,49 @@ export const useConversationHistory = ({
     const state = displayedExecutionProcesses.current;
     mutator(state);
   };
+
+  const isGenerationCurrent = useCallback(
+    (generation: number) => lifecycleGenerationRef.current === generation,
+    []
+  );
+
+  const registerActiveStreamCancel = useCallback(
+    (executionProcessId: string, cancel: () => void) => {
+      const cancelsForProcess =
+        activeStreamCancelsRef.current.get(executionProcessId) ?? new Set();
+      cancelsForProcess.add(cancel);
+      activeStreamCancelsRef.current.set(executionProcessId, cancelsForProcess);
+
+      return () => {
+        const currentCancels =
+          activeStreamCancelsRef.current.get(executionProcessId);
+        if (!currentCancels) return;
+
+        currentCancels.delete(cancel);
+        if (currentCancels.size === 0) {
+          activeStreamCancelsRef.current.delete(executionProcessId);
+        }
+      };
+    },
+    []
+  );
+
+  const cancelAllActiveStreams = useCallback(() => {
+    const allCancels = [...activeStreamCancelsRef.current.values()].flatMap(
+      (cancelsForProcess) => [...cancelsForProcess]
+    );
+    activeStreamCancelsRef.current.clear();
+    allCancels.forEach((cancel) => {
+      cancel();
+    });
+    streamingProcessIdsRef.current.clear();
+  }, []);
+
+  const clearDisplayedState = useCallback(() => {
+    displayedExecutionProcesses.current = {};
+    loadedInitialEntries.current = false;
+  }, []);
+
   useEffect(() => {
     onEntriesUpdatedRef.current = onEntriesUpdated;
   }, [onEntriesUpdated]);
@@ -125,33 +181,64 @@ export const useConversationHistory = ({
     );
   }, [executionProcessesRaw]);
 
-  const loadEntriesForHistoricExecutionProcess = (
-    executionProcess: ExecutionProcess
-  ) => {
-    let url = '';
-    if (executionProcess.executor_action.typ.type === 'ScriptRequest') {
-      url = `/api/execution-processes/${executionProcess.id}/raw-logs/ws`;
-    } else {
-      url = `/api/execution-processes/${executionProcess.id}/normalized-logs/ws`;
-    }
+  const loadEntriesForHistoricExecutionProcess = useCallback(
+    (executionProcess: ExecutionProcess, generation: number) => {
+      if (!isGenerationCurrent(generation)) {
+        return Promise.resolve<PatchType[]>([]);
+      }
 
-    return new Promise<PatchType[]>((resolve) => {
-      const controller = streamJsonPatchEntries<PatchType>(url, {
-        onFinished: (allEntries) => {
-          controller.close();
-          resolve(allEntries);
-        },
-        onError: (err) => {
-          console.warn!(
-            `Error loading entries for historic execution process ${executionProcess.id}`,
-            err
-          );
-          controller.close();
-          resolve([]);
-        },
+      let url = '';
+      if (executionProcess.executor_action.typ.type === 'ScriptRequest') {
+        url = `/api/execution-processes/${executionProcess.id}/raw-logs/ws`;
+      } else {
+        url = `/api/execution-processes/${executionProcess.id}/normalized-logs/ws`;
+      }
+
+      return new Promise<PatchType[]>((resolve) => {
+        let settled = false;
+        let unregisterCancel: () => void = () => {};
+
+        const settle = (entries: PatchType[]) => {
+          if (settled) return;
+          settled = true;
+          unregisterCancel();
+          resolve(entries);
+        };
+
+        const controller = streamJsonPatchEntries<PatchType>(url, {
+          onFinished: (allEntries) => {
+            if (!isGenerationCurrent(generation)) {
+              settle([]);
+              return;
+            }
+            settle(allEntries);
+          },
+          onError: (err) => {
+            if (!isGenerationCurrent(generation)) {
+              controller.close();
+              settle([]);
+              return;
+            }
+            console.warn!(
+              `Error loading entries for historic execution process ${executionProcess.id}`,
+              err
+            );
+            controller.close();
+            settle([]);
+          },
+          onClose: () => {
+            settle([]);
+          },
+        });
+
+        unregisterCancel = registerActiveStreamCancel(
+          executionProcess.id,
+          () => controller.close()
+        );
       });
-    });
-  };
+    },
+    [isGenerationCurrent, registerActiveStreamCancel]
+  );
 
   const getLiveExecutionProcess = (
     executionProcessId: string
@@ -449,16 +536,44 @@ export const useConversationHistory = ({
 
   // This emits its own events as they are streamed
   const loadRunningAndEmit = useCallback(
-    (executionProcess: ExecutionProcess): Promise<void> => {
+    (executionProcess: ExecutionProcess, generation: number): Promise<void> => {
       return new Promise((resolve, reject) => {
+        if (!isGenerationCurrent(generation)) {
+          resolve();
+          return;
+        }
+
         let url = '';
         if (executionProcess.executor_action.typ.type === 'ScriptRequest') {
           url = `/api/execution-processes/${executionProcess.id}/raw-logs/ws`;
         } else {
           url = `/api/execution-processes/${executionProcess.id}/normalized-logs/ws`;
         }
+
+        let settled = false;
+        let unregisterCancel: () => void = () => {};
+
+        const settleResolve = () => {
+          if (settled) return;
+          settled = true;
+          unregisterCancel();
+          resolve();
+        };
+
+        const settleReject = (error: unknown) => {
+          if (settled) return;
+          settled = true;
+          unregisterCancel();
+          reject(error);
+        };
+
         const controller = streamJsonPatchEntries<PatchType>(url, {
           onEntries(entries) {
+            if (!isGenerationCurrent(generation)) {
+              controller.close();
+              return;
+            }
+
             const patchesWithKey = entries.map((entry, index) =>
               patchWithKey(entry, executionProcess.id, index)
             );
@@ -481,6 +596,11 @@ export const useConversationHistory = ({
             }
           },
           onFinished: (entries) => {
+            if (!isGenerationCurrent(generation)) {
+              settleReject(new StreamCancelledError());
+              return;
+            }
+
             const patchesWithKey = entries.map((entry, index) =>
               patchWithKey(entry, executionProcess.id, index)
             );
@@ -491,48 +611,88 @@ export const useConversationHistory = ({
               };
             });
             emitEntries(displayedExecutionProcesses.current, 'running', false);
-            controller.close();
-            resolve();
+            settleResolve();
           },
-          onError: () => {
+          onError: (error) => {
+            if (!isGenerationCurrent(generation)) {
+              controller.close();
+              settleReject(new StreamCancelledError());
+              return;
+            }
             controller.close();
-            reject();
+            settleReject(error);
+          },
+          onClose: () => {
+            if (settled) return;
+            if (!isGenerationCurrent(generation)) {
+              settleReject(new StreamCancelledError());
+              return;
+            }
+            settleReject(
+              new Error(
+                `Stream closed before completion for execution process ${executionProcess.id}`
+              )
+            );
           },
         });
+
+        unregisterCancel = registerActiveStreamCancel(executionProcess.id, () =>
+          controller.close()
+        );
       });
     },
-    [emitEntries]
+    [emitEntries, isGenerationCurrent, registerActiveStreamCancel]
   );
 
   // Sometimes it can take a few seconds for the stream to start, wrap the loadRunningAndEmit method
   const loadRunningAndEmitWithBackoff = useCallback(
-    async (executionProcess: ExecutionProcess) => {
+    async (executionProcess: ExecutionProcess, generation: number) => {
+      if (!isGenerationCurrent(generation)) return;
+
       for (let i = 0; i < 20; i++) {
+        if (!isGenerationCurrent(generation)) return;
+
         try {
-          await loadRunningAndEmit(executionProcess);
-          break;
-        } catch (_) {
+          await loadRunningAndEmit(executionProcess, generation);
+          return;
+        } catch (error) {
+          if (
+            !isGenerationCurrent(generation) ||
+            isStreamCancelledError(error)
+          ) {
+            return;
+          }
           await new Promise((resolve) => setTimeout(resolve, 500));
         }
       }
     },
-    [loadRunningAndEmit]
+    [isGenerationCurrent, loadRunningAndEmit]
   );
 
-  const loadInitialEntries =
-    useCallback(async (): Promise<ExecutionProcessStateStore> => {
+  const loadInitialEntries = useCallback(
+    async (generation: number): Promise<ExecutionProcessStateStore> => {
       const localDisplayedExecutionProcesses: ExecutionProcessStateStore = {};
 
-      if (!executionProcesses?.current) return localDisplayedExecutionProcesses;
+      if (
+        !executionProcesses?.current ||
+        !isGenerationCurrent(generation)
+      ) {
+        return localDisplayedExecutionProcesses;
+      }
 
       for (const executionProcess of [
         ...executionProcesses.current,
       ].reverse()) {
+        if (!isGenerationCurrent(generation)) break;
         if (executionProcess.status === ExecutionProcessStatus.running)
           continue;
 
         const entries =
-          await loadEntriesForHistoricExecutionProcess(executionProcess);
+          await loadEntriesForHistoricExecutionProcess(
+            executionProcess,
+            generation
+          );
+        if (!isGenerationCurrent(generation)) break;
         const entriesWithKey = entries.map((e, idx) =>
           patchWithKey(e, executionProcess.id, idx)
         );
@@ -551,16 +711,28 @@ export const useConversationHistory = ({
       }
 
       return localDisplayedExecutionProcesses;
-    }, [executionProcesses]);
+    },
+    [
+      executionProcesses,
+      isGenerationCurrent,
+      loadEntriesForHistoricExecutionProcess,
+    ]
+  );
 
   const loadRemainingEntriesInBatches = useCallback(
-    async (batchSize: number): Promise<boolean> => {
-      if (!executionProcesses?.current) return false;
+    async (batchSize: number, generation: number): Promise<boolean> => {
+      if (
+        !executionProcesses?.current ||
+        !isGenerationCurrent(generation)
+      ) {
+        return false;
+      }
 
       let anyUpdated = false;
       for (const executionProcess of [
         ...executionProcesses.current,
       ].reverse()) {
+        if (!isGenerationCurrent(generation)) return false;
         const current = displayedExecutionProcesses.current;
         if (
           current[executionProcess.id] ||
@@ -569,7 +741,11 @@ export const useConversationHistory = ({
           continue;
 
         const entries =
-          await loadEntriesForHistoricExecutionProcess(executionProcess);
+          await loadEntriesForHistoricExecutionProcess(
+            executionProcess,
+            generation
+          );
+        if (!isGenerationCurrent(generation)) return false;
         const entriesWithKey = entries.map((e, idx) =>
           patchWithKey(e, executionProcess.id, idx)
         );
@@ -591,7 +767,11 @@ export const useConversationHistory = ({
       }
       return anyUpdated;
     },
-    [executionProcesses]
+    [
+      executionProcesses,
+      isGenerationCurrent,
+      loadEntriesForHistoricExecutionProcess,
+    ]
   );
 
   const ensureProcessVisible = useCallback((p: ExecutionProcess) => {
@@ -620,10 +800,28 @@ export const useConversationHistory = ({
     [executionProcessesRaw]
   );
 
+  // Reset stream lifecycle when attempt changes and on unmount.
+  useEffect(() => {
+    lifecycleGenerationRef.current += 1;
+    cancelAllActiveStreams();
+    clearDisplayedState();
+    emitEntries(displayedExecutionProcesses.current, 'initial', true);
+
+    return () => {
+      lifecycleGenerationRef.current += 1;
+      cancelAllActiveStreams();
+      clearDisplayedState();
+    };
+  }, [attempt.id, cancelAllActiveStreams, clearDisplayedState, emitEntries]);
+
   // Initial load when attempt changes
   useEffect(() => {
     let cancelled = false;
+    const generation = lifecycleGenerationRef.current;
+
     (async () => {
+      if (!isGenerationCurrent(generation)) return;
+
       // Waiting for execution processes to load
       if (
         executionProcesses?.current.length === 0 ||
@@ -633,8 +831,8 @@ export const useConversationHistory = ({
         return;
 
       // Initial entries
-      const allInitialEntries = await loadInitialEntries();
-      if (cancelled) return;
+      const allInitialEntries = await loadInitialEntries(generation);
+      if (cancelled || !isGenerationCurrent(generation)) return;
       mergeIntoDisplayed((state) => {
         Object.assign(state, allInitialEntries);
       });
@@ -644,13 +842,18 @@ export const useConversationHistory = ({
       // Then load the remaining in batches
       while (
         !cancelled &&
-        (await loadRemainingEntriesInBatches(REMAINING_BATCH_SIZE))
+        isGenerationCurrent(generation) &&
+        (await loadRemainingEntriesInBatches(REMAINING_BATCH_SIZE, generation))
       ) {
-        if (cancelled) return;
+        if (cancelled || !isGenerationCurrent(generation)) return;
       }
+
+      if (cancelled || !isGenerationCurrent(generation)) return;
       await new Promise((resolve) => setTimeout(resolve, 100));
+      if (cancelled || !isGenerationCurrent(generation)) return;
       emitEntries(displayedExecutionProcesses.current, 'historic', false);
     })();
+
     return () => {
       cancelled = true;
     };
@@ -661,13 +864,19 @@ export const useConversationHistory = ({
     loadRemainingEntriesInBatches,
     emitEntries,
     isExecutionProcessesLoading,
+    isGenerationCurrent,
   ]); // include idListKey so new processes trigger reload
 
   useEffect(() => {
+    const generation = lifecycleGenerationRef.current;
+    if (!isGenerationCurrent(generation)) return;
+
     const activeProcesses = getActiveAgentProcesses();
     if (activeProcesses.length === 0) return;
 
     for (const activeProcess of activeProcesses) {
+      if (!isGenerationCurrent(generation)) return;
+
       if (!displayedExecutionProcesses.current[activeProcess.id]) {
         const runningOrInitial =
           Object.keys(displayedExecutionProcesses.current).length > 1
@@ -686,7 +895,8 @@ export const useConversationHistory = ({
         !streamingProcessIdsRef.current.has(activeProcess.id)
       ) {
         streamingProcessIdsRef.current.add(activeProcess.id);
-        loadRunningAndEmitWithBackoff(activeProcess).finally(() => {
+        loadRunningAndEmitWithBackoff(activeProcess, generation).finally(() => {
+          if (!isGenerationCurrent(generation)) return;
           streamingProcessIdsRef.current.delete(activeProcess.id);
         });
       }
@@ -696,11 +906,15 @@ export const useConversationHistory = ({
     idStatusKey,
     emitEntries,
     ensureProcessVisible,
+    isGenerationCurrent,
     loadRunningAndEmitWithBackoff,
   ]);
 
   // If an execution process is removed, remove it from the state
   useEffect(() => {
+    const generation = lifecycleGenerationRef.current;
+    if (!isGenerationCurrent(generation)) return;
+
     if (
       !executionProcessesRaw ||
       isExecutionProcessesLoading ||
@@ -714,6 +928,7 @@ export const useConversationHistory = ({
     ).filter((id) => !executionProcessesRaw.some((p) => p.id === id));
 
     if (removedProcessIds.length > 0) {
+      if (!isGenerationCurrent(generation)) return;
       mergeIntoDisplayed((state) => {
         removedProcessIds.forEach((id) => {
           delete state[id];
@@ -728,15 +943,8 @@ export const useConversationHistory = ({
     isExecutionProcessesLoading,
     isExecutionProcessesConnected,
     emitEntries,
+    isGenerationCurrent,
   ]);
-
-  // Reset state when attempt changes
-  useEffect(() => {
-    displayedExecutionProcesses.current = {};
-    loadedInitialEntries.current = false;
-    streamingProcessIdsRef.current.clear();
-    emitEntries(displayedExecutionProcesses.current, 'initial', true);
-  }, [attempt.id, emitEntries]);
 
   return {};
 };

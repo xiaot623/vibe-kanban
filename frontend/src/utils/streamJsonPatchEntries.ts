@@ -9,6 +9,8 @@ export interface StreamOptions<E = unknown> {
   onEntries?: (entries: E[]) => void;
   onConnect?: () => void;
   onError?: (err: unknown) => void;
+  /** called once when the socket closes */
+  onClose?: () => void;
   /** called once when a "finished" event is received */
   onFinished?: (entries: E[]) => void;
 }
@@ -44,10 +46,19 @@ export function streamJsonPatchEntries<E = unknown>(
 
   const subscribers = new Set<(entries: E[]) => void>();
   if (opts.onEntries) subscribers.add(opts.onEntries);
+  let closed = false;
+  let closeNotified = false;
 
   // Convert HTTP endpoint to WebSocket endpoint
   const wsUrl = url.replace(/^http/, 'ws');
   const ws = new WebSocket(wsUrl);
+
+  const notifyClose = () => {
+    if (closeNotified) return;
+    closeNotified = true;
+    subscribers.clear();
+    opts.onClose?.();
+  };
 
   const notify = () => {
     for (const cb of subscribers) {
@@ -100,6 +111,8 @@ export function streamJsonPatchEntries<E = unknown>(
 
   ws.addEventListener('close', () => {
     connected = false;
+    closed = true;
+    notifyClose();
   });
 
   return {
@@ -119,9 +132,20 @@ export function streamJsonPatchEntries<E = unknown>(
       return () => subscribers.delete(cb);
     },
     close(): void {
-      ws.close();
-      subscribers.clear();
+      if (closed) {
+        notifyClose();
+        return;
+      }
+      closed = true;
       connected = false;
+      if (
+        ws.readyState === WebSocket.CLOSING ||
+        ws.readyState === WebSocket.CLOSED
+      ) {
+        notifyClose();
+        return;
+      }
+      ws.close();
     },
   };
 }
