@@ -348,7 +348,9 @@ function AskUserQuestionForm({
               <div className="text-sm font-medium">
                 {question.header ?? `Question ${index + 1}`}
               </div>
-              <div className="text-sm text-muted-foreground">{question.question}</div>
+              <div className="text-sm text-muted-foreground">
+                {question.question}
+              </div>
             </div>
 
             {question.options.length > 0 ? (
@@ -626,9 +628,11 @@ const PendingApprovalEntry = ({
         const min = question.multiSelectMin ?? 1;
         const max = question.multiSelectMax ?? question.options.length;
         if (answers.length < min) {
-          nextErrors[question.id] = `Select at least ${min} option${min > 1 ? 's' : ''}`;
+          nextErrors[question.id] =
+            `Select at least ${min} option${min > 1 ? 's' : ''}`;
         } else if (answers.length > max) {
-          nextErrors[question.id] = `Select at most ${max} option${max > 1 ? 's' : ''}`;
+          nextErrors[question.id] =
+            `Select at most ${max} option${max > 1 ? 's' : ''}`;
         }
       } else if (answers.length !== 1) {
         nextErrors[question.id] = 'Select one option';

@@ -231,9 +231,8 @@ export const useConversationHistory = ({
           },
         });
 
-        unregisterCancel = registerActiveStreamCancel(
-          executionProcess.id,
-          () => controller.close()
+        unregisterCancel = registerActiveStreamCancel(executionProcess.id, () =>
+          controller.close()
         );
       });
     },
@@ -592,7 +591,11 @@ export const useConversationHistory = ({
               };
             });
             if (shouldEmit) {
-              emitEntries(displayedExecutionProcesses.current, 'running', false);
+              emitEntries(
+                displayedExecutionProcesses.current,
+                'running',
+                false
+              );
             }
           },
           onFinished: (entries) => {
@@ -673,10 +676,7 @@ export const useConversationHistory = ({
     async (generation: number): Promise<ExecutionProcessStateStore> => {
       const localDisplayedExecutionProcesses: ExecutionProcessStateStore = {};
 
-      if (
-        !executionProcesses?.current ||
-        !isGenerationCurrent(generation)
-      ) {
+      if (!executionProcesses?.current || !isGenerationCurrent(generation)) {
         return localDisplayedExecutionProcesses;
       }
 
@@ -687,11 +687,10 @@ export const useConversationHistory = ({
         if (executionProcess.status === ExecutionProcessStatus.running)
           continue;
 
-        const entries =
-          await loadEntriesForHistoricExecutionProcess(
-            executionProcess,
-            generation
-          );
+        const entries = await loadEntriesForHistoricExecutionProcess(
+          executionProcess,
+          generation
+        );
         if (!isGenerationCurrent(generation)) break;
         const entriesWithKey = entries.map((e, idx) =>
           patchWithKey(e, executionProcess.id, idx)
@@ -721,10 +720,7 @@ export const useConversationHistory = ({
 
   const loadRemainingEntriesInBatches = useCallback(
     async (batchSize: number, generation: number): Promise<boolean> => {
-      if (
-        !executionProcesses?.current ||
-        !isGenerationCurrent(generation)
-      ) {
+      if (!executionProcesses?.current || !isGenerationCurrent(generation)) {
         return false;
       }
 
@@ -740,11 +736,10 @@ export const useConversationHistory = ({
         )
           continue;
 
-        const entries =
-          await loadEntriesForHistoricExecutionProcess(
-            executionProcess,
-            generation
-          );
+        const entries = await loadEntriesForHistoricExecutionProcess(
+          executionProcess,
+          generation
+        );
         if (!isGenerationCurrent(generation)) return false;
         const entriesWithKey = entries.map((e, idx) =>
           patchWithKey(e, executionProcess.id, idx)

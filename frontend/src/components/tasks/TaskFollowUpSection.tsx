@@ -258,7 +258,10 @@ export function TaskFollowUpSection({
   // Wrapper to update variant and save to scratch immediately
   const setSelectedVariant = useCallback(
     (variant: string | null) => {
-      const normalizedVariant = normalizeVariantForOptions(variant, variantOptions);
+      const normalizedVariant = normalizeVariantForOptions(
+        variant,
+        variantOptions
+      );
       setUserSelectedVariant(normalizedVariant);
       // Save immediately when user changes variant
       saveToScratch(localMessage, normalizedVariant, selectedExecutor);

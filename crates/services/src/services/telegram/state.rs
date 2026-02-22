@@ -39,7 +39,5 @@ pub enum DialogueState {
     },
 
     /// Rejecting a plan — waiting for the user to type a reason.
-    RejectingPlan {
-        task_id: Uuid,
-    },
+    RejectingPlan { task_id: Uuid },
 }
