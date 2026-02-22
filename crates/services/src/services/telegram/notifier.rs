@@ -24,7 +24,7 @@ use db::{
 use teloxide::prelude::*;
 use tokio::sync::{OnceCell, RwLock};
 
-use super::EXIT_PLAN_MODE_NAME;
+use super::{EXIT_PLAN_MODE_NAME, keyboard};
 use crate::services::{approvals::Approvals, git::GitService};
 
 /// Telegram context for event handlers.
@@ -33,6 +33,7 @@ pub struct TelegramContext {
     pub db: DBService,
     pub bot: Bot,
     pub chat_id: ChatId,
+    pub interactive_bot: bool,
     pub approvals: Approvals,
     pub git: GitService,
 }
@@ -132,6 +133,20 @@ impl TelegramHandler for TaskCreatedHandler {
 
     async fn handle_with_context(&self, tg: &TelegramContext, transition: &TaskStateTransition) {
         let task = &transition.task;
+
+        if tg.interactive_bot {
+            let result = tg
+                .bot
+                .send_message(tg.chat_id, format!("✅ Task created: {}", task.title))
+                .reply_markup(keyboard::task_detail_keyboard(task.id, &task.status))
+                .await;
+
+            if let Err(err) = result {
+                tracing::warn!("Failed to send telegram notification: {}", err);
+            }
+            return;
+        }
+
         let short_id = ShortIdMapping::get_or_create(&tg.db.pool, task.id)
             .await
             .unwrap_or_else(|_| "????".to_string());
@@ -228,23 +243,41 @@ impl TelegramHandler for TaskInReviewHandler {
     async fn handle_with_context(&self, tg: &TelegramContext, transition: &TaskStateTransition) {
         let task = &transition.task;
 
-        let short_id = ShortIdMapping::get_or_create(&tg.db.pool, task.id)
-            .await
-            .unwrap_or_else(|_| "????".to_string());
-
         // If the task has a pending plan, split and send as multiple messages
         if let Some(plan) = find_exit_plan_approval(tg, task.id).await {
             let chunks = split_plan(&plan.plan);
-            for chunk in chunks {
-                if let Err(err) = tg.bot.send_message(tg.chat_id, chunk).await {
+            let total = chunks.len();
+            for (i, chunk) in chunks.into_iter().enumerate() {
+                // Attach approve/reject buttons to the last chunk in interactive mode
+                let result = if tg.interactive_bot && i == total - 1 {
+                    tg.bot
+                        .send_message(tg.chat_id, chunk)
+                        .reply_markup(keyboard::review_notification_keyboard(task.id))
+                        .await
+                } else {
+                    tg.bot.send_message(tg.chat_id, chunk).await
+                };
+                if let Err(err) = result {
                     tracing::warn!("Failed to send telegram plan notification: {}", err);
                 }
             }
             return;
         }
 
-        let message = format!("[{}] task{} InReview", short_id, task.title);
-        if let Err(err) = tg.bot.send_message(tg.chat_id, message).await {
+        // Interactive mode uses the plan notification flow above.
+        // Skip the legacy fallback text to avoid duplicated old/new content.
+        if tg.interactive_bot {
+            return;
+        }
+
+        let short_id = ShortIdMapping::get_or_create(&tg.db.pool, task.id)
+            .await
+            .unwrap_or_else(|_| "????".to_string());
+
+        let message = format!("[{}] {} InReview", short_id, task.title);
+        let result = tg.bot.send_message(tg.chat_id, message).await;
+
+        if let Err(err) = result {
             tracing::warn!("Failed to send telegram notification: {}", err);
         }
     }
@@ -481,8 +514,8 @@ mod tests {
 
         let result = split_plan(&plan);
         assert_eq!(result.len(), 2);
-        assert!(result[0].starts_with("[1/2] # Section 1"));
-        assert!(result[1].starts_with("[2/2] # Section 2"));
+        assert!(result[0].starts_with("Plan Review: [1/2] # Section 1"));
+        assert!(result[1].starts_with("Plan Review: [2/2] # Section 2"));
     }
 
     #[test]
@@ -499,7 +532,7 @@ mod tests {
         assert!(result[0].contains("# Introduction"));
         // Verify all chunks have [i/n] labels
         for (i, chunk) in result.iter().enumerate() {
-            assert!(chunk.starts_with(&format!("[{}/{}]", i + 1, result.len())));
+            assert!(chunk.starts_with(&format!("Plan Review: [{}/{}]", i + 1, result.len())));
         }
     }
 

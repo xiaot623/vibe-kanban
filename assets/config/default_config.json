@@ -47,6 +47,7 @@
   },
   "telegram": {
     "enabled": false,
+    "interactive_bot": true,
     "bot_token": null,
     "chat_id": null,
     "default_executor": "CLAUDE_CODE",

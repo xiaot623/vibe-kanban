@@ -192,6 +192,10 @@
           "label": "启用 Telegram 机器人",
           "helper": "在 Telegram 中发送任务更新并接收命令。"
         },
+        "interactiveBot": {
+          "label": "启用交互式机器人模式",
+          "helper": "使用按钮菜单和审批操作，而不是仅命令的旧模式。"
+        },
         "botToken": {
           "label": "机器人 Token",
           "placeholder": "123456:ABCDEF...",

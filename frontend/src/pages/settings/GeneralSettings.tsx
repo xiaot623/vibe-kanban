@@ -922,6 +922,32 @@ export function GeneralSettings() {
 
           {draft?.telegram?.enabled && (
             <>
+              <div className="ml-6 flex items-center space-x-2">
+                <Checkbox
+                  id="telegram-interactive-bot"
+                  checked={draft?.telegram?.interactive_bot ?? true}
+                  onCheckedChange={(checked: boolean) =>
+                    updateDraft({
+                      telegram: {
+                        ...draft!.telegram,
+                        interactive_bot: checked,
+                      },
+                    })
+                  }
+                />
+                <div className="space-y-0.5">
+                  <Label
+                    htmlFor="telegram-interactive-bot"
+                    className="cursor-pointer"
+                  >
+                    {t('settings.general.telegram.interactiveBot.label')}
+                  </Label>
+                  <p className="text-sm text-muted-foreground">
+                    {t('settings.general.telegram.interactiveBot.helper')}
+                  </p>
+                </div>
+              </div>
+
               <div className="ml-6 space-y-2">
                 <Label htmlFor="telegram-bot-token">
                   {t('settings.general.telegram.botToken.label')}

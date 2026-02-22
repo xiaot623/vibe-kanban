@@ -354,7 +354,7 @@ export type ShowcaseState = { seen_features: Array<string>, };
 
 export type ProxyConfig = { http_proxy: string | null, https_proxy: string | null, no_proxy: string | null, };
 
-export type TelegramConfig = { enabled: boolean, bot_token: string | null, chat_id: bigint | null, default_executor: string, default_mode: string, };
+export type TelegramConfig = { enabled: boolean, interactive_bot: boolean, bot_token: string | null, chat_id: bigint | null, default_executor: string, default_mode: string, };
 
 export type McpServerConfig = { enabled: boolean, port: number, };
 
