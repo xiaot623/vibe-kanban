@@ -138,8 +138,11 @@ impl ClaudeCode {
             "--output-format=stream-json",
             "--input-format=stream-json",
             "--include-partial-messages",
-            "--disallowedTools=AskUserQuestion",
         ]);
+        if !plan {
+            // Keep non-plan behavior unchanged for now.
+            builder = builder.extend_params(["--disallowedTools=AskUserQuestion"]);
+        }
 
         apply_overrides(builder, &self.cmd)
     }
@@ -203,7 +206,11 @@ impl ClaudeCode {
                         "hookCallbackIds": ["tool_approval"],
                     },
                     {
-                        "matcher": "^(?!ExitPlanMode$).*",
+                        "matcher": "^AskUserQuestion$",
+                        "hookCallbackIds": ["tool_approval"],
+                    },
+                    {
+                        "matcher": "^(?!(ExitPlanMode|AskUserQuestion)$).*",
                         "hookCallbackIds": [AUTO_APPROVE_CALLBACK_ID],
                     }
                 ]),
@@ -786,6 +793,21 @@ impl ClaudeLogProcessor {
             ClaudeToolData::ExitPlanMode { plan } => {
                 ActionType::PlanPresentation { plan: plan.clone() }
             }
+            ClaudeToolData::AskUserQuestion { questions, extra } => {
+                let mut args = serde_json::Map::new();
+                args.insert(
+                    "questions".to_string(),
+                    serde_json::to_value(questions).unwrap_or(serde_json::Value::Array(vec![])),
+                );
+                for (key, value) in extra {
+                    args.insert(key.clone(), value.clone());
+                }
+                ActionType::Tool {
+                    tool_name: "AskUserQuestion".to_string(),
+                    arguments: Some(serde_json::Value::Object(args)),
+                    result: None,
+                }
+            }
             ClaudeToolData::NotebookEdit { .. } => ActionType::Tool {
                 tool_name: "NotebookEdit".to_string(),
                 arguments: Some(serde_json::to_value(tool_data).unwrap_or(serde_json::Value::Null)),
@@ -1324,6 +1346,7 @@ impl ClaudeLogProcessor {
                 let entry_opt = match approval_status {
                     ApprovalStatus::Pending => None,
                     ApprovalStatus::Approved => None,
+                    ApprovalStatus::ProvidedInput { .. } => None,
                     ApprovalStatus::Denied { reason } => Some(NormalizedEntry {
                         timestamp: None,
                         entry_type: NormalizedEntryType::UserFeedback {
@@ -1390,6 +1413,18 @@ impl ClaudeLogProcessor {
                 }
             }
             ActionType::Tool { .. } => match tool_data {
+                ClaudeToolData::AskUserQuestion { questions, .. } => questions
+                    .iter()
+                    .find_map(|item| item.question.as_ref().or(item.header.as_ref()))
+                    .map(|text| {
+                        let trimmed = text.trim();
+                        if trimmed.is_empty() {
+                            "Ask user a question".to_string()
+                        } else {
+                            format!("Question: {trimmed}")
+                        }
+                    })
+                    .unwrap_or_else(|| "Ask user a question".to_string()),
                 ClaudeToolData::NotebookEdit { notebook_path, .. } => {
                     format!("`{}`", make_path_relative(notebook_path, worktree_path))
                 }
@@ -1880,6 +1915,13 @@ pub enum ClaudeToolData {
     ExitPlanMode {
         plan: String,
     },
+    #[serde(rename = "AskUserQuestion", alias = "ask_user_question")]
+    AskUserQuestion {
+        #[serde(default)]
+        questions: Vec<ClaudeAskUserQuestionItem>,
+        #[serde(flatten)]
+        extra: HashMap<String, serde_json::Value>,
+    },
     #[serde(rename = "Edit", alias = "edit_file")]
     Edit {
         #[serde(alias = "path")]
@@ -2022,6 +2064,7 @@ impl ClaudeToolData {
             ClaudeToolData::Bash { .. } => "Bash",
             ClaudeToolData::Grep { .. } => "Grep",
             ClaudeToolData::ExitPlanMode { .. } => "ExitPlanMode",
+            ClaudeToolData::AskUserQuestion { .. } => "AskUserQuestion",
             ClaudeToolData::Edit { .. } => "Edit",
             ClaudeToolData::MultiEdit { .. } => "MultiEdit",
             ClaudeToolData::Write { .. } => "Write",
@@ -2039,6 +2082,36 @@ impl ClaudeToolData {
                 .unwrap_or("unknown"),
         }
     }
+}
+
+#[derive(Deserialize, Serialize, Debug, Clone, PartialEq, Default)]
+pub struct ClaudeAskUserQuestionItem {
+    #[serde(default)]
+    pub id: Option<String>,
+    #[serde(default)]
+    pub header: Option<String>,
+    #[serde(default)]
+    pub question: Option<String>,
+    #[serde(default)]
+    pub options: Option<Vec<ClaudeAskUserQuestionOption>>,
+    #[serde(default, rename = "multiSelectMin", alias = "multi_select_min")]
+    pub multi_select_min: Option<u32>,
+    #[serde(default, rename = "multiSelectMax", alias = "multi_select_max")]
+    pub multi_select_max: Option<u32>,
+    #[serde(flatten)]
+    pub extra: HashMap<String, serde_json::Value>,
+}
+
+#[derive(Deserialize, Serialize, Debug, Clone, PartialEq, Default)]
+pub struct ClaudeAskUserQuestionOption {
+    #[serde(default)]
+    pub label: Option<String>,
+    #[serde(default)]
+    pub description: Option<String>,
+    #[serde(default)]
+    pub value: Option<String>,
+    #[serde(flatten)]
+    pub extra: HashMap<String, serde_json::Value>,
 }
 
 #[cfg(test)]
@@ -2120,6 +2193,24 @@ mod tests {
     }
 
     #[test]
+    fn test_approval_response_with_provided_input_is_not_feedback() {
+        let json = ClaudeJson::ApprovalResponse {
+            call_id: "call-1".to_string(),
+            tool_name: "AskUserQuestion".to_string(),
+            approval_status: ApprovalStatus::ProvidedInput {
+                input: serde_json::json!({
+                    "answers": {
+                        "q1": ["A"]
+                    }
+                }),
+            },
+        };
+
+        let entries = normalize(&json, "");
+        assert!(entries.is_empty());
+    }
+
+    #[test]
     fn test_thinking_content() {
         let thinking_json = r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"thinking","thinking":"Let me think about this..."}]}}"#;
         let parsed: ClaudeJson = serde_json::from_str(thinking_json).unwrap();
@@ -2147,6 +2238,44 @@ mod tests {
         );
 
         assert_eq!(result, "TODO list updated");
+    }
+
+    #[test]
+    fn test_ask_user_question_content_extraction() {
+        let ask_data = ClaudeToolData::AskUserQuestion {
+            questions: vec![ClaudeAskUserQuestionItem {
+                id: Some("choice".to_string()),
+                header: Some("Preferred stack".to_string()),
+                question: Some("Which stack should I use?".to_string()),
+                options: Some(vec![ClaudeAskUserQuestionOption {
+                    label: Some("React".to_string()),
+                    description: Some("Use React + TypeScript".to_string()),
+                    value: None,
+                    extra: std::collections::HashMap::new(),
+                }]),
+                multi_select_min: None,
+                multi_select_max: None,
+                extra: std::collections::HashMap::new(),
+            }],
+            extra: std::collections::HashMap::new(),
+        };
+
+        let action_type = ClaudeLogProcessor::extract_action_type(&ask_data, "/tmp/test-worktree");
+        assert!(matches!(
+            &action_type,
+            ActionType::Tool {
+                tool_name,
+                arguments: Some(_),
+                result: None
+            } if tool_name == "AskUserQuestion"
+        ));
+
+        let result = ClaudeLogProcessor::generate_concise_content(
+            &ask_data,
+            &action_type,
+            "/tmp/test-worktree",
+        );
+        assert_eq!(result, "Question: Which stack should I use?");
     }
 
     #[test]

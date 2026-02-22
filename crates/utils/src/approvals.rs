@@ -45,6 +45,9 @@ pub struct CreateApprovalRequest {
 pub enum ApprovalStatus {
     Pending,
     Approved,
+    ProvidedInput {
+        input: serde_json::Value,
+    },
     Denied {
         #[ts(optional)]
         reason: Option<String>,
@@ -57,4 +60,49 @@ pub enum ApprovalStatus {
 pub struct ApprovalResponse {
     pub execution_process_id: Uuid,
     pub status: ApprovalStatus,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn provided_input_status_serializes_and_deserializes() {
+        let status = ApprovalStatus::ProvidedInput {
+            input: serde_json::json!({
+                "answers": {
+                    "question_1": ["option_a"]
+                }
+            }),
+        };
+
+        let json = serde_json::to_value(&status).expect("serialize approval status");
+        assert_eq!(
+            json,
+            serde_json::json!({
+                "status": "provided_input",
+                "input": {
+                    "answers": {
+                        "question_1": ["option_a"]
+                    }
+                }
+            })
+        );
+
+        let decoded: ApprovalStatus =
+            serde_json::from_value(json).expect("deserialize approval status");
+        match decoded {
+            ApprovalStatus::ProvidedInput { input } => {
+                assert_eq!(
+                    input,
+                    serde_json::json!({
+                        "answers": {
+                            "question_1": ["option_a"]
+                        }
+                    })
+                );
+            }
+            other => panic!("expected provided_input status, got {other:?}"),
+        }
+    }
 }

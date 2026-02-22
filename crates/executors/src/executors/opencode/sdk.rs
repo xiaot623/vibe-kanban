@@ -809,7 +809,9 @@ async fn process_event_stream(
                         .await;
 
                     let (reply, message) = match status {
-                        ApprovalStatus::Approved => ("once", None),
+                        ApprovalStatus::Approved | ApprovalStatus::ProvidedInput { .. } => {
+                            ("once", None)
+                        }
                         ApprovalStatus::Denied { reason } => {
                             let msg = reason
                                 .unwrap_or_else(|| "User denied this tool use request".to_string())

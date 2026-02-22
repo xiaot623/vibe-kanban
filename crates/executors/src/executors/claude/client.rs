@@ -17,6 +17,7 @@ use crate::{
 };
 
 const EXIT_PLAN_MODE_NAME: &str = "ExitPlanMode";
+const ASK_USER_QUESTION_NAME: &str = "AskUserQuestion";
 pub const AUTO_APPROVE_CALLBACK_ID: &str = "AUTO_APPROVE_CALLBACK_ID";
 pub const STOP_GIT_CHECK_CALLBACK_ID: &str = "STOP_GIT_CHECK_CALLBACK_ID";
 
@@ -68,6 +69,33 @@ impl ClaudeAgentClient {
                         approval_status: status.clone(),
                     })?)
                     .await?;
+
+                if tool_name == ASK_USER_QUESTION_NAME {
+                    return Ok(match status {
+                        ApprovalStatus::ProvidedInput { input } => PermissionResult::Allow {
+                            updated_input: input,
+                            updated_permissions: None,
+                        },
+                        ApprovalStatus::Denied { reason } => PermissionResult::Deny {
+                            message: reason.unwrap_or("Denied by user".to_string()),
+                            interrupt: Some(false),
+                        },
+                        ApprovalStatus::TimedOut => PermissionResult::Deny {
+                            message: "Approval request timed out".to_string(),
+                            interrupt: Some(false),
+                        },
+                        ApprovalStatus::Approved => PermissionResult::Deny {
+                            message: "AskUserQuestion requires submitted answers in updated_input.answers"
+                                .to_string(),
+                            interrupt: Some(false),
+                        },
+                        ApprovalStatus::Pending => PermissionResult::Deny {
+                            message: "Approval still pending (unexpected)".to_string(),
+                            interrupt: Some(false),
+                        },
+                    });
+                }
+
                 match status {
                     ApprovalStatus::Approved => {
                         if tool_name == EXIT_PLAN_MODE_NAME {
@@ -84,6 +112,10 @@ impl ClaudeAgentClient {
                             })
                         }
                     }
+                    ApprovalStatus::ProvidedInput { input } => Ok(PermissionResult::Allow {
+                        updated_input: input,
+                        updated_permissions: None,
+                    }),
                     ApprovalStatus::Denied { reason } => {
                         let message = reason.unwrap_or("Denied by user".to_string());
                         Ok(PermissionResult::Deny {
@@ -119,6 +151,14 @@ impl ClaudeAgentClient {
         tool_use_id: Option<String>,
     ) -> Result<PermissionResult, ExecutorError> {
         if self.auto_approve {
+            if tool_name == ASK_USER_QUESTION_NAME {
+                return Ok(PermissionResult::Deny {
+                    message:
+                        "AskUserQuestion requires structured answers but approvals are disabled"
+                            .to_string(),
+                    interrupt: Some(false),
+                });
+            }
             Ok(PermissionResult::Allow {
                 updated_input: input,
                 updated_permissions: None,
@@ -233,5 +273,113 @@ async fn check_git_status(repo_context: &RepoContext) -> serde_json::Value {
                 all_status
             )
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use serde_json::json;
+
+    use super::*;
+    use crate::approvals::ExecutorApprovalService;
+
+    struct StaticApprovalService {
+        status: ApprovalStatus,
+    }
+
+    #[async_trait::async_trait]
+    impl ExecutorApprovalService for StaticApprovalService {
+        async fn request_tool_approval(
+            &self,
+            _tool_name: &str,
+            _tool_input: serde_json::Value,
+            _tool_call_id: &str,
+        ) -> Result<ApprovalStatus, ExecutorApprovalError> {
+            Ok(self.status.clone())
+        }
+    }
+
+    fn client_with_status(status: ApprovalStatus) -> Arc<ClaudeAgentClient> {
+        ClaudeAgentClient::new(
+            LogWriter::new(tokio::io::sink()),
+            Some(Arc::new(StaticApprovalService { status })),
+            RepoContext::default(),
+        )
+    }
+
+    #[tokio::test]
+    async fn ask_user_question_with_provided_input_allows_with_updated_input() {
+        let expected_input = json!({
+            "questions": [],
+            "answers": {
+                "q1": ["option_a"]
+            }
+        });
+        let client = client_with_status(ApprovalStatus::ProvidedInput {
+            input: expected_input.clone(),
+        });
+
+        let result = client
+            .on_can_use_tool(
+                ASK_USER_QUESTION_NAME.to_string(),
+                json!({"questions": []}),
+                None,
+                Some("tool-use-1".to_string()),
+            )
+            .await
+            .unwrap();
+
+        match result {
+            PermissionResult::Allow { updated_input, .. } => {
+                assert_eq!(updated_input, expected_input)
+            }
+            other => panic!("expected allow result, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn ask_user_question_denied_or_timed_out_returns_deny() {
+        for status in [
+            ApprovalStatus::Denied {
+                reason: Some("no".to_string()),
+            },
+            ApprovalStatus::TimedOut,
+        ] {
+            let client = client_with_status(status);
+            let result = client
+                .on_can_use_tool(
+                    ASK_USER_QUESTION_NAME.to_string(),
+                    json!({"questions": []}),
+                    None,
+                    Some("tool-use-1".to_string()),
+                )
+                .await
+                .unwrap();
+
+            assert!(matches!(result, PermissionResult::Deny { .. }));
+        }
+    }
+
+    #[tokio::test]
+    async fn ask_user_question_approved_without_answers_returns_explained_deny() {
+        let client = client_with_status(ApprovalStatus::Approved);
+        let result = client
+            .on_can_use_tool(
+                ASK_USER_QUESTION_NAME.to_string(),
+                json!({"questions": []}),
+                None,
+                Some("tool-use-1".to_string()),
+            )
+            .await
+            .unwrap();
+
+        match result {
+            PermissionResult::Deny { message, .. } => {
+                assert!(message.contains("updated_input.answers"));
+            }
+            other => panic!("expected deny result, got {other:?}"),
+        }
     }
 }

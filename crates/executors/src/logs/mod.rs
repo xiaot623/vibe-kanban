@@ -158,12 +158,33 @@ impl ToolStatus {
     pub fn from_approval_status(status: &ApprovalStatus) -> Option<Self> {
         match status {
             ApprovalStatus::Approved => Some(ToolStatus::Created),
+            ApprovalStatus::ProvidedInput { .. } => Some(ToolStatus::Created),
             ApprovalStatus::Denied { reason } => Some(ToolStatus::Denied {
                 reason: reason.clone(),
             }),
             ApprovalStatus::TimedOut => Some(ToolStatus::TimedOut),
             ApprovalStatus::Pending => None, // this should not happen
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn provided_input_maps_to_created_tool_status() {
+        let status = ApprovalStatus::ProvidedInput {
+            input: serde_json::json!({
+                "answers": {
+                    "q1": ["option_a"]
+                }
+            }),
+        };
+        assert!(matches!(
+            ToolStatus::from_approval_status(&status),
+            Some(ToolStatus::Created)
+        ));
     }
 }
 

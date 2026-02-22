@@ -180,10 +180,12 @@ impl Approvals {
                 execution_process_id: p.execution_process_id,
             };
 
-            // If approved or denied, and task is still InReview, move back to InProgress
+            // If responded, and task is still InReview, move back to InProgress
             if matches!(
                 req.status,
-                ApprovalStatus::Approved | ApprovalStatus::Denied { .. }
+                ApprovalStatus::Approved
+                    | ApprovalStatus::ProvidedInput { .. }
+                    | ApprovalStatus::Denied { .. }
             ) {
                 if let Ok(ctx) =
                     ExecutionProcess::load_context(pool, tool_ctx.execution_process_id).await

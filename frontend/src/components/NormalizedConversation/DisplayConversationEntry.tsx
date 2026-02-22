@@ -869,6 +869,9 @@ function DisplayConversationEntry({
         <PendingApprovalEntry
           pendingStatus={status}
           executionProcessId={executionProcessId}
+          toolName={toolEntry.tool_name}
+          actionType={toolEntry.action_type}
+          entry={entry}
         >
           {content}
         </PendingApprovalEntry>

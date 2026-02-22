@@ -324,7 +324,9 @@ impl AppServerClient {
                     _ => None,
                 };
                 let decision = match status {
-                    ApprovalStatus::Approved => CommandExecutionApprovalDecision::Accept,
+                    ApprovalStatus::Approved | ApprovalStatus::ProvidedInput { .. } => {
+                        CommandExecutionApprovalDecision::Accept
+                    }
                     ApprovalStatus::Denied { .. }
                     | ApprovalStatus::TimedOut
                     | ApprovalStatus::Pending => CommandExecutionApprovalDecision::Decline,
@@ -375,7 +377,9 @@ impl AppServerClient {
                     _ => None,
                 };
                 let decision = match status {
-                    ApprovalStatus::Approved => FileChangeApprovalDecision::Accept,
+                    ApprovalStatus::Approved | ApprovalStatus::ProvidedInput { .. } => {
+                        FileChangeApprovalDecision::Accept
+                    }
                     ApprovalStatus::Denied { .. }
                     | ApprovalStatus::TimedOut
                     | ApprovalStatus::Pending => FileChangeApprovalDecision::Decline,
@@ -491,7 +495,9 @@ impl AppServerClient {
         }
 
         let outcome = match status {
-            ApprovalStatus::Approved => (ReviewDecision::Approved, None),
+            ApprovalStatus::Approved | ApprovalStatus::ProvidedInput { .. } => {
+                (ReviewDecision::Approved, None)
+            }
             ApprovalStatus::Denied { reason } => {
                 let feedback = reason
                     .as_ref()
@@ -644,7 +650,7 @@ impl AppServerClient {
             .await?;
 
         match status {
-            ApprovalStatus::Approved => Ok(true),
+            ApprovalStatus::Approved | ApprovalStatus::ProvidedInput { .. } => Ok(true),
             ApprovalStatus::Denied { reason } => {
                 let feedback = reason
                     .as_ref()
