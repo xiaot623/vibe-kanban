@@ -33,6 +33,13 @@
           "yolo": true
         }
       },
+      "PLAN": {
+        "GEMINI": {
+          "model": "gemini-3-pro-preview",
+          "plan": true,
+          "yolo": false
+        }
+      },
       "FLASH": {
         "GEMINI": {
           "model": "gemini-3-flash-preview",

@@ -49,6 +49,7 @@ The profiles configuration uses a JSON structure with an `executors` object cont
     },
     "GEMINI": {
       "DEFAULT": { "GEMINI": { "model": "default", "yolo": true } },
+      "PLAN":    { "GEMINI": { "model": "gemini-3-pro-preview", "plan": true, "yolo": false } },
       "FLASH":   { "GEMINI": { "model": "flash",   "yolo": true } }
     },
     "CODEX": {
@@ -98,9 +99,15 @@ The profiles configuration uses a JSON structure with an `executors` object cont
   Choose model variant: `"default"` or `"flash"`
   </ParamField>
 
-  <ParamField path="yolo" type="boolean">
-  Run without confirmations
+  <ParamField path="plan" type="boolean">
+  Enable Gemini plan mode. If `plan` and `yolo` are both true, `plan` takes precedence.
   </ParamField>
+
+  <ParamField path="yolo" type="boolean">
+  Run without confirmations (ignored when `plan` is true)
+  </ParamField>
+
+  Plan mode requires a Gemini CLI version that supports `--approval-mode plan` (for example, `@google/gemini-cli@0.29.5` or newer).
 
   [View full CLI reference →](https://google-gemini.github.io/gemini-cli/)
 </Tab>

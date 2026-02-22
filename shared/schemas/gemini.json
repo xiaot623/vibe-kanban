@@ -17,6 +17,12 @@
         "null"
       ]
     },
+    "plan": {
+      "type": [
+        "boolean",
+        "null"
+      ]
+    },
     "yolo": {
       "type": [
         "boolean",
