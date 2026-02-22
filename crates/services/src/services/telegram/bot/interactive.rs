@@ -1066,7 +1066,10 @@ async fn handle_new_task_project(
 
     bot.send_message(
         chat_id,
-        format!("➕ New task in *{}*\n\nEnter the task title:", project.name),
+        format!(
+            "➕ New task in *{}*\n\nEnter the task title:",
+            escape_markdown_v2(&project.name)
+        ),
     )
     .parse_mode(ParseMode::MarkdownV2)
     .reply_markup(keyboard::cancel_keyboard())
@@ -1135,4 +1138,32 @@ async fn send_or_edit(
     }
     req.await?;
     Ok(())
+}
+
+fn escape_markdown_v2(text: &str) -> String {
+    let mut escaped = String::with_capacity(text.len());
+
+    for ch in text.chars() {
+        match ch {
+            '\\' | '_' | '*' | '[' | ']' | '(' | ')' | '~' | '`' | '>' | '#' | '+' | '-' | '='
+            | '|' | '{' | '}' | '.' | '!' => {
+                escaped.push('\\');
+                escaped.push(ch);
+            }
+            _ => escaped.push(ch),
+        }
+    }
+
+    escaped
+}
+
+#[cfg(test)]
+mod tests {
+    use super::escape_markdown_v2;
+
+    #[test]
+    fn escape_markdown_v2_escapes_reserved_characters() {
+        let project_name = "xx-yyy.v1";
+        assert_eq!(escape_markdown_v2(project_name), "xx\\-yyy\\.v1");
+    }
 }
