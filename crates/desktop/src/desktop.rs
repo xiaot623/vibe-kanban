@@ -11,6 +11,7 @@ use db::{
 };
 use deployment::Deployment;
 use nosleep::{NoSleep, NoSleepType};
+use serde::Deserialize;
 use server::{
     startup::{self, ServerConfig},
     DeploymentImpl,
@@ -20,6 +21,41 @@ use tauri::{Manager, WebviewUrl, WebviewWindowBuilder};
 use tokio::{net::UdpSocket, sync::Mutex};
 
 use crate::{DiscoveryBeacon, DISCOVERY_MULTICAST_ADDR, DISCOVERY_PORT, DISCOVERY_SERVICE};
+
+const TAURI_SAVE_CANCELLED_ERROR: &str = "TAURI_SAVE_CANCELLED";
+
+#[derive(Clone, Copy, Debug, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ExportContextFormat {
+    Md,
+    Pdf,
+}
+
+#[tauri::command]
+pub fn save_export_context_file(
+    suggested_file_name: String,
+    format: ExportContextFormat,
+    bytes: Vec<u8>,
+) -> Result<(), String> {
+    let (filter_name, extension) = match format {
+        ExportContextFormat::Md => ("Markdown Document", "md"),
+        ExportContextFormat::Pdf => ("PDF Document", "pdf"),
+    };
+
+    let selected_path = rfd::FileDialog::new()
+        .set_file_name(&suggested_file_name)
+        .add_filter(filter_name, &[extension])
+        .save_file()
+        .ok_or_else(|| TAURI_SAVE_CANCELLED_ERROR.to_string())?;
+
+    let output_path = if selected_path.extension().is_none() {
+        selected_path.with_extension(extension)
+    } else {
+        selected_path
+    };
+
+    std::fs::write(&output_path, bytes).map_err(|err| format!("Failed to save file: {err}"))
+}
 
 /// State for managing the LAN server lifecycle.
 struct LanServerState {

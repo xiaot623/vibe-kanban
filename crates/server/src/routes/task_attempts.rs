@@ -16,9 +16,9 @@ use axum::{
         Query, State,
         ws::{WebSocket, WebSocketUpgrade},
     },
-    http::StatusCode,
+    http::{StatusCode, header},
     middleware::from_fn_with_state,
-    response::{IntoResponse, Json as ResponseJson},
+    response::{IntoResponse, Json as ResponseJson, Response},
     routing::{get, patch, post, put},
 };
 use db::models::{
@@ -42,6 +42,7 @@ use executors::{
     profile::{ExecutorConfigs, ExecutorProfileId},
 };
 use git2::BranchType;
+use markdown2pdf::{MdpError, config::ConfigSource};
 use serde::{Deserialize, Serialize};
 use services::services::{
     container::ContainerService,
@@ -95,6 +96,18 @@ pub struct DiffStreamQuery {
 pub struct WorkspaceStreamQuery {
     pub archived: Option<bool>,
     pub limit: Option<i64>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ExportContextFormat {
+    Md,
+    Pdf,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ExportContextQuery {
+    pub format: ExportContextFormat,
 }
 
 #[derive(Debug, Deserialize, TS)]
@@ -1735,6 +1748,125 @@ pub async fn get_first_user_message(
     Ok(ResponseJson(ApiResponse::success(message)))
 }
 
+fn parse_markdown_pdf_with_fallback(markdown: String) -> Result<(Vec<u8>, bool), MdpError> {
+    match markdown2pdf::parse_into_bytes(markdown.clone(), ConfigSource::Default, None) {
+        Ok(bytes) => Ok((bytes, false)),
+        Err(MdpError::ParseError { .. }) => {
+            let fallback = wrap_markdown_as_text_code_block(&markdown);
+            let bytes = markdown2pdf::parse_into_bytes(fallback, ConfigSource::Default, None)?;
+            Ok((bytes, true))
+        }
+        Err(err) => Err(err),
+    }
+}
+
+fn strip_leading_execution_marker_line(markdown: String) -> (String, bool) {
+    let Some((first_line, rest)) = markdown.split_once('\n') else {
+        return if is_execution_marker_line(&markdown) {
+            (String::new(), true)
+        } else {
+            (markdown, false)
+        };
+    };
+
+    if is_execution_marker_line(first_line) {
+        (rest.to_string(), true)
+    } else {
+        (markdown, false)
+    }
+}
+
+fn is_execution_marker_line(line: &str) -> bool {
+    let trimmed = line.trim();
+    trimmed.starts_with("<!-- execution_id:") && trimmed.ends_with("-->")
+}
+
+fn wrap_markdown_as_text_code_block(markdown: &str) -> String {
+    let fence_len = std::cmp::max(3, longest_backtick_run(markdown) + 1);
+    let fence = "`".repeat(fence_len);
+    format!("{fence}text\n{markdown}\n{fence}")
+}
+
+fn longest_backtick_run(markdown: &str) -> usize {
+    let mut max_run = 0;
+    let mut current_run = 0;
+
+    for ch in markdown.chars() {
+        if ch == '`' {
+            current_run += 1;
+            max_run = max_run.max(current_run);
+        } else {
+            current_run = 0;
+        }
+    }
+
+    max_run
+}
+
+pub async fn export_context(
+    Extension(workspace): Extension<Workspace>,
+    State(deployment): State<DeploymentImpl>,
+    Query(query): Query<ExportContextQuery>,
+) -> Result<Response, ApiError> {
+    let pool = &deployment.db().pool;
+    let archive_context = context_archive::load_archive_context_for_workspace(pool, &workspace)
+        .await
+        .map_err(|err| {
+            tracing::error!(
+                "Failed to load archived context for workspace {}: {err:#}",
+                workspace.id
+            );
+            ApiError::BadRequest("Failed to load archived context".to_string())
+        })?
+        .ok_or_else(|| ApiError::BadRequest("No archived context available yet".to_string()))?;
+    let (export_context, stripped_marker_line) =
+        strip_leading_execution_marker_line(archive_context);
+
+    let (content_type, bytes) = match query.format {
+        ExportContextFormat::Md => ("text/markdown; charset=utf-8", export_context.into_bytes()),
+        ExportContextFormat::Pdf => {
+            let workspace_id = workspace.id;
+            let (pdf_bytes, used_fallback) = tokio::task::spawn_blocking(move || {
+                parse_markdown_pdf_with_fallback(export_context)
+            })
+            .await
+            .map_err(|err| {
+                tracing::error!(
+                    "Failed to join PDF export task for workspace {}: {}",
+                    workspace_id,
+                    err
+                );
+                ApiError::BadRequest("Failed to convert archived context to PDF".to_string())
+            })?
+            .map_err(|err| {
+                tracing::error!(
+                    "Failed to convert archived context to PDF for workspace {}: {}",
+                    workspace_id,
+                    err
+                );
+                ApiError::BadRequest("Failed to convert archived context to PDF".to_string())
+            })?;
+
+            if used_fallback {
+                tracing::warn!(
+                    "Archived context markdown was invalid for workspace {}; exported PDF with plain-text fallback",
+                    workspace_id
+                );
+            }
+            ("application/pdf", pdf_bytes)
+        }
+    };
+
+    if stripped_marker_line {
+        tracing::info!(
+            "Stripped archive execution marker comment from exported context for workspace {}",
+            workspace.id
+        );
+    }
+
+    Ok(([(header::CONTENT_TYPE, content_type)], bytes).into_response())
+}
+
 pub async fn delete_workspace(
     Extension(workspace): Extension<Workspace>,
     State(deployment): State<DeploymentImpl>,
@@ -1927,6 +2059,7 @@ pub fn router(deployment: &DeploymentImpl) -> Router<DeploymentImpl> {
         .route("/repos", get(get_task_attempt_repos))
         .route("/search", get(search_workspace_files))
         .route("/first-message", get(get_first_user_message))
+        .route("/export-context", get(export_context))
         .route("/mark-seen", put(mark_seen))
         .route(
             "/review-command",
@@ -1953,4 +2086,48 @@ pub fn router(deployment: &DeploymentImpl) -> Router<DeploymentImpl> {
         .nest("/{id}/images", images::router(deployment));
 
     Router::new().nest("/task-attempts", task_attempts_router)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn strip_leading_execution_marker_line_removes_marker() {
+        let input = "<!-- execution_id:abc -->\n## Execution";
+        let (stripped, did_strip) = strip_leading_execution_marker_line(input.to_string());
+        assert!(did_strip);
+        assert_eq!(stripped, "## Execution");
+    }
+
+    #[test]
+    fn strip_leading_execution_marker_line_keeps_normal_content() {
+        let input = "## Execution\n- content";
+        let (stripped, did_strip) = strip_leading_execution_marker_line(input.to_string());
+        assert!(!did_strip);
+        assert_eq!(stripped, input);
+    }
+
+    #[test]
+    fn wrap_markdown_as_text_code_block_uses_safe_fence() {
+        let wrapped = wrap_markdown_as_text_code_block("alpha ```` beta");
+
+        let mut lines = wrapped.lines();
+        let opening_fence = lines.next().expect("missing opening fence");
+        assert_eq!(opening_fence, "`````text");
+        assert_eq!(lines.next(), Some("alpha ```` beta"));
+        assert_eq!(lines.last(), Some("`````"));
+    }
+
+    #[test]
+    fn parse_markdown_pdf_with_fallback_handles_invalid_markdown() {
+        let markdown = "*unclosed emphasis".to_string();
+
+        let direct = markdown2pdf::parse_into_bytes(markdown.clone(), ConfigSource::Default, None);
+        assert!(matches!(direct, Err(MdpError::ParseError { .. })));
+
+        let (bytes, used_fallback) = parse_markdown_pdf_with_fallback(markdown).unwrap();
+        assert!(used_fallback);
+        assert!(!bytes.is_empty());
+    }
 }

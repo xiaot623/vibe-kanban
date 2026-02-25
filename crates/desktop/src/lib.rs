@@ -104,6 +104,10 @@ pub fn run() {
 fn run_tauri_app() {
     let builder = tauri::Builder::default();
 
+    #[cfg(not(target_os = "android"))]
+    let builder =
+        builder.invoke_handler(tauri::generate_handler![desktop::save_export_context_file]);
+
     #[cfg(target_os = "android")]
     let builder = builder.invoke_handler(tauri::generate_handler![android::discover_servers]);
 

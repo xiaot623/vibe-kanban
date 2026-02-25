@@ -411,6 +411,7 @@
     "createSubtask": "创建子任务",
     "gitActions": "Git 操作",
     "editBranchName": "编辑分支名称",
+    "exportContext": "导出上下文",
     "task": "任务",
     "share": "共享",
     "reassign": "重新分配",
@@ -428,6 +429,16 @@
       "renaming": "重命名中...",
       "action": "重命名分支"
     }
+  },
+  "exportContextDialog": {
+    "title": "导出上下文",
+    "description": "选择导出格式以下载归档上下文。",
+    "formatLabel": "格式",
+    "formatMarkdown": "Markdown (.md)",
+    "formatPdf": "PDF (.pdf)",
+    "action": "导出",
+    "inProgress": "导出中...",
+    "genericError": "导出上下文失败。请重试。"
   },
   "startReviewDialog": {
     "title": "开始审查",

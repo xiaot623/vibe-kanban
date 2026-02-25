@@ -17,6 +17,7 @@ import { ViewRelatedTasksDialog } from '@/components/dialogs/tasks/ViewRelatedTa
 import { CreateAttemptDialog } from '@/components/dialogs/tasks/CreateAttemptDialog';
 import { GitActionsDialog } from '@/components/dialogs/tasks/GitActionsDialog';
 import { EditBranchNameDialog } from '@/components/dialogs/tasks/EditBranchNameDialog';
+import { ExportContextDialog } from '@/components/dialogs/tasks/ExportContextDialog';
 import { useProject } from '@/contexts/ProjectContext';
 import { openTaskForm } from '@/lib/openTaskForm';
 
@@ -128,6 +129,15 @@ export function ActionsDropdown({ task, attempt }: ActionsDropdownProps) {
     });
   };
 
+  const handleExportContext = (e: React.MouseEvent) => {
+    e.stopPropagation();
+    if (!attempt?.id || !task) return;
+    ExportContextDialog.show({
+      attemptId: attempt.id,
+      taskTitle: task.title,
+    });
+  };
+
   return (
     <>
       <DropdownMenu>
@@ -184,6 +194,12 @@ export function ActionsDropdown({ task, attempt }: ActionsDropdownProps) {
                 onClick={handleEditBranchName}
               >
                 {t('actionsMenu.editBranchName')}
+              </DropdownMenuItem>
+              <DropdownMenuItem
+                disabled={!attempt?.id || !task}
+                onClick={handleExportContext}
+              >
+                {t('actionsMenu.exportContext')}
               </DropdownMenuItem>
               <DropdownMenuSeparator />
             </>

@@ -478,6 +478,7 @@
     "createSubtask": "Create subtask",
     "gitActions": "Git actions",
     "editBranchName": "Edit branch name",
+    "exportContext": "Export context",
     "startReview": "Start Review",
     "startingReview": "Starting Review...",
     "task": "Task",
@@ -495,6 +496,16 @@
       "renaming": "Renaming...",
       "action": "Rename Branch"
     }
+  },
+  "exportContextDialog": {
+    "title": "Export context",
+    "description": "Choose a format to download the archived context.",
+    "formatLabel": "Format",
+    "formatMarkdown": "Markdown (.md)",
+    "formatPdf": "PDF (.pdf)",
+    "action": "Export",
+    "inProgress": "Exporting...",
+    "genericError": "Failed to export context. Please try again."
   },
   "startReviewDialog": {
     "title": "Start Review",

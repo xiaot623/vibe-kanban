@@ -114,6 +114,7 @@ export type Err<E> = { success: false; error: E | undefined; message?: string };
 
 // Result type for endpoints that need typed errors
 export type Result<T, E> = Ok<T> | Err<E>;
+export type ExportContextFormat = 'md' | 'pdf';
 
 // Special handler for Result-returning endpoints
 const handleApiResponseAsResult = async <T, E>(
@@ -525,6 +526,37 @@ export const attemptsApi = {
       `/api/task-attempts/${attemptId}/first-message`
     );
     return handleApiResponse<string | null>(response);
+  },
+
+  exportContext: async (
+    attemptId: string,
+    format: ExportContextFormat
+  ): Promise<Blob> => {
+    const response = await fetch(
+      `/api/task-attempts/${attemptId}/export-context?format=${encodeURIComponent(format)}`
+    );
+
+    if (!response.ok) {
+      let errorMessage = `Request failed with status ${response.status}`;
+
+      try {
+        const errorData = await response.json();
+        if (
+          errorData &&
+          typeof errorData === 'object' &&
+          'message' in errorData &&
+          typeof errorData.message === 'string'
+        ) {
+          errorMessage = errorData.message;
+        }
+      } catch {
+        errorMessage = response.statusText || errorMessage;
+      }
+
+      throw new ApiError(errorMessage, response.status, response);
+    }
+
+    return response.blob();
   },
 
   merge: async (
