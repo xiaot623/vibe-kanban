@@ -31,7 +31,15 @@ import { useProject } from '@/contexts/ProjectContext';
 import { useApprovalForm } from '@/contexts/ApprovalFormContext';
 
 const DEFAULT_DENIAL_REASON = 'User denied this tool use request.';
-const ASK_USER_QUESTION_TOOL_NAME = 'AskUserQuestion';
+const ASK_USER_QUESTION_TOOL_NAMES = new Set([
+  'askuserquestion',
+  'ask_user_question',
+  'request_user_input',
+  'requestuserinput',
+]);
+
+const isAskUserQuestionToolName = (toolName: string): boolean =>
+  ASK_USER_QUESTION_TOOL_NAMES.has(toolName.trim().toLowerCase());
 
 type JsonRecord = Record<string, unknown>;
 
@@ -163,7 +171,7 @@ const extractAskUserQuestionPayload = (
   actionType: ActionType,
   entry: NormalizedEntry
 ): AskUserQuestionPayload | null => {
-  if (toolName !== ASK_USER_QUESTION_TOOL_NAME) return null;
+  if (!isAskUserQuestionToolName(toolName)) return null;
 
   if (actionType.action === 'tool' && isRecord(actionType.arguments)) {
     const fromAction = parseAskUserQuestionInput(actionType.arguments);
@@ -463,7 +471,7 @@ const PendingApprovalEntry = ({
     () => extractAskUserQuestionPayload(toolName, actionType, entry),
     [toolName, actionType, entry]
   );
-  const isAskUserQuestion = toolName === ASK_USER_QUESTION_TOOL_NAME;
+  const isAskUserQuestion = isAskUserQuestionToolName(toolName);
   const askQuestions = useMemo(
     () => askUserQuestionPayload?.questions ?? [],
     [askUserQuestionPayload]

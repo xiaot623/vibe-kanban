@@ -37,14 +37,16 @@ pub fn codex_home() -> Option<PathBuf> {
 }
 
 use async_trait::async_trait;
-use codex_app_server_protocol::{NewConversationParams, ReviewTarget};
+use codex_app_server_protocol::{
+    AskForApproval as CodexApiAskForApproval, ReviewTarget,
+    SandboxMode as CodexApiSandboxMode,
+};
 use codex_protocol::{
     config_types::{
         CollaborationMode as CodexCollaborationMode, ModeKind as CodexCollaborationModeKind,
-        SandboxMode as CodexSandboxMode, Settings as CodexCollaborationModeSettings,
+        Settings as CodexCollaborationModeSettings,
     },
     openai_models::ReasoningEffort as CodexReasoningEffort,
-    protocol::AskForApproval as CodexAskForApproval,
 };
 use command_group::AsyncCommandGroup;
 use derivative::Derivative;
@@ -57,7 +59,7 @@ use ts_rs::TS;
 use workspace_utils::msg_store::MsgStore;
 
 use self::{
-    client::{AppServerClient, LogWriter},
+    client::{AppServerClient, LogWriter, SessionConfigParams},
     jsonrpc::JsonRpcPeer,
     normalize_logs::normalize_logs,
     session::SessionHandler,
@@ -392,37 +394,34 @@ impl Codex {
         matches!(err, ExecutorError::ExecutableNotFound { .. })
     }
 
-    fn build_new_conversation_params(&self, cwd: &Path) -> NewConversationParams {
+    fn build_session_config_params(&self, cwd: &Path) -> SessionConfigParams {
         let sandbox = match self.sandbox.as_ref() {
-            None | Some(SandboxMode::Auto) => Some(CodexSandboxMode::WorkspaceWrite), // match the Auto preset in codex
-            Some(SandboxMode::ReadOnly) => Some(CodexSandboxMode::ReadOnly),
-            Some(SandboxMode::WorkspaceWrite) => Some(CodexSandboxMode::WorkspaceWrite),
-            Some(SandboxMode::DangerFullAccess) => Some(CodexSandboxMode::DangerFullAccess),
+            None | Some(SandboxMode::Auto) => Some(CodexApiSandboxMode::WorkspaceWrite), // match the Auto preset in codex
+            Some(SandboxMode::ReadOnly) => Some(CodexApiSandboxMode::ReadOnly),
+            Some(SandboxMode::WorkspaceWrite) => Some(CodexApiSandboxMode::WorkspaceWrite),
+            Some(SandboxMode::DangerFullAccess) => Some(CodexApiSandboxMode::DangerFullAccess),
         };
 
         let approval_policy = match self.ask_for_approval.as_ref() {
             None if matches!(self.sandbox.as_ref(), None | Some(SandboxMode::Auto)) => {
                 // match the Auto preset in codex
-                Some(CodexAskForApproval::OnRequest)
+                Some(CodexApiAskForApproval::OnRequest)
             }
             None => None,
-            Some(AskForApproval::UnlessTrusted) => Some(CodexAskForApproval::UnlessTrusted),
-            Some(AskForApproval::OnFailure) => Some(CodexAskForApproval::OnFailure),
-            Some(AskForApproval::OnRequest) => Some(CodexAskForApproval::OnRequest),
-            Some(AskForApproval::Never) => Some(CodexAskForApproval::Never),
+            Some(AskForApproval::UnlessTrusted) => Some(CodexApiAskForApproval::UnlessTrusted),
+            Some(AskForApproval::OnFailure) => Some(CodexApiAskForApproval::OnFailure),
+            Some(AskForApproval::OnRequest) => Some(CodexApiAskForApproval::OnRequest),
+            Some(AskForApproval::Never) => Some(CodexApiAskForApproval::Never),
         };
 
-        NewConversationParams {
+        SessionConfigParams {
             model: self.model.clone(),
-            profile: self.profile.clone(),
+            model_provider: self.model_provider.clone(),
             cwd: Some(cwd.to_string_lossy().to_string()),
             approval_policy,
             sandbox,
             config: self.build_config_overrides(),
             base_instructions: self.base_instructions.clone(),
-            include_apply_patch_tool: self.include_apply_patch_tool,
-            model_provider: self.model_provider.clone(),
-            compact_prompt: self.compact_prompt.clone(),
             developer_instructions: self.developer_instructions.clone(),
         }
     }
@@ -450,6 +449,24 @@ impl Codex {
             overrides.insert(
                 "model_reasoning_summary_format".to_string(),
                 Value::String(format.as_ref().to_string()),
+            );
+        }
+
+        if let Some(profile) = &self.profile {
+            overrides.insert("profile".to_string(), Value::String(profile.clone()));
+        }
+
+        if let Some(compact_prompt) = &self.compact_prompt {
+            overrides.insert(
+                "compact_prompt".to_string(),
+                Value::String(compact_prompt.clone()),
+            );
+        }
+
+        if let Some(include_apply_patch_tool) = self.include_apply_patch_tool {
+            overrides.insert(
+                "include_apply_patch_tool".to_string(),
+                Value::Bool(include_apply_patch_tool),
             );
         }
 
@@ -502,7 +519,7 @@ impl Codex {
         let new_stdout = create_stdout_pipe_writer(&mut child)?;
         let (exit_signal_tx, exit_signal_rx) = tokio::sync::oneshot::channel();
 
-        let params = self.build_new_conversation_params(current_dir);
+        let params = self.build_session_config_params(current_dir);
         let resume_session = resume_session.map(|s| s.to_string());
         let plan_mode = self.plan.unwrap_or(false);
         let plan_reasoning_effort = self
@@ -594,7 +611,7 @@ impl Codex {
 
     #[allow(clippy::too_many_arguments)]
     async fn launch_codex_app_server(
-        conversation_params: NewConversationParams,
+        session_config: SessionConfigParams,
         resume_session: Option<String>,
         combined_prompt: String,
         child_stdout: tokio::process::ChildStdout,
@@ -611,51 +628,51 @@ impl Codex {
             JsonRpcPeer::spawn(child_stdin, child_stdout, client.clone(), exit_signal_tx);
         client.connect(rpc_peer);
         client.initialize().await?;
-        let auth_status = client.get_auth_status().await?;
-        if auth_status.requires_openai_auth.unwrap_or(true) && auth_status.auth_method.is_none() {
+        let account = client.get_account().await?;
+        if account.requires_openai_auth && account.account.is_none() {
             return Err(ExecutorError::AuthRequired(
                 "Codex authentication required".to_string(),
             ));
         }
         match resume_session {
             None => {
-                let params = conversation_params;
-                let response = client.new_conversation(params).await?;
-                let conversation_id = response.conversation_id;
+                let response = client.thread_start(session_config).await?;
+                let thread_id = response.thread.id;
                 let collaboration_mode = Self::build_plan_collaboration_mode(
                     plan_mode,
                     response.model,
-                    response.reasoning_effort.or(plan_reasoning_effort),
+                    response.reasoning_effort.or(plan_reasoning_effort.clone()),
                 );
-                client.register_session(&conversation_id).await?;
-                client.add_conversation_listener(conversation_id).await?;
+                client.register_session(&thread_id).await?;
                 client
-                    .start_turn(conversation_id, combined_prompt, collaboration_mode)
+                    .start_turn(thread_id, combined_prompt, collaboration_mode)
                     .await?;
             }
             Some(session_id) => {
-                let (rollout_path, _forked_session_id) =
+                let (rollout_path, forked_session_id) =
                     SessionHandler::fork_rollout_file(&session_id)
                         .map_err(|e| ExecutorError::FollowUpNotSupported(e.to_string()))?;
-                let overrides = conversation_params;
                 let response = client
-                    .resume_conversation(rollout_path.clone(), overrides)
+                    .thread_resume(
+                        forked_session_id,
+                        Some(rollout_path.clone()),
+                        session_config,
+                    )
                     .await?;
                 tracing::debug!(
                     "resuming session using rollout file {}, response {:?}",
                     rollout_path.display(),
                     response
                 );
-                let conversation_id = response.conversation_id;
+                let thread_id = response.thread.id;
                 let collaboration_mode = Self::build_plan_collaboration_mode(
                     plan_mode,
                     response.model,
-                    plan_reasoning_effort,
+                    response.reasoning_effort.or(plan_reasoning_effort.clone()),
                 );
-                client.register_session(&conversation_id).await?;
-                client.add_conversation_listener(conversation_id).await?;
+                client.register_session(&thread_id).await?;
                 client
-                    .start_turn(conversation_id, combined_prompt, collaboration_mode)
+                    .start_turn(thread_id, combined_prompt, collaboration_mode)
                     .await?;
             }
         }

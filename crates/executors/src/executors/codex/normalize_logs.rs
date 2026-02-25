@@ -6,6 +6,7 @@ use std::{
 
 use codex_app_server_protocol::{
     JSONRPCNotification, JSONRPCResponse, NewConversationResponse, ServerNotification,
+    ThreadResumeResponse, ThreadStartResponse,
 };
 use codex_protocol::{
     config_types::ModeKind,
@@ -18,14 +19,14 @@ use codex_protocol::{
         ErrorEvent, EventMsg, ExecApprovalRequestEvent, ExecCommandBeginEvent, ExecCommandEndEvent,
         ExecCommandOutputDeltaEvent, ExecOutputStream, FileChange as CodexProtoFileChange,
         McpInvocation, McpToolCallBeginEvent, McpToolCallEndEvent, PatchApplyBeginEvent,
-        PatchApplyEndEvent, StreamErrorEvent, ViewImageToolCallEvent, WarningEvent,
-        WebSearchBeginEvent, WebSearchEndEvent,
+        PatchApplyEndEvent, RequestUserInputEvent, StreamErrorEvent, ViewImageToolCallEvent,
+        WarningEvent, WebSearchBeginEvent, WebSearchEndEvent,
     },
 };
 use futures::StreamExt;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{Value, json};
 use workspace_utils::{
     approvals::ApprovalStatus, diff::normalize_unified_diff, msg_store::MsgStore,
     path::make_path_relative,
@@ -45,6 +46,8 @@ use crate::{
         },
     },
 };
+
+const REQUEST_USER_INPUT_TOOL_NAME: &str = "request_user_input";
 
 trait ToNormalizedEntry {
     fn to_normalized_entry(&self) -> NormalizedEntry;
@@ -619,6 +622,41 @@ pub fn normalize_logs(msg_store: Arc<MsgStore>, worktree_path: &Path) {
                         patch_state.entries.push(entry);
                     }
                 }
+                EventMsg::RequestUserInput(RequestUserInputEvent {
+                    call_id,
+                    turn_id: _,
+                    questions,
+                }) => {
+                    state.assistant = None;
+                    state.thinking = None;
+
+                    let content = questions
+                        .first()
+                        .map(|question| question.question.clone())
+                        .unwrap_or_else(|| "User input requested".to_string());
+
+                    add_normalized_entry(
+                        &msg_store,
+                        &entry_index,
+                        NormalizedEntry {
+                            timestamp: None,
+                            entry_type: NormalizedEntryType::ToolUse {
+                                tool_name: REQUEST_USER_INPUT_TOOL_NAME.to_string(),
+                                action_type: ActionType::Tool {
+                                    tool_name: REQUEST_USER_INPUT_TOOL_NAME.to_string(),
+                                    arguments: Some(json!({ "questions": questions })),
+                                    result: None,
+                                },
+                                status: ToolStatus::Created,
+                            },
+                            content,
+                            metadata: serde_json::to_value(ToolCallMetadata {
+                                tool_call_id: call_id,
+                            })
+                            .ok(),
+                        },
+                    );
+                }
                 EventMsg::ExecCommandBegin(ExecCommandBeginEvent {
                     call_id,
                     turn_id: _,
@@ -1107,22 +1145,32 @@ fn handle_jsonrpc_response(
     msg_store: &Arc<MsgStore>,
     entry_index: &EntryIndexProvider,
 ) {
-    let Ok(response) = serde_json::from_value::<NewConversationResponse>(response.result.clone())
-    else {
-        return;
-    };
+    if let Ok(response) = serde_json::from_value::<NewConversationResponse>(response.result.clone())
+    {
+        match SessionHandler::extract_session_id_from_rollout_path(response.rollout_path) {
+            Ok(session_id) => msg_store.push_session_id(session_id),
+            Err(err) => tracing::error!("failed to extract session id: {err}"),
+        }
 
-    match SessionHandler::extract_session_id_from_rollout_path(response.rollout_path) {
-        Ok(session_id) => msg_store.push_session_id(session_id),
-        Err(err) => tracing::error!("failed to extract session id: {err}"),
+        handle_model_params(
+            response.model,
+            response.reasoning_effort,
+            msg_store,
+            entry_index,
+        );
+        return;
     }
 
-    handle_model_params(
-        response.model,
-        response.reasoning_effort,
-        msg_store,
-        entry_index,
-    );
+    if let Ok(response) = serde_json::from_value::<ThreadStartResponse>(response.result.clone()) {
+        msg_store.push_session_id(response.thread.id);
+        handle_model_params(response.model, response.reasoning_effort, msg_store, entry_index);
+        return;
+    }
+
+    if let Ok(response) = serde_json::from_value::<ThreadResumeResponse>(response.result) {
+        msg_store.push_session_id(response.thread.id);
+        handle_model_params(response.model, response.reasoning_effort, msg_store, entry_index);
+    }
 }
 
 fn handle_model_params(
@@ -1259,6 +1307,7 @@ impl Approval {
         match tool_name.as_str() {
             "codex.exec_command" => "Exec Command".to_string(),
             "codex.apply_patch" => "Edit".to_string(),
+            "request_user_input" => "Request User Input".to_string(),
             other => other.to_string(),
         }
     }
