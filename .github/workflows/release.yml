@@ -95,21 +95,7 @@ jobs:
 
       - name: Sign app and recreate dmg
         if: matrix.platform == 'macos'
-        run: |
-          APP_NAME='Vibe Kanban'
-          BUNDLE_DIR='target/release/bundle'
-          APP_PATH="$BUNDLE_DIR/macos/$APP_NAME.app"
-          DMG_DIR="$BUNDLE_DIR/dmg"
-
-          if [ ! -d "$APP_PATH" ]; then
-            echo "App bundle not found: $APP_PATH"
-            exit 1
-          fi
-
-          codesign --force --deep --sign - "$APP_PATH"
-          mkdir -p "$DMG_DIR"
-          rm -f "$DMG_DIR"/*.dmg
-          hdiutil create -volname "$APP_NAME" -srcfolder "$APP_PATH" -ov -format UDZO "$DMG_DIR/$APP_NAME.dmg"
+        run: scripts/sign-dmg.sh
 
       - name: Prepare macOS release asset
         if: matrix.platform == 'macos'
