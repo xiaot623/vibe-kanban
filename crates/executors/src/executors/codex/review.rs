@@ -34,9 +34,8 @@ pub async fn launch_codex_review(
 
     let thread_id = match resume_session {
         Some(session_id) => {
-            let (rollout_path, forked_session_id) =
-                SessionHandler::fork_rollout_file(&session_id)
-                    .map_err(|e| ExecutorError::FollowUpNotSupported(e.to_string()))?;
+            let (rollout_path, forked_session_id) = SessionHandler::fork_rollout_file(&session_id)
+                .map_err(|e| ExecutorError::FollowUpNotSupported(e.to_string()))?;
             let response = client
                 .thread_resume(
                     forked_session_id,

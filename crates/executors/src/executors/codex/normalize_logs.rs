@@ -1163,13 +1163,23 @@ fn handle_jsonrpc_response(
 
     if let Ok(response) = serde_json::from_value::<ThreadStartResponse>(response.result.clone()) {
         msg_store.push_session_id(response.thread.id);
-        handle_model_params(response.model, response.reasoning_effort, msg_store, entry_index);
+        handle_model_params(
+            response.model,
+            response.reasoning_effort,
+            msg_store,
+            entry_index,
+        );
         return;
     }
 
     if let Ok(response) = serde_json::from_value::<ThreadResumeResponse>(response.result) {
         msg_store.push_session_id(response.thread.id);
-        handle_model_params(response.model, response.reasoning_effort, msg_store, entry_index);
+        handle_model_params(
+            response.model,
+            response.reasoning_effort,
+            msg_store,
+            entry_index,
+        );
     }
 }
 

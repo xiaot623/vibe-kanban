@@ -38,8 +38,7 @@ pub fn codex_home() -> Option<PathBuf> {
 
 use async_trait::async_trait;
 use codex_app_server_protocol::{
-    AskForApproval as CodexApiAskForApproval, ReviewTarget,
-    SandboxMode as CodexApiSandboxMode,
+    AskForApproval as CodexApiAskForApproval, ReviewTarget, SandboxMode as CodexApiSandboxMode,
 };
 use codex_protocol::{
     config_types::{

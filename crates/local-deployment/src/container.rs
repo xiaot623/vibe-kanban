@@ -981,6 +981,16 @@ fn apply_proxy_value(env: &mut ExecutionEnv, key: &str, value: &Option<String>) 
     }
 }
 
+fn apply_host_env_value(env: &mut ExecutionEnv, key: &str) {
+    if let Some(value) = std::env::var(key)
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+    {
+        env.insert(key, value);
+    }
+}
+
 fn failure_exit_status() -> std::process::ExitStatus {
     #[cfg(unix)]
     {
@@ -1199,6 +1209,12 @@ impl ContainerService for LocalContainerService {
 
         let mut env = ExecutionEnv::new(repo_context, commit_reminder);
         apply_proxy_env(&mut env, &proxy_config);
+        if matches!(
+            executor_action.base_executor(),
+            Some(BaseCodingAgent::Codex)
+        ) {
+            apply_host_env_value(&mut env, "APIROUTER_API_KEY");
+        }
 
         // Load task and project context for environment variables
         let task = workspace
