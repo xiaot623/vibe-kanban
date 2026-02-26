@@ -53,7 +53,7 @@ static CLAUDE_COMMAND: LazyLock<String> =
 static CLAUDE_ROUTER_COMMAND: LazyLock<String> =
     LazyLock::new(|| env_command_or_default("VK_CLAUDE_ROUTER", "claude-code-router code"));
 
-const FALLBACK_CLAUDE_COMMAND: &str = "npx -y @anthropic-ai/claude-code@2.1.7";
+const FALLBACK_CLAUDE_COMMAND: &str = "npx -y @anthropic-ai/claude-code@2.1.59";
 const FALLBACK_CLAUDE_ROUTER_COMMAND: &str = "npx -y @musistudio/claude-code-router@1.0.66 code";
 
 fn base_command(claude_code_router: bool) -> &'static str {

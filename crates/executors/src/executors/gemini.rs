@@ -25,7 +25,7 @@ use crate::{
 static GEMINI_COMMAND: LazyLock<String> =
     LazyLock::new(|| env_command_or_default("VK_GEMINI", "gemini"));
 
-const FALLBACK_GEMINI_COMMAND: &str = "npx -y @google/gemini-cli@0.29.5";
+const FALLBACK_GEMINI_COMMAND: &str = "npx -y @google/gemini-cli@0.30.0";
 
 pub fn base_command() -> &'static str {
     GEMINI_COMMAND.as_str()
