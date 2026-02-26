@@ -4,7 +4,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use anyhow::{Context, anyhow};
+use anyhow::{anyhow, Context};
 use chrono::Utc;
 use db::models::{
     coding_agent_turn::CodingAgentTurn, execution_process::ExecutionProcess, project::Project,
@@ -14,7 +14,7 @@ use executors::{
     executors::BaseCodingAgent,
     logs::{ActionType, NormalizedEntry, NormalizedEntryType, ToolStatus},
 };
-use serde_json::{Map, Value, json};
+use serde_json::{json, Map, Value};
 use sqlx::SqlitePool;
 use tokio::io::AsyncWriteExt;
 use uuid::Uuid;
@@ -22,10 +22,6 @@ use uuid::Uuid;
 const CONTEXT_FILE_NAME: &str = "CONTEXT.md";
 const META_FILE_NAME: &str = "meta.json";
 const META_SCHEMA_VERSION: u64 = 1;
-const MAX_CONVERSATION_ENTRIES: usize = 8;
-const MAX_TOOL_ENTRIES: usize = 16;
-const MAX_TEXT_CHARS: usize = 1_500;
-const SWITCH_ARCHIVE_CONTEXT_CHAR_LIMIT: usize = 24_000;
 
 #[derive(Debug, Clone)]
 pub struct ArchiveFiles {
@@ -61,10 +57,24 @@ pub fn resolve_executor_switch(
 }
 
 pub fn compose_executor_switch_prompt(user_prompt: &str, archive_context: Option<&str>) -> String {
-    compose_executor_switch_prompt_with_limit(
-        user_prompt,
-        archive_context,
-        SWITCH_ARCHIVE_CONTEXT_CHAR_LIMIT,
+    let Some(archive_context) = archive_context.and_then(non_empty) else {
+        return user_prompt.to_string();
+    };
+
+    format!(
+        "Continue this task in the same app session with a different executor.
+
+Archived execution history (most recent context):
+```markdown
+{archive_context}
+```
+
+Latest user request:
+```text
+{user_prompt}
+```
+
+Continue from the current workspace state. Reuse completed work and only do what is still needed."
     )
 }
 
@@ -463,10 +473,7 @@ fn build_execution_section(
     lines.push(format!("## Execution {execution_id}"));
     lines.push(String::new());
     lines.push(format!("- Archived at: {}", Utc::now().to_rfc3339()));
-    lines.push(format!(
-        "- Branch: {}",
-        compact_single_line(branch_name, MAX_TEXT_CHARS)
-    ));
+    lines.push(format!("- Branch: {}", compact_single_line(branch_name)));
     lines.push(format!(
         "- Run reason: {}",
         format!("{run_reason:?}").to_lowercase()
@@ -481,7 +488,7 @@ fn build_execution_section(
         lines.push("### Prompt".to_string());
         lines.push(String::new());
         lines.push("```text".to_string());
-        lines.push(compact_multiline(prompt, MAX_TEXT_CHARS));
+        lines.push(compact_multiline(prompt));
         lines.push("```".to_string());
     }
 
@@ -513,31 +520,27 @@ fn build_execution_section(
         lines.push(String::new());
         lines.push("### Final Assistant Summary".to_string());
         lines.push(String::new());
-        lines.push(compact_multiline(&summary, MAX_TEXT_CHARS));
+        lines.push(compact_multiline(&summary));
     }
 
     lines.join("\n")
 }
 
 fn collect_conversation_lines(entries: &[NormalizedEntry]) -> Vec<String> {
-    let mut lines = entries
+    let lines = entries
         .iter()
         .filter_map(|entry| match entry.entry_type {
             NormalizedEntryType::UserMessage => Some(format!(
                 "- **User**: {}",
-                compact_single_line(&entry.content, MAX_TEXT_CHARS)
+                compact_single_line(&entry.content)
             )),
             NormalizedEntryType::AssistantMessage => Some(format!(
                 "- **Assistant**: {}",
-                compact_single_line(&entry.content, MAX_TEXT_CHARS)
+                compact_single_line(&entry.content)
             )),
             _ => None,
         })
         .collect::<Vec<_>>();
-
-    if lines.len() > MAX_CONVERSATION_ENTRIES {
-        lines = lines.split_off(lines.len() - MAX_CONVERSATION_ENTRIES);
-    }
 
     lines
 }
@@ -563,7 +566,7 @@ fn collect_tool_summary_lines(entries: &[NormalizedEntry]) -> Vec<String> {
                 "- {} `{}` -> {}",
                 tool_status_label(status),
                 tool_name,
-                compact_single_line(&action_type_summary(action_type), MAX_TEXT_CHARS)
+                compact_single_line(&action_type_summary(action_type))
             ));
         }
     }
@@ -591,10 +594,6 @@ fn collect_tool_summary_lines(entries: &[NormalizedEntry]) -> Vec<String> {
             .collect::<Vec<_>>()
             .join(", ");
         lines.push(format!("- Tool counts: {tool_text}"));
-    }
-
-    if detail_lines.len() > MAX_TOOL_ENTRIES {
-        detail_lines = detail_lines.split_off(detail_lines.len() - MAX_TOOL_ENTRIES);
     }
 
     lines.extend(detail_lines);
@@ -647,35 +646,7 @@ fn find_last_assistant_message(entries: &[NormalizedEntry]) -> Option<String> {
         .rev()
         .find(|entry| matches!(entry.entry_type, NormalizedEntryType::AssistantMessage))
         .and_then(|entry| non_empty(&entry.content))
-        .map(|content| compact_multiline(content, MAX_TEXT_CHARS))
-}
-
-fn compose_executor_switch_prompt_with_limit(
-    user_prompt: &str,
-    archive_context: Option<&str>,
-    archive_context_char_limit: usize,
-) -> String {
-    let Some(archive_context) = archive_context.and_then(non_empty) else {
-        return user_prompt.to_string();
-    };
-
-    let truncated_context = tail_truncate_chars(archive_context, archive_context_char_limit);
-
-    format!(
-        "Continue this task in the same app session with a different executor.
-
-Archived execution history (most recent context):
-```markdown
-{truncated_context}
-```
-
-Latest user request:
-```text
-{user_prompt}
-```
-
-Continue from the current workspace state. Reuse completed work and only do what is still needed."
-    )
+        .map(compact_multiline)
 }
 
 fn non_empty(value: &str) -> Option<&str> {
@@ -687,39 +658,16 @@ fn non_empty(value: &str) -> Option<&str> {
     }
 }
 
-fn compact_single_line(value: &str, max_chars: usize) -> String {
-    let compact = value
+fn compact_single_line(value: &str) -> String {
+    value
         .split_whitespace()
         .filter(|part| !part.is_empty())
         .collect::<Vec<_>>()
-        .join(" ");
-    truncate_chars(&compact, max_chars)
+        .join(" ")
 }
 
-fn compact_multiline(value: &str, max_chars: usize) -> String {
-    truncate_chars(value.trim(), max_chars)
-}
-
-fn truncate_chars(value: &str, max_chars: usize) -> String {
-    if value.chars().count() <= max_chars {
-        return value.to_string();
-    }
-
-    let truncated: String = value.chars().take(max_chars).collect();
-    format!("{truncated}...")
-}
-
-fn tail_truncate_chars(value: &str, max_chars: usize) -> String {
-    if max_chars == 0 {
-        return String::new();
-    }
-
-    let total_chars = value.chars().count();
-    if total_chars <= max_chars {
-        return value.to_string();
-    }
-
-    value.chars().skip(total_chars - max_chars).collect()
+fn compact_multiline(value: &str) -> String {
+    value.trim().to_string()
 }
 
 async fn read_meta_map(meta_path: &Path) -> anyhow::Result<Map<String, Value>> {
@@ -906,11 +854,8 @@ mod tests {
 
     #[test]
     fn compose_executor_switch_prompt_includes_archive_context() {
-        let prompt = compose_executor_switch_prompt_with_limit(
-            "Please add tests.",
-            Some("Execution A\nExecution B"),
-            10_000,
-        );
+        let prompt =
+            compose_executor_switch_prompt("Please add tests.", Some("Execution A\nExecution B"));
 
         assert!(prompt.contains("Archived execution history"));
         assert!(prompt.contains("Execution A\nExecution B"));
@@ -931,9 +876,8 @@ mod tests {
     }
 
     #[test]
-    fn compose_executor_switch_prompt_tail_truncates_archive_context() {
-        let prompt = compose_executor_switch_prompt_with_limit("Continue", Some("0123456789"), 4);
-        assert!(prompt.contains("6789"));
-        assert!(!prompt.contains("012345"));
+    fn compose_executor_switch_prompt_does_not_truncate_archive_context() {
+        let prompt = compose_executor_switch_prompt("Continue", Some("0123456789"));
+        assert!(prompt.contains("0123456789"));
     }
 }
