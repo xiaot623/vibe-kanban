@@ -6,8 +6,8 @@ use serde_json::Value;
 use workspace_utils::{approvals::ApprovalStatus, msg_store::MsgStore, path::make_path_relative};
 
 use super::types::{
-    MessageInfo, MessageRole, OpencodeExecutorEvent, Part, PermissionAskedEvent, SdkEvent, SdkTodo,
-    SessionStatus, ToolPart, ToolStateUpdate,
+    MessageInfo, MessagePartDeltaEvent, MessageRole, OpencodeExecutorEvent, Part,
+    PermissionAskedEvent, SdkEvent, SdkTodo, SessionStatus, ToolPart, ToolStateUpdate,
 };
 use crate::{
     approvals::ToolCallMetadata,
@@ -115,11 +115,25 @@ enum UpdateMode {
     Set,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PartKind {
+    Text,
+    Reasoning,
+    Other,
+}
+
+#[derive(Debug, Clone)]
+struct PartIdentity {
+    message_id: String,
+    kind: PartKind,
+}
+
 #[derive(Default)]
 struct LogState {
     entry_index: EntryIndexProvider,
     msg_store: Arc<MsgStore>,
     message_roles: HashMap<String, MessageRole>,
+    part_identities: HashMap<String, PartIdentity>,
     assistant_text: HashMap<String, StreamingText>,
     thinking_text: HashMap<String, StreamingText>,
     tool_states: HashMap<String, ToolCallState>,
@@ -136,6 +150,7 @@ impl LogState {
             entry_index,
             msg_store,
             message_roles: HashMap::new(),
+            part_identities: HashMap::new(),
             assistant_text: HashMap::new(),
             thinking_text: HashMap::new(),
             tool_states: HashMap::new(),
@@ -171,6 +186,9 @@ impl LogState {
                     worktree_path,
                     msg_store,
                 );
+            }
+            SdkEvent::MessagePartDelta(event) => {
+                self.handle_part_delta(event, msg_store);
             }
             SdkEvent::TodoUpdated(event) => {
                 self.handle_todo_updated(&event.todos, msg_store);
@@ -313,6 +331,7 @@ impl LogState {
     ) {
         match part {
             Part::Text(part) => {
+                self.track_part_identity(part.id.as_deref(), &part.message_id, PartKind::Text);
                 if self.message_roles.get(&part.message_id) != Some(&MessageRole::Assistant) {
                     tracing::debug!(
                         "Skipping text part for non-assistant message_id {}",
@@ -339,6 +358,7 @@ impl LogState {
                 );
             }
             Part::Reasoning(part) => {
+                self.track_part_identity(part.id.as_deref(), &part.message_id, PartKind::Reasoning);
                 let (text, mode) = if let Some(delta) = delta {
                     (delta, UpdateMode::Append)
                 } else {
@@ -358,6 +378,7 @@ impl LogState {
             }
             Part::Tool(part) => {
                 let part = *part;
+                self.track_part_identity(part.id.as_deref(), &part.message_id, PartKind::Other);
                 if part.call_id.trim().is_empty() {
                     tracing::debug!(
                         "Skipping tool part with empty call_id for message_id {}",
@@ -382,6 +403,72 @@ impl LogState {
                 }
             }
             Part::Other => {}
+        }
+    }
+
+    fn track_part_identity(&mut self, part_id: Option<&str>, message_id: &str, kind: PartKind) {
+        let Some(part_id) = part_id.map(str::trim).filter(|part_id| !part_id.is_empty()) else {
+            return;
+        };
+
+        self.part_identities.insert(
+            part_id.to_string(),
+            PartIdentity {
+                message_id: message_id.to_string(),
+                kind,
+            },
+        );
+    }
+
+    fn handle_part_delta(&mut self, event: MessagePartDeltaEvent, msg_store: &Arc<MsgStore>) {
+        if event.field != "text" || event.delta.is_empty() {
+            return;
+        }
+
+        let Some(part_identity) = self.part_identities.get(&event.part_id).cloned() else {
+            return;
+        };
+
+        if part_identity.message_id != event.message_id {
+            tracing::debug!(
+                "Mismatched message_id for part_id {} (expected {}, got {}); routing by tracked part_id",
+                event.part_id,
+                part_identity.message_id,
+                event.message_id
+            );
+        }
+
+        let entry_index = self.entry_index.clone();
+        match part_identity.kind {
+            PartKind::Text => {
+                if self.message_roles.get(&part_identity.message_id)
+                    != Some(&MessageRole::Assistant)
+                {
+                    return;
+                }
+
+                update_streaming_text(
+                    &entry_index,
+                    &event.delta,
+                    NormalizedEntryType::AssistantMessage,
+                    &part_identity.message_id,
+                    &mut self.assistant_text,
+                    msg_store,
+                    UpdateMode::Append,
+                );
+            }
+            PartKind::Reasoning => {
+                update_streaming_text(
+                    &entry_index,
+                    &event.delta,
+                    NormalizedEntryType::Thinking,
+                    &part_identity.message_id,
+                    &mut self.thinking_text,
+                    msg_store,
+                    UpdateMode::Append,
+                );
+            }
+            PartKind::Other => {}
         }
     }
 
@@ -1150,5 +1237,214 @@ fn extract_file_path_from_permission_metadata(metadata: &Value) -> Option<&str> 
         None
     } else {
         Some(trimmed)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeMap;
+
+    use serde_json::json;
+    use workspace_utils::{log_msg::LogMsg, msg_store::MsgStore};
+
+    use super::*;
+    use crate::logs::{
+        NormalizedEntry, NormalizedEntryType, utils::patch::extract_normalized_entry_from_patch,
+    };
+
+    fn new_state() -> (LogState, Arc<MsgStore>) {
+        let msg_store = Arc::new(MsgStore::new());
+        let state = LogState::new(EntryIndexProvider::test_new(), msg_store.clone());
+        (state, msg_store)
+    }
+
+    fn collect_entries(msg_store: &MsgStore) -> Vec<NormalizedEntry> {
+        let mut entries = BTreeMap::new();
+        for msg in msg_store.get_history() {
+            let LogMsg::JsonPatch(patch) = msg else {
+                continue;
+            };
+
+            if let Some((index, entry)) = extract_normalized_entry_from_patch(&patch) {
+                entries.insert(index, entry);
+            }
+        }
+        entries.into_values().collect()
+    }
+
+    #[test]
+    fn message_part_delta_appends_assistant_text() {
+        let (mut state, msg_store) = new_state();
+        let worktree_path = Path::new("/tmp");
+
+        state.handle_sdk_event(
+            &json!({
+                "type": "message.updated",
+                "properties": {
+                    "info": {
+                        "id": "message-1",
+                        "role": "assistant"
+                    }
+                }
+            }),
+            worktree_path,
+            &msg_store,
+        );
+
+        state.handle_sdk_event(
+            &json!({
+                "type": "message.part.updated",
+                "properties": {
+                    "part": {
+                        "type": "text",
+                        "id": "part-1",
+                        "messageID": "message-1",
+                        "text": ""
+                    }
+                }
+            }),
+            worktree_path,
+            &msg_store,
+        );
+
+        state.handle_sdk_event(
+            &json!({
+                "type": "message.part.delta",
+                "properties": {
+                    "sessionID": "session-1",
+                    "messageID": "message-1",
+                    "partID": "part-1",
+                    "field": "text",
+                    "delta": "Hel"
+                }
+            }),
+            worktree_path,
+            &msg_store,
+        );
+
+        state.handle_sdk_event(
+            &json!({
+                "type": "message.part.delta",
+                "properties": {
+                    "sessionID": "session-1",
+                    "messageID": "message-1",
+                    "partID": "part-1",
+                    "field": "text",
+                    "delta": "lo"
+                }
+            }),
+            worktree_path,
+            &msg_store,
+        );
+
+        let entries = collect_entries(&msg_store);
+        let assistant_entry = entries
+            .iter()
+            .find(|entry| matches!(entry.entry_type, NormalizedEntryType::AssistantMessage))
+            .expect("assistant entry should be present");
+        assert_eq!(assistant_entry.content, "Hello");
+        assert!(!entries.iter().any(|entry| {
+            matches!(entry.entry_type, NormalizedEntryType::SystemMessage)
+                && entry
+                    .content
+                    .contains("Unrecognized OpenCode SDK event type")
+        }));
+    }
+
+    #[test]
+    fn message_part_delta_appends_reasoning_text() {
+        let (mut state, msg_store) = new_state();
+        let worktree_path = Path::new("/tmp");
+
+        state.handle_sdk_event(
+            &json!({
+                "type": "message.updated",
+                "properties": {
+                    "info": {
+                        "id": "message-2",
+                        "role": "assistant"
+                    }
+                }
+            }),
+            worktree_path,
+            &msg_store,
+        );
+
+        state.handle_sdk_event(
+            &json!({
+                "type": "message.part.updated",
+                "properties": {
+                    "part": {
+                        "type": "reasoning",
+                        "id": "part-2",
+                        "messageID": "message-2",
+                        "text": ""
+                    }
+                }
+            }),
+            worktree_path,
+            &msg_store,
+        );
+
+        state.handle_sdk_event(
+            &json!({
+                "type": "message.part.delta",
+                "properties": {
+                    "sessionID": "session-1",
+                    "messageID": "message-2",
+                    "partID": "part-2",
+                    "field": "text",
+                    "delta": "Think"
+                }
+            }),
+            worktree_path,
+            &msg_store,
+        );
+
+        state.handle_sdk_event(
+            &json!({
+                "type": "message.part.delta",
+                "properties": {
+                    "sessionID": "session-1",
+                    "messageID": "message-2",
+                    "partID": "part-2",
+                    "field": "text",
+                    "delta": "ing"
+                }
+            }),
+            worktree_path,
+            &msg_store,
+        );
+
+        let entries = collect_entries(&msg_store);
+        let thinking_entry = entries
+            .iter()
+            .find(|entry| matches!(entry.entry_type, NormalizedEntryType::Thinking))
+            .expect("thinking entry should be present");
+        assert_eq!(thinking_entry.content, "Thinking");
+    }
+
+    #[test]
+    fn message_part_delta_for_unknown_part_is_ignored() {
+        let (mut state, msg_store) = new_state();
+        let worktree_path = Path::new("/tmp");
+
+        state.handle_sdk_event(
+            &json!({
+                "type": "message.part.delta",
+                "properties": {
+                    "sessionID": "session-1",
+                    "messageID": "message-3",
+                    "partID": "unknown-part",
+                    "field": "text",
+                    "delta": "ignored"
+                }
+            }),
+            worktree_path,
+            &msg_store,
+        );
+
+        let entries = collect_entries(&msg_store);
+        assert!(entries.is_empty());
     }
 }

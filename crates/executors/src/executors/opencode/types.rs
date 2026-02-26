@@ -34,6 +34,7 @@ pub(super) struct SdkEventEnvelope {
 pub(super) enum SdkEvent {
     MessageUpdated(MessageUpdatedEvent),
     MessagePartUpdated(MessagePartUpdatedEvent),
+    MessagePartDelta(MessagePartDeltaEvent),
     MessageRemoved,
     MessagePartRemoved,
     PermissionAsked(PermissionAskedEvent),
@@ -59,6 +60,9 @@ impl SdkEvent {
             }
             "message.part.updated" => {
                 SdkEvent::MessagePartUpdated(serde_json::from_value(envelope.properties).ok()?)
+            }
+            "message.part.delta" => {
+                SdkEvent::MessagePartDelta(serde_json::from_value(envelope.properties).ok()?)
             }
             "message.removed" => SdkEvent::MessageRemoved,
             "message.part.removed" => SdkEvent::MessagePartRemoved,
@@ -146,6 +150,20 @@ pub(super) struct MessagePartUpdatedEvent {
 }
 
 #[derive(Debug, Deserialize)]
+pub(super) struct MessagePartDeltaEvent {
+    #[serde(rename = "sessionID", default)]
+    #[allow(dead_code)]
+    pub(super) session_id: Option<String>,
+    #[serde(rename = "messageID")]
+    pub(super) message_id: String,
+    #[serde(rename = "partID")]
+    pub(super) part_id: String,
+    pub(super) field: String,
+    #[serde(default)]
+    pub(super) delta: String,
+}
+
+#[derive(Debug, Deserialize)]
 pub(super) struct PermissionAskedEvent {
     #[allow(dead_code)]
     pub(super) id: String,
@@ -211,6 +229,8 @@ pub(super) enum Part {
 
 #[derive(Debug, Deserialize)]
 pub(super) struct TextPart {
+    #[serde(default)]
+    pub(super) id: Option<String>,
     #[serde(rename = "messageID")]
     pub(super) message_id: String,
     pub(super) text: String,
@@ -221,6 +241,8 @@ pub(super) type ReasoningPart = TextPart;
 
 #[derive(Debug, Deserialize)]
 pub(super) struct ToolPart {
+    #[serde(default)]
+    pub(super) id: Option<String>,
     #[serde(rename = "messageID")]
     pub(super) message_id: String,
     #[serde(rename = "callID")]
@@ -303,5 +325,37 @@ impl<'de> Deserialize<'de> for SdkError {
     {
         let raw = Value::deserialize(deserializer)?;
         Ok(Self { raw })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::SdkEvent;
+
+    #[test]
+    fn parses_message_part_delta_event() {
+        let raw = json!({
+            "type": "message.part.delta",
+            "properties": {
+                "sessionID": "session-1",
+                "messageID": "message-1",
+                "partID": "part-1",
+                "field": "text",
+                "delta": "hello"
+            }
+        });
+
+        let event = SdkEvent::parse(&raw).expect("message.part.delta should parse");
+        let SdkEvent::MessagePartDelta(event) = event else {
+            panic!("expected message.part.delta variant");
+        };
+
+        assert_eq!(event.session_id.as_deref(), Some("session-1"));
+        assert_eq!(event.message_id, "message-1");
+        assert_eq!(event.part_id, "part-1");
+        assert_eq!(event.field, "text");
+        assert_eq!(event.delta, "hello");
     }
 }

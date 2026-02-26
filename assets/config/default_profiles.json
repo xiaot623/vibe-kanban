@@ -101,18 +101,21 @@
     "OPENCODE": {
       "DEFAULT": {
         "OPENCODE": {
-          "auto_approve": true
+          "auto_approve": true,
+          "model": "opencode/big-pickle"
         }
       },
       "PLAN": {
         "OPENCODE": {
           "mode": "plan",
-          "auto_approve": true
+          "auto_approve": true,
+          "model": "opencode/big-pickle"
         }
       },
       "APPROVALS": {
         "OPENCODE": {
-          "auto_approve": false
+          "auto_approve": false,
+          "model": "opencode/big-pickle"
         }
       }
     },
