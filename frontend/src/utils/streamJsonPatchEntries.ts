@@ -3,16 +3,27 @@ import { applyPatch, type Operation } from 'rfc6902';
 
 type PatchContainer<E = unknown> = { entries: E[] };
 
+interface StreamUpdateMeta {
+  lastSeq?: number;
+  appliedOps: number;
+}
+
+interface StreamFinishedMeta {
+  lastSeq?: number;
+}
+
 export interface StreamOptions<E = unknown> {
   initial?: PatchContainer<E>;
+  /** batch window in ms (defaults to 24ms) */
+  batchWindowMs?: number;
   /** called after each successful patch application */
-  onEntries?: (entries: E[]) => void;
+  onEntries?: (entries: E[], meta: StreamUpdateMeta) => void;
   onConnect?: () => void;
   onError?: (err: unknown) => void;
   /** called once when the socket closes */
   onClose?: () => void;
   /** called once when a "finished" event is received */
-  onFinished?: (entries: E[]) => void;
+  onFinished?: (entries: E[], meta: StreamFinishedMeta) => void;
 }
 
 interface StreamController<E = unknown> {
@@ -20,6 +31,8 @@ interface StreamController<E = unknown> {
   getEntries(): E[];
   /** Full { entries } snapshot */
   getSnapshot(): PatchContainer<E>;
+  /** Last rowid cursor observed from the server, if present */
+  getLastSeq(): number | undefined;
   /** Best-effort connection state */
   isConnected(): boolean;
   /** Subscribe to updates; returns an unsubscribe function */
@@ -27,6 +40,8 @@ interface StreamController<E = unknown> {
   /** Close the stream */
   close(): void;
 }
+
+const DEFAULT_BATCH_WINDOW_MS = 24;
 
 /**
  * Connect to a WebSocket endpoint that emits JSON messages containing:
@@ -39,13 +54,18 @@ export function streamJsonPatchEntries<E = unknown>(
   url: string,
   opts: StreamOptions<E> = {}
 ): StreamController<E> {
+  const batchWindowMs = Math.max(1, opts.batchWindowMs ?? DEFAULT_BATCH_WINDOW_MS);
   let connected = false;
   let snapshot: PatchContainer<E> = structuredClone(
     opts.initial ?? ({ entries: [] } as PatchContainer<E>)
   );
+  let lastSeq: number | undefined;
+  let pendingOps: Operation[] = [];
+  let flushScheduled = false;
+  let rafId: number | null = null;
+  let timerId: number | null = null;
 
   const subscribers = new Set<(entries: E[]) => void>();
-  if (opts.onEntries) subscribers.add(opts.onEntries);
   let closed = false;
   let closeNotified = false;
 
@@ -60,13 +80,83 @@ export function streamJsonPatchEntries<E = unknown>(
     opts.onClose?.();
   };
 
-  const notify = () => {
-    for (const cb of subscribers) {
-      try {
-        cb(snapshot.entries);
-      } catch {
-        /* swallow subscriber errors */
+  const cancelScheduledFlush = () => {
+    if (rafId !== null && typeof window !== 'undefined') {
+      window.cancelAnimationFrame(rafId);
+    }
+    if (timerId !== null && typeof window !== 'undefined') {
+      window.clearTimeout(timerId);
+    }
+    rafId = null;
+    timerId = null;
+    flushScheduled = false;
+  };
+
+  const flushPendingOps = () => {
+    if (pendingOps.length === 0) return;
+
+    const ops = pendingOps;
+    pendingOps = [];
+
+    try {
+      const next = structuredClone(snapshot);
+      applyPatch(next as unknown as object, ops);
+      snapshot = next;
+
+      opts.onEntries?.(snapshot.entries, {
+        lastSeq,
+        appliedOps: ops.length,
+      });
+      for (const cb of subscribers) {
+        try {
+          cb(snapshot.entries);
+        } catch {
+          /* swallow subscriber errors */
+        }
       }
+    } catch (err) {
+      opts.onError?.(err);
+    }
+  };
+
+  const scheduleFlush = () => {
+    if (flushScheduled) return;
+    flushScheduled = true;
+
+    if (
+      typeof window !== 'undefined' &&
+      typeof window.requestAnimationFrame === 'function'
+    ) {
+      rafId = window.requestAnimationFrame(() => {
+        rafId = null;
+        if (!flushScheduled) return;
+        flushScheduled = false;
+        if (timerId !== null) {
+          window.clearTimeout(timerId);
+          timerId = null;
+        }
+        flushPendingOps();
+      });
+
+      timerId = window.setTimeout(() => {
+        if (!flushScheduled) return;
+        flushScheduled = false;
+        if (rafId !== null) {
+          window.cancelAnimationFrame(rafId);
+          rafId = null;
+        }
+        timerId = null;
+        flushPendingOps();
+      }, batchWindowMs);
+      return;
+    }
+
+    if (typeof window !== 'undefined') {
+      timerId = window.setTimeout(() => {
+        flushScheduled = false;
+        timerId = null;
+        flushPendingOps();
+      }, batchWindowMs);
     }
   };
 
@@ -74,22 +164,25 @@ export function streamJsonPatchEntries<E = unknown>(
     try {
       const msg = JSON.parse(event.data);
 
+      if (typeof msg.seq === 'number' && Number.isFinite(msg.seq)) {
+        lastSeq = msg.seq;
+      }
+
       // Handle JsonPatch messages (from LogMsg::to_ws_message)
       if (msg.JsonPatch) {
         const raw = msg.JsonPatch as Operation[];
         const ops = dedupeOps(raw);
-
-        // Apply to a working copy (applyPatch mutates)
-        const next = structuredClone(snapshot);
-        applyPatch(next as unknown as object, ops);
-
-        snapshot = next;
-        notify();
+        if (ops.length > 0) {
+          pendingOps.push(...ops);
+          scheduleFlush();
+        }
       }
 
       // Handle Finished messages
       if (msg.finished !== undefined) {
-        opts.onFinished?.(snapshot.entries);
+        cancelScheduledFlush();
+        flushPendingOps();
+        opts.onFinished?.(snapshot.entries, { lastSeq });
         ws.close();
       }
     } catch (err) {
@@ -106,12 +199,15 @@ export function streamJsonPatchEntries<E = unknown>(
 
   ws.addEventListener('error', (err) => {
     connected = false;
+    cancelScheduledFlush();
     opts.onError?.(err);
   });
 
   ws.addEventListener('close', () => {
     connected = false;
     closed = true;
+    cancelScheduledFlush();
+    flushPendingOps();
     notifyClose();
   });
 
@@ -121,6 +217,9 @@ export function streamJsonPatchEntries<E = unknown>(
     },
     getSnapshot(): PatchContainer<E> {
       return snapshot;
+    },
+    getLastSeq(): number | undefined {
+      return lastSeq;
     },
     isConnected(): boolean {
       return connected;
@@ -138,6 +237,8 @@ export function streamJsonPatchEntries<E = unknown>(
       }
       closed = true;
       connected = false;
+      cancelScheduledFlush();
+      pendingOps = [];
       if (
         ws.readyState === WebSocket.CLOSING ||
         ws.readyState === WebSocket.CLOSED

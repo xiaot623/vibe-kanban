@@ -16,7 +16,8 @@ use db::models::{
 use deployment::Deployment;
 use futures_util::{SinkExt, StreamExt, TryStreamExt};
 use serde::Deserialize;
-use services::services::container::ContainerService;
+use serde_json::json;
+use services::services::container::{ContainerService, StreamedLogMsg};
 use utils::{log_msg::LogMsg, response::ApiResponse};
 use uuid::Uuid;
 
@@ -30,6 +31,60 @@ pub struct SessionExecutionProcessQuery {
     pub show_soft_deleted: Option<bool>,
 }
 
+#[derive(Debug, Deserialize, Default)]
+pub struct LogStreamCursorQuery {
+    pub after_seq: Option<i64>,
+    pub limit: Option<u32>,
+}
+
+const DEFAULT_LOG_STREAM_LIMIT: u32 = 400;
+const MAX_LOG_STREAM_LIMIT: u32 = 1000;
+
+impl LogStreamCursorQuery {
+    fn normalized_limit(&self) -> u32 {
+        self.limit
+            .unwrap_or(DEFAULT_LOG_STREAM_LIMIT)
+            .clamp(1, MAX_LOG_STREAM_LIMIT)
+    }
+}
+
+fn patch_to_ws_message(patch: serde_json::Value, seq: Option<i64>) -> axum::extract::ws::Message {
+    let payload = if let Some(seq) = seq {
+        json!({
+            "JsonPatch": patch,
+            "seq": seq,
+        })
+    } else {
+        json!({
+            "JsonPatch": patch,
+        })
+    };
+
+    axum::extract::ws::Message::Text(payload.to_string().into())
+}
+
+fn raw_log_to_patch(msg: LogMsg) -> Option<serde_json::Value> {
+    match msg {
+        LogMsg::Stdout(content) => Some(json!([{
+            "op": "add",
+            "path": "/entries/-",
+            "value": {
+                "type": "STDOUT",
+                "content": content,
+            }
+        }])),
+        LogMsg::Stderr(content) => Some(json!([{
+            "op": "add",
+            "path": "/entries/-",
+            "value": {
+                "type": "STDERR",
+                "content": content,
+            }
+        }])),
+        _ => None,
+    }
+}
+
 pub async fn get_execution_process_by_id(
     Extension(execution_process): Extension<ExecutionProcess>,
     State(_deployment): State<DeploymentImpl>,
@@ -41,18 +96,13 @@ pub async fn stream_raw_logs_ws(
     ws: WebSocketUpgrade,
     State(deployment): State<DeploymentImpl>,
     Path(exec_id): Path<Uuid>,
+    Query(query): Query<LogStreamCursorQuery>,
 ) -> Result<impl IntoResponse, ApiError> {
-    // Check if the stream exists before upgrading the WebSocket
-    let _stream = deployment
-        .container()
-        .stream_raw_logs(&exec_id)
-        .await
-        .ok_or_else(|| {
-            ApiError::ExecutionProcess(ExecutionProcessError::ExecutionProcessNotFound)
-        })?;
+    let after_seq = query.after_seq;
+    let limit = query.normalized_limit();
 
     Ok(ws.on_upgrade(move |socket| async move {
-        if let Err(e) = handle_raw_logs_ws(socket, deployment, exec_id).await {
+        if let Err(e) = handle_raw_logs_ws(socket, deployment, exec_id, after_seq, limit).await {
             tracing::warn!("raw logs WS closed: {}", e);
         }
     }))
@@ -62,39 +112,21 @@ async fn handle_raw_logs_ws(
     socket: WebSocket,
     deployment: DeploymentImpl,
     exec_id: Uuid,
+    after_seq: Option<i64>,
+    limit: u32,
 ) -> anyhow::Result<()> {
-    use std::sync::{
-        Arc,
-        atomic::{AtomicUsize, Ordering},
-    };
-
-    use executors::logs::utils::patch::ConversationPatch;
-    use utils::log_msg::LogMsg;
-
     // Get the raw stream and convert to JSON patches on-the-fly
     let raw_stream = deployment
         .container()
-        .stream_raw_logs(&exec_id)
+        .stream_raw_logs(&exec_id, after_seq, limit)
         .await
         .ok_or_else(|| anyhow::anyhow!("Execution process not found"))?;
 
-    let counter = Arc::new(AtomicUsize::new(0));
-    let mut stream = raw_stream.map_ok({
-        let counter = counter.clone();
-        move |m| match m {
-            LogMsg::Stdout(content) => {
-                let index = counter.fetch_add(1, Ordering::SeqCst);
-                let patch = ConversationPatch::add_stdout(index, content);
-                LogMsg::JsonPatch(patch).to_ws_message_unchecked()
-            }
-            LogMsg::Stderr(content) => {
-                let index = counter.fetch_add(1, Ordering::SeqCst);
-                let patch = ConversationPatch::add_stderr(index, content);
-                LogMsg::JsonPatch(patch).to_ws_message_unchecked()
-            }
-            LogMsg::Finished => LogMsg::Finished.to_ws_message_unchecked(),
-            _ => unreachable!("Raw stream should only have Stdout/Stderr/Finished"),
-        }
+    let mut stream = raw_stream.map_ok(|m| match m.msg {
+        LogMsg::Finished => LogMsg::Finished.to_ws_message_unchecked(),
+        other => raw_log_to_patch(other)
+            .map(|patch| patch_to_ws_message(patch, m.seq))
+            .unwrap_or_else(|| LogMsg::Finished.to_ws_message_unchecked()),
     });
 
     // Split socket into sender and receiver
@@ -124,10 +156,11 @@ pub async fn stream_normalized_logs_ws(
     ws: WebSocketUpgrade,
     State(deployment): State<DeploymentImpl>,
     Path(exec_id): Path<Uuid>,
+    Query(query): Query<LogStreamCursorQuery>,
 ) -> Result<impl IntoResponse, ApiError> {
     let stream = deployment
         .container()
-        .stream_normalized_logs(&exec_id)
+        .stream_normalized_logs(&exec_id, query.after_seq, query.normalized_limit())
         .await
         .ok_or_else(|| {
             ApiError::ExecutionProcess(ExecutionProcessError::ExecutionProcessNotFound)
@@ -145,9 +178,16 @@ pub async fn stream_normalized_logs_ws(
 
 async fn handle_normalized_logs_ws(
     socket: WebSocket,
-    stream: impl futures_util::Stream<Item = anyhow::Result<LogMsg>> + Unpin + Send + 'static,
+    stream: impl futures_util::Stream<Item = anyhow::Result<StreamedLogMsg>> + Unpin + Send + 'static,
 ) -> anyhow::Result<()> {
-    let mut stream = stream.map_ok(|msg| msg.to_ws_message_unchecked());
+    let mut stream = stream.map_ok(|msg| match msg.msg {
+        LogMsg::JsonPatch(patch) => patch_to_ws_message(
+            serde_json::to_value(patch).unwrap_or_else(|_| json!([])),
+            msg.seq,
+        ),
+        LogMsg::Finished => LogMsg::Finished.to_ws_message_unchecked(),
+        other => other.to_ws_message_unchecked(),
+    });
     let (mut sender, mut receiver) = socket.split();
     tokio::spawn(async move { while let Some(Ok(_)) = receiver.next().await {} });
     while let Some(item) = stream.next().await {

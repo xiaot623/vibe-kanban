@@ -49,6 +49,8 @@ interface UseConversationHistoryResult {}
 
 const MIN_INITIAL_ENTRIES = 10;
 const REMAINING_BATCH_SIZE = 50;
+const HISTORIC_LOG_PAGE_LIMIT = 400;
+const MAX_HISTORIC_LOG_PAGES = 200;
 class StreamCancelledError extends Error {
   constructor() {
     super('stream-cancelled');
@@ -171,6 +173,40 @@ export const useConversationHistory = ({
     onEntriesUpdatedRef.current = onEntriesUpdated;
   }, [onEntriesUpdated]);
 
+  const isConversationExecutorAction = useCallback((action: ExecutorAction) => {
+    return (
+      action.typ.type === 'CodingAgentFollowUpRequest' ||
+      action.typ.type === 'CodingAgentInitialRequest' ||
+      action.typ.type === 'ReviewRequest'
+    );
+  }, []);
+
+  const buildLogStreamUrl = useCallback(
+    (
+      executionProcess: ExecutionProcess,
+      afterSeq?: number
+    ): { url: string; supportsCursor: boolean } => {
+      if (executionProcess.executor_action.typ.type === 'ScriptRequest') {
+        return {
+          url: `/api/execution-processes/${executionProcess.id}/raw-logs/ws`,
+          supportsCursor: false,
+        };
+      }
+
+      const params = new URLSearchParams();
+      params.set('limit', String(HISTORIC_LOG_PAGE_LIMIT));
+      if (afterSeq !== undefined) {
+        params.set('after_seq', String(afterSeq));
+      }
+
+      return {
+        url: `/api/execution-processes/${executionProcess.id}/normalized-logs/ws?${params.toString()}`,
+        supportsCursor: true,
+      };
+    },
+    []
+  );
+
   // Keep executionProcesses up to date
   useEffect(() => {
     executionProcesses.current = executionProcessesRaw.filter(
@@ -182,61 +218,91 @@ export const useConversationHistory = ({
   }, [executionProcessesRaw]);
 
   const loadEntriesForHistoricExecutionProcess = useCallback(
-    (executionProcess: ExecutionProcess, generation: number) => {
+    async (executionProcess: ExecutionProcess, generation: number) => {
       if (!isGenerationCurrent(generation)) {
-        return Promise.resolve<PatchType[]>([]);
+        return [];
       }
 
-      let url = '';
-      if (executionProcess.executor_action.typ.type === 'ScriptRequest') {
-        url = `/api/execution-processes/${executionProcess.id}/raw-logs/ws`;
-      } else {
-        url = `/api/execution-processes/${executionProcess.id}/normalized-logs/ws`;
-      }
+      let accumulatedEntries: PatchType[] = [];
+      let afterSeq: number | undefined;
 
-      return new Promise<PatchType[]>((resolve) => {
-        let settled = false;
-        let unregisterCancel: () => void = () => {};
+      for (let page = 0; page < MAX_HISTORIC_LOG_PAGES; page++) {
+        if (!isGenerationCurrent(generation)) {
+          return [];
+        }
 
-        const settle = (entries: PatchType[]) => {
-          if (settled) return;
-          settled = true;
-          unregisterCancel();
-          resolve(entries);
-        };
+        const { url, supportsCursor } = buildLogStreamUrl(
+          executionProcess,
+          afterSeq
+        );
+        const initialEntries = accumulatedEntries;
+        const pageResult = await new Promise<{
+          entries: PatchType[];
+          lastSeq?: number;
+        }>((resolve) => {
+          let settled = false;
+          let unregisterCancel: () => void = () => {};
 
-        const controller = streamJsonPatchEntries<PatchType>(url, {
-          onFinished: (allEntries) => {
-            if (!isGenerationCurrent(generation)) {
-              settle([]);
-              return;
-            }
-            settle(allEntries);
-          },
-          onError: (err) => {
-            if (!isGenerationCurrent(generation)) {
+          const settle = (entries: PatchType[], lastSeq?: number) => {
+            if (settled) return;
+            settled = true;
+            unregisterCancel();
+            resolve({ entries, lastSeq });
+          };
+
+          const controller = streamJsonPatchEntries<PatchType>(url, {
+            initial: {
+              entries: initialEntries,
+            },
+            onFinished: (allEntries, meta) => {
+              if (!isGenerationCurrent(generation)) {
+                settle([], meta.lastSeq);
+                return;
+              }
+              settle(allEntries, meta.lastSeq);
+            },
+            onError: (err) => {
+              if (!isGenerationCurrent(generation)) {
+                controller.close();
+                settle([], controller.getLastSeq());
+                return;
+              }
+              console.warn!(
+                `Error loading entries for historic execution process ${executionProcess.id}`,
+                err
+              );
               controller.close();
-              settle([]);
-              return;
-            }
-            console.warn!(
-              `Error loading entries for historic execution process ${executionProcess.id}`,
-              err
-            );
-            controller.close();
-            settle([]);
-          },
-          onClose: () => {
-            settle([]);
-          },
+              settle(initialEntries, controller.getLastSeq());
+            },
+            onClose: () => {
+              settle(initialEntries);
+            },
+          });
+
+          unregisterCancel = registerActiveStreamCancel(executionProcess.id, () =>
+            controller.close()
+          );
         });
 
-        unregisterCancel = registerActiveStreamCancel(executionProcess.id, () =>
-          controller.close()
-        );
-      });
+        if (!isGenerationCurrent(generation)) {
+          return [];
+        }
+
+        accumulatedEntries = pageResult.entries;
+
+        if (!supportsCursor || pageResult.lastSeq === undefined) {
+          break;
+        }
+        if (afterSeq !== undefined && pageResult.lastSeq <= afterSeq) {
+          break;
+        }
+
+        afterSeq = pageResult.lastSeq;
+      }
+
+      return accumulatedEntries;
     },
-    [isGenerationCurrent, registerActiveStreamCancel]
+    [buildLogStreamUrl, isGenerationCurrent, registerActiveStreamCancel]
   );
 
   const getLiveExecutionProcess = (
@@ -259,27 +325,18 @@ export const useConversationHistory = ({
     };
   };
 
-  const flattenEntries = (
-    executionProcessState: ExecutionProcessStateStore
-  ): PatchTypeWithKey[] => {
-    return Object.values(executionProcessState)
-      .filter(
-        (p) =>
-          p.executionProcess.executor_action.typ.type ===
-            'CodingAgentFollowUpRequest' ||
-          p.executionProcess.executor_action.typ.type ===
-            'CodingAgentInitialRequest' ||
-          p.executionProcess.executor_action.typ.type === 'ReviewRequest'
-      )
-      .sort(
-        (a, b) =>
-          new Date(
-            a.executionProcess.created_at as unknown as string
-          ).getTime() -
-          new Date(b.executionProcess.created_at as unknown as string).getTime()
-      )
-      .flatMap((p) => p.entries);
-  };
+  const countConversationEntries = useCallback(
+    (executionProcessState: ExecutionProcessStateStore): number => {
+      let count = 0;
+      for (const processState of Object.values(executionProcessState)) {
+        if (isConversationExecutorAction(processState.executionProcess.executor_action)) {
+          count += processState.entries.length;
+        }
+      }
+      return count;
+    },
+    [isConversationExecutorAction]
+  );
 
   const getActiveAgentProcesses = (): ExecutionProcess[] => {
     return (
@@ -300,18 +357,15 @@ export const useConversationHistory = ({
       let needsSetup = false;
       let setupHelpText: string | undefined;
 
+      const orderedProcesses = Object.values(executionProcessState).sort(
+        (a, b) =>
+          new Date(a.executionProcess.created_at as unknown as string).getTime() -
+          new Date(b.executionProcess.created_at as unknown as string).getTime()
+      );
+      const processCount = orderedProcesses.length;
+
       // Create user messages + tool calls for setup/cleanup scripts
-      const allEntries = Object.values(executionProcessState)
-        .sort(
-          (a, b) =>
-            new Date(
-              a.executionProcess.created_at as unknown as string
-            ).getTime() -
-            new Date(
-              b.executionProcess.created_at as unknown as string
-            ).getTime()
-        )
-        .flatMap((p, index) => {
+      const allEntries = orderedProcesses.flatMap((p, index) => {
           const entries: PatchTypeWithKey[] = [];
           if (
             p.executionProcess.executor_action.typ.type ===
@@ -379,7 +433,7 @@ export const useConversationHistory = ({
 
             if (
               processFailedOrKilled &&
-              index === Object.keys(executionProcessState).length - 1
+              index === processCount - 1
             ) {
               lastProcessFailedOrKilled = true;
 
@@ -434,7 +488,7 @@ export const useConversationHistory = ({
             if (
               (executionProcess?.status === ExecutionProcessStatus.failed ||
                 executionProcess?.status === ExecutionProcessStatus.killed) &&
-              index === Object.keys(executionProcessState).length - 1
+              index === processCount - 1
             ) {
               lastProcessFailedOrKilled = true;
             }
@@ -495,7 +549,7 @@ export const useConversationHistory = ({
         allEntries.push(
           nextActionPatch(
             lastProcessFailedOrKilled,
-            Object.keys(executionProcessState).length,
+            processCount,
             needsSetup,
             setupHelpText
           )
@@ -675,6 +729,7 @@ export const useConversationHistory = ({
   const loadInitialEntries = useCallback(
     async (generation: number): Promise<ExecutionProcessStateStore> => {
       const localDisplayedExecutionProcesses: ExecutionProcessStateStore = {};
+      let conversationEntryCount = 0;
 
       if (!executionProcesses?.current || !isGenerationCurrent(generation)) {
         return localDisplayedExecutionProcesses;
@@ -701,10 +756,11 @@ export const useConversationHistory = ({
           entries: entriesWithKey,
         };
 
-        if (
-          flattenEntries(localDisplayedExecutionProcesses).length >
-          MIN_INITIAL_ENTRIES
-        ) {
+        if (isConversationExecutorAction(executionProcess.executor_action)) {
+          conversationEntryCount += entriesWithKey.length;
+        }
+
+        if (conversationEntryCount > MIN_INITIAL_ENTRIES) {
           break;
         }
       }
@@ -714,6 +770,7 @@ export const useConversationHistory = ({
     [
       executionProcesses,
       isGenerationCurrent,
+      isConversationExecutorAction,
       loadEntriesForHistoricExecutionProcess,
     ]
   );
@@ -725,6 +782,9 @@ export const useConversationHistory = ({
       }
 
       let anyUpdated = false;
+      let conversationEntryCount = countConversationEntries(
+        displayedExecutionProcesses.current
+      );
       for (const executionProcess of [
         ...executionProcesses.current,
       ].reverse()) {
@@ -752,9 +812,11 @@ export const useConversationHistory = ({
           };
         });
 
-        if (
-          flattenEntries(displayedExecutionProcesses.current).length > batchSize
-        ) {
+        if (isConversationExecutorAction(executionProcess.executor_action)) {
+          conversationEntryCount += entriesWithKey.length;
+        }
+
+        if (conversationEntryCount > batchSize) {
           anyUpdated = true;
           break;
         }
@@ -763,8 +825,10 @@ export const useConversationHistory = ({
       return anyUpdated;
     },
     [
+      countConversationEntries,
       executionProcesses,
       isGenerationCurrent,
+      isConversationExecutorAction,
       loadEntriesForHistoricExecutionProcess,
     ]
   );

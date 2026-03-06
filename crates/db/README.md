@@ -57,6 +57,7 @@ Records individual processes run within a session.
 Stores logs for execution processes in JSONL format.
 - `execution_id`: The process these logs belong to.
 - `logs`: Log content.
+- `msg_type`: Optional message type for fast-path reads (e.g. `stdout`, `stderr`, `json_patch`).
 
 ### 10. Coding Agent Turns (`coding_agent_turns`)
 Specific to coding agents, tracking individual interaction turns.

@@ -14,7 +14,7 @@ use db::{
             CreateExecutionProcess, ExecutionContext, ExecutionProcess, ExecutionProcessRunReason,
             ExecutionProcessStatus,
         },
-        execution_process_logs::ExecutionProcessLogs,
+        execution_process_logs::{ExecutionProcessLogs, NewExecutionProcessLog},
         execution_process_repo_state::{
             CreateExecutionProcessRepoState, ExecutionProcessRepoState,
         },
@@ -39,10 +39,14 @@ use executors::{
     logs::{NormalizedEntry, NormalizedEntryError, NormalizedEntryType, utils::ConversationPatch},
     profile::ExecutorProfileId,
 };
-use futures::{StreamExt, future};
+use futures::{StreamExt, TryStreamExt, future};
 use sqlx::Error as SqlxError;
 use thiserror::Error;
-use tokio::{sync::RwLock, task::JoinHandle};
+use tokio::{
+    sync::RwLock,
+    task::JoinHandle,
+    time::{Duration, Instant, MissedTickBehavior},
+};
 use utils::{
     log_msg::LogMsg,
     msg_store::MsgStore,
@@ -80,6 +84,36 @@ pub enum ContainerError {
     KillFailed(std::io::Error),
     #[error(transparent)]
     Other(#[from] AnyhowError), // Catches any unclassified errors
+}
+
+#[derive(Debug, Clone)]
+pub struct StreamedLogMsg {
+    pub msg: LogMsg,
+    pub seq: Option<i64>,
+}
+
+const LOG_DB_FLUSH_MAX_BATCH: usize = 64;
+const LOG_DB_FLUSH_INTERVAL: Duration = Duration::from_millis(250);
+
+async fn flush_execution_log_batch(
+    pool: &sqlx::SqlitePool,
+    execution_id: Uuid,
+    pending_logs: &mut Vec<NewExecutionProcessLog>,
+) {
+    if pending_logs.is_empty() {
+        return;
+    }
+
+    if let Err(e) = ExecutionProcessLogs::append_log_lines(pool, execution_id, pending_logs).await {
+        tracing::error!(
+            "Failed to flush {} log lines for execution {}: {}",
+            pending_logs.len(),
+            execution_id,
+            e
+        );
+    }
+
+    pending_logs.clear();
 }
 
 #[async_trait]
@@ -548,7 +582,9 @@ pub trait ContainerService {
     async fn stream_raw_logs(
         &self,
         id: &Uuid,
-    ) -> Option<futures::stream::BoxStream<'static, Result<LogMsg, std::io::Error>>> {
+        after_seq: Option<i64>,
+        limit: u32,
+    ) -> Option<futures::stream::BoxStream<'static, Result<StreamedLogMsg, std::io::Error>>> {
         if let Some(store) = self.get_msg_store_by_id(id).await {
             // First try in-memory store
             return Some(
@@ -560,21 +596,27 @@ pub trait ContainerService {
                             Ok(LogMsg::Stdout(..) | LogMsg::Stderr(..) | LogMsg::Finished)
                         ))
                     })
+                    .map_ok(|msg| StreamedLogMsg { msg, seq: None })
                     .boxed(),
             );
         } else {
-            // Fallback: load from DB and create direct stream
-            let log_records =
-                match ExecutionProcessLogs::find_by_execution_id(&self.db().pool, *id).await {
-                    Ok(records) if !records.is_empty() => records,
-                    Ok(_) => return None, // No logs exist
-                    Err(e) => {
-                        tracing::error!("Failed to fetch logs for execution {}: {}", id, e);
-                        return None;
-                    }
-                };
+            // Fallback: load a chunk from DB and create direct stream.
+            let log_records = match ExecutionProcessLogs::find_by_execution_id_with_cursor(
+                &self.db().pool,
+                *id,
+                after_seq,
+                limit,
+            )
+            .await
+            {
+                Ok(records) => records,
+                Err(e) => {
+                    tracing::error!("Failed to fetch logs for execution {}: {}", id, e);
+                    return None;
+                }
+            };
 
-            let messages = match ExecutionProcessLogs::parse_logs(&log_records) {
+            let messages = match ExecutionProcessLogs::parse_logs_with_seq(&log_records) {
                 Ok(msgs) => msgs,
                 Err(e) => {
                     tracing::error!("Failed to parse logs for execution {}: {}", id, e);
@@ -586,8 +628,15 @@ pub trait ContainerService {
             let stream = futures::stream::iter(
                 messages
                     .into_iter()
-                    .filter(|m| matches!(m, LogMsg::Stdout(_) | LogMsg::Stderr(_)))
-                    .chain(std::iter::once(LogMsg::Finished))
+                    .filter(|m| matches!(m.msg, LogMsg::Stdout(_) | LogMsg::Stderr(_)))
+                    .map(|msg| StreamedLogMsg {
+                        seq: Some(msg.seq),
+                        msg: msg.msg,
+                    })
+                    .chain(std::iter::once(StreamedLogMsg {
+                        msg: LogMsg::Finished,
+                        seq: None,
+                    }))
                     .map(Ok::<_, std::io::Error>),
             )
             .boxed();
@@ -599,24 +648,94 @@ pub trait ContainerService {
     async fn stream_normalized_logs(
         &self,
         id: &Uuid,
-    ) -> Option<futures::stream::BoxStream<'static, Result<LogMsg, std::io::Error>>> {
+        after_seq: Option<i64>,
+        limit: u32,
+    ) -> Option<futures::stream::BoxStream<'static, Result<StreamedLogMsg, std::io::Error>>> {
         // First try in-memory store (existing behavior)
         if let Some(store) = self.get_msg_store_by_id(id).await {
             Some(
                 store
                     .history_plus_stream() // BoxStream<Result<LogMsg, io::Error>>
                     .filter(|msg| future::ready(matches!(msg, Ok(LogMsg::JsonPatch(..)))))
+                    .map_ok(|msg| StreamedLogMsg { msg, seq: None })
                     .chain(futures::stream::once(async {
-                        Ok::<_, std::io::Error>(LogMsg::Finished)
+                        Ok::<_, std::io::Error>(StreamedLogMsg {
+                            msg: LogMsg::Finished,
+                            seq: None,
+                        })
                     }))
                     .boxed(),
             )
         } else {
-            // Fallback: load from DB and normalize
+            // Fast path for new data: read persisted JsonPatch rows directly.
+            let has_json_patch_logs = match ExecutionProcessLogs::has_logs_for_type(
+                &self.db().pool,
+                *id,
+                utils::log_msg::EV_JSON_PATCH,
+            )
+            .await
+            {
+                Ok(value) => value,
+                Err(e) => {
+                    tracing::error!("Failed to inspect logs for execution {}: {}", id, e);
+                    return None;
+                }
+            };
+
+            if has_json_patch_logs {
+                let records = match ExecutionProcessLogs::find_by_execution_id_with_cursor_and_type(
+                    &self.db().pool,
+                    *id,
+                    after_seq,
+                    limit,
+                    Some(utils::log_msg::EV_JSON_PATCH),
+                )
+                .await
+                {
+                    Ok(records) => records,
+                    Err(e) => {
+                        tracing::error!(
+                            "Failed to fetch json_patch logs for execution {}: {}",
+                            id,
+                            e
+                        );
+                        return None;
+                    }
+                };
+
+                let stream_messages = match ExecutionProcessLogs::parse_logs_with_seq(&records) {
+                    Ok(messages) => messages
+                        .into_iter()
+                        .filter_map(|msg| match msg.msg {
+                            LogMsg::JsonPatch(patch) => Some(StreamedLogMsg {
+                                msg: LogMsg::JsonPatch(patch),
+                                seq: Some(msg.seq),
+                            }),
+                            _ => None,
+                        })
+                        .chain(std::iter::once(StreamedLogMsg {
+                            msg: LogMsg::Finished,
+                            seq: None,
+                        }))
+                        .map(Ok::<_, std::io::Error>)
+                        .collect::<Vec<_>>(),
+                    Err(e) => {
+                        tracing::error!(
+                            "Failed to parse json_patch logs for execution {}: {}",
+                            id,
+                            e
+                        );
+                        return None;
+                    }
+                };
+
+                return Some(futures::stream::iter(stream_messages).boxed());
+            }
+
+            // Fallback for old rows without msg_type=json_patch: rebuild + normalize.
             let log_records =
                 match ExecutionProcessLogs::find_by_execution_id(&self.db().pool, *id).await {
-                    Ok(records) if !records.is_empty() => records,
-                    Ok(_) => return None, // No logs exist
+                    Ok(records) => records,
                     Err(e) => {
                         tracing::error!("Failed to fetch logs for execution {}: {}", id, e);
                         return None;
@@ -760,8 +879,12 @@ pub trait ContainerService {
                 temp_store
                     .history_plus_stream()
                     .filter(|msg| future::ready(matches!(msg, Ok(LogMsg::JsonPatch(..)))))
+                    .map_ok(|msg| StreamedLogMsg { msg, seq: None })
                     .chain(futures::stream::once(async {
-                        Ok::<_, std::io::Error>(LogMsg::Finished)
+                        Ok::<_, std::io::Error>(StreamedLogMsg {
+                            msg: LogMsg::Finished,
+                            seq: None,
+                        })
                     }))
                     .boxed(),
             )
@@ -782,61 +905,83 @@ pub trait ContainerService {
 
             if let Some(store) = store {
                 let mut stream = store.history_plus_stream();
+                let mut pending_logs: Vec<NewExecutionProcessLog> = Vec::new();
+                let mut flush_interval = tokio::time::interval_at(
+                    Instant::now() + LOG_DB_FLUSH_INTERVAL,
+                    LOG_DB_FLUSH_INTERVAL,
+                );
+                flush_interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
 
-                while let Some(Ok(msg)) = stream.next().await {
-                    match &msg {
-                        LogMsg::Stdout(_) | LogMsg::Stderr(_) => {
-                            // Serialize this individual message as a JSONL line
-                            match serde_json::to_string(&msg) {
-                                Ok(jsonl_line) => {
-                                    let jsonl_line_with_newline = format!("{jsonl_line}\n");
-
-                                    // Append this line to the database
-                                    if let Err(e) = ExecutionProcessLogs::append_log_line(
-                                        &db.pool,
-                                        execution_id,
-                                        &jsonl_line_with_newline,
-                                    )
-                                    .await
-                                    {
-                                        tracing::error!(
-                                            "Failed to append log line for execution {}: {}",
+                loop {
+                    tokio::select! {
+                        _ = flush_interval.tick() => {
+                            flush_execution_log_batch(&db.pool, execution_id, &mut pending_logs).await;
+                        }
+                        next = stream.next() => {
+                            match next {
+                                Some(Ok(msg)) => match &msg {
+                                    LogMsg::SessionId(agent_session_id) => {
+                                        if let Err(e) = CodingAgentTurn::update_agent_session_id(
+                                            &db.pool,
                                             execution_id,
-                                            e
-                                        );
+                                            agent_session_id,
+                                        )
+                                        .await
+                                        {
+                                            tracing::error!(
+                                                "Failed to update agent_session_id {} for execution process {}: {}",
+                                                agent_session_id,
+                                                execution_id,
+                                                e
+                                            );
+                                        }
                                     }
-                                }
-                                Err(e) => {
+                                    LogMsg::Finished => {
+                                        flush_execution_log_batch(&db.pool, execution_id, &mut pending_logs)
+                                            .await;
+                                        break;
+                                    }
+                                    _ => {
+                                        match serde_json::to_string(&msg) {
+                                            Ok(jsonl_line) => {
+                                                pending_logs.push(NewExecutionProcessLog {
+                                                    logs: format!("{jsonl_line}\n"),
+                                                    msg_type: Some(msg.name().to_string()),
+                                                });
+
+                                                if pending_logs.len() >= LOG_DB_FLUSH_MAX_BATCH {
+                                                    flush_execution_log_batch(
+                                                        &db.pool,
+                                                        execution_id,
+                                                        &mut pending_logs,
+                                                    )
+                                                    .await;
+                                                }
+                                            }
+                                            Err(e) => {
+                                                tracing::error!(
+                                                    "Failed to serialize log message for execution {}: {}",
+                                                    execution_id,
+                                                    e
+                                                );
+                                            }
+                                        }
+                                    }
+                                },
+                                Some(Err(e)) => {
                                     tracing::error!(
-                                        "Failed to serialize log message for execution {}: {}",
+                                        "Failed to read message stream for execution {}: {}",
                                         execution_id,
                                         e
                                     );
+                                    flush_execution_log_batch(&db.pool, execution_id, &mut pending_logs).await;
+                                    break;
+                                }
+                                None => {
+                                    flush_execution_log_batch(&db.pool, execution_id, &mut pending_logs).await;
+                                    break;
                                 }
                             }
-                        }
-                        LogMsg::SessionId(agent_session_id) => {
-                            // Append this line to the database
-                            if let Err(e) = CodingAgentTurn::update_agent_session_id(
-                                &db.pool,
-                                execution_id,
-                                agent_session_id,
-                            )
-                            .await
-                            {
-                                tracing::error!(
-                                    "Failed to update agent_session_id {} for execution process {}: {}",
-                                    agent_session_id,
-                                    execution_id,
-                                    e
-                                );
-                            }
-                        }
-                        LogMsg::Finished => {
-                            break;
-                        }
-                        LogMsg::JsonPatch(_) | LogMsg::Ready | LogMsg::Notification(_, _) => {
-                            continue;
                         }
                     }
                 }
@@ -1051,6 +1196,7 @@ pub trait ContainerService {
                     &self.db().pool,
                     execution_process.id,
                     &format!("{json_line}\n"),
+                    Some(log_message.name()),
                 )
                 .await;
             }
@@ -1074,6 +1220,7 @@ pub trait ContainerService {
                         &self.db().pool,
                         execution_process.id,
                         &format!("{json_line}\n"),
+                        Some(utils::log_msg::EV_JSON_PATCH),
                     )
                     .await;
                 }
