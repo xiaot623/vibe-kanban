@@ -130,7 +130,7 @@ pub fn task_detail_keyboard(task_id: Uuid, status: &TaskStatus) -> InlineKeyboar
 
 /// Build executor selection keyboard.
 pub fn executor_pick_keyboard(task_id: Uuid) -> InlineKeyboardMarkup {
-    let executors = ["CLAUDE_CODE", "CODEX", "GEMINI", "OPENCODE", "DROID"];
+    let executors = ["CLAUDE_CODE", "CODEX", "GEMINI", "OPENCODE", "DROID", "PI"];
     let mut rows: Vec<Vec<InlineKeyboardButton>> = Vec::new();
 
     // Two executors per row

@@ -20,7 +20,7 @@ use crate::{
     command::CommandBuildError,
     env::ExecutionEnv,
     executors::{
-        claude::ClaudeCode, codex::Codex, droid::Droid, gemini::Gemini, opencode::Opencode,
+        claude::ClaudeCode, codex::Codex, droid::Droid, gemini::Gemini, opencode::Opencode, pi::Pi,
     },
     mcp_config::McpConfig,
 };
@@ -31,6 +31,7 @@ pub mod codex;
 pub mod droid;
 pub mod gemini;
 pub mod opencode;
+pub mod pi;
 #[cfg(feature = "qa-mode")]
 pub mod qa_mock;
 
@@ -92,6 +93,7 @@ pub enum CodingAgent {
     Codex,
     Opencode,
     Droid,
+    Pi,
     #[cfg(feature = "qa-mode")]
     QaMock(QaMockExecutor),
 }
@@ -141,7 +143,11 @@ impl CodingAgent {
 
     pub fn capabilities(&self) -> Vec<BaseAgentCapability> {
         match self {
-            Self::ClaudeCode(_) | Self::Gemini(_) | Self::Droid(_) | Self::Opencode(_) => {
+            Self::ClaudeCode(_)
+            | Self::Gemini(_)
+            | Self::Droid(_)
+            | Self::Opencode(_)
+            | Self::Pi(_) => {
                 vec![BaseAgentCapability::SessionFork]
             }
             Self::Codex(_) => vec![

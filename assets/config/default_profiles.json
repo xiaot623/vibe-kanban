@@ -125,6 +125,19 @@
           "autonomy": "skip-permissions-unsafe"
         }
       }
+    },
+    "PI": {
+      "DEFAULT": {
+        "PI": {
+          "model": "gpt-5.3-codex"
+        }
+      },
+      "APPROVE": {
+        "PI": {
+          "model": "gpt-5.3-codex",
+          "approve": true
+        }
+      }
     }
   }
 }

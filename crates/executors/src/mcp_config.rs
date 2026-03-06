@@ -286,7 +286,7 @@ impl CodingAgent {
         use Adapter::*;
 
         let adapter = match self {
-            CodingAgent::ClaudeCode(_) | CodingAgent::Droid(_) => Passthrough,
+            CodingAgent::ClaudeCode(_) | CodingAgent::Droid(_) | CodingAgent::Pi(_) => Passthrough,
             CodingAgent::Gemini(_) => Gemini,
             CodingAgent::Codex(_) => Codex,
             CodingAgent::Opencode(_) => Opencode,

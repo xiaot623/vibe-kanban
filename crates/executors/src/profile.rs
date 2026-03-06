@@ -214,6 +214,28 @@ impl ExecutorConfigs {
                     match serde_json::from_str::<ExecutorConfigs>(&content) {
                         Ok(mut profiles) => {
                             profiles.canonicalise();
+                            let defaults = Self::from_defaults();
+                            if profiles
+                                .inject_missing_executor_configs(&defaults, &[BaseCodingAgent::Pi])
+                            {
+                                match serde_json::to_string_pretty(&profiles) {
+                                    Ok(updated_content) => {
+                                        if let Err(err) = fs::write(&profiles_path, updated_content)
+                                        {
+                                            tracing::warn!(
+                                                "Failed to persist injected executor profiles: {}",
+                                                err
+                                            );
+                                        }
+                                    }
+                                    Err(err) => {
+                                        tracing::warn!(
+                                            "Failed to serialize injected executor profiles: {}",
+                                            err
+                                        );
+                                    }
+                                }
+                            }
                             ProfileLoadResult {
                                 profiles,
                                 parse_error: None,
@@ -317,6 +339,41 @@ impl ExecutorConfigs {
             tracing::error!("Failed to parse embedded default_profiles.json: {}", e);
             panic!("Default profiles JSON is invalid")
         })
+    }
+
+    fn inject_missing_executor_configs(
+        &mut self,
+        defaults: &Self,
+        executors: &[BaseCodingAgent],
+    ) -> bool {
+        let mut changed = false;
+        for executor in executors {
+            let Some(default_executor_config) = defaults.executors.get(executor) else {
+                continue;
+            };
+
+            match self.executors.get_mut(executor) {
+                Some(existing_executor_config) => {
+                    for (variant, config) in &default_executor_config.configurations {
+                        if !existing_executor_config
+                            .configurations
+                            .contains_key(variant)
+                        {
+                            existing_executor_config
+                                .configurations
+                                .insert(variant.clone(), config.clone());
+                            changed = true;
+                        }
+                    }
+                }
+                None => {
+                    self.executors
+                        .insert(executor.clone(), default_executor_config.clone());
+                    changed = true;
+                }
+            }
+        }
+        changed
     }
 
     pub fn get_coding_agent(&self, executor_profile_id: &ExecutorProfileId) -> Option<CodingAgent> {

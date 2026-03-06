@@ -171,6 +171,7 @@ fn generate_types_content() -> String {
         executors::executors::codex::ReasoningSummaryFormat::decl(),
         executors::executors::opencode::Opencode::decl(),
         executors::executors::droid::Droid::decl(),
+        executors::executors::pi::Pi::decl(),
         executors::executors::droid::Autonomy::decl(),
         executors::executors::droid::ReasoningEffortLevel::decl(),
         executors::executors::AppendPrompt::decl(),
@@ -251,6 +252,10 @@ fn generate_schemas() -> Result<HashMap<&'static str, String>, serde_json::Error
         (
             "droid",
             generate_json_schema::<executors::executors::droid::Droid>()?,
+        ),
+        (
+            "pi",
+            generate_json_schema::<executors::executors::pi::Pi>()?,
         ),
     ]);
     println!(

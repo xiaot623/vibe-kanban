@@ -240,6 +240,7 @@ fn encode_executor_code(executor: &str) -> Option<&'static str> {
         "GEMINI" => Some("g"),
         "OPENCODE" => Some("o"),
         "DROID" => Some("d"),
+        "PI" => Some("i"),
         _ => None,
     }
 }
@@ -251,6 +252,7 @@ fn decode_executor_code(code: &str) -> Option<&'static str> {
         "g" => Some("GEMINI"),
         "o" => Some("OPENCODE"),
         "d" => Some("DROID"),
+        "i" => Some("PI"),
         _ => None,
     }
 }
