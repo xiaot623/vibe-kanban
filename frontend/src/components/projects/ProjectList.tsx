@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 
@@ -11,13 +11,24 @@ import { AlertCircle, Loader2, Plus } from 'lucide-react';
 import ProjectCard from '@/components/projects/ProjectCard.tsx';
 import { useKeyCreate, Scope } from '@/keyboard';
 import { useProjects } from '@/hooks/useProjects';
+import { useUserSystem } from '@/components/ConfigProvider';
 
 export function ProjectList() {
   const navigate = useNavigate();
   const { t } = useTranslation('projects');
   const { projects, isLoading, error: projectsError } = useProjects();
+  const { config } = useUserSystem();
   const [error, setError] = useState('');
   const [focusedProjectId, setFocusedProjectId] = useState<string | null>(null);
+
+  const visibleProjects = useMemo(() => {
+    const dailyProjectId = config?.daily_mode?.project_id;
+    if (!dailyProjectId) {
+      return projects;
+    }
+
+    return projects.filter((project) => project.id !== dailyProjectId);
+  }, [config?.daily_mode?.project_id, projects]);
 
   const handleCreateProject = async () => {
     try {
@@ -37,15 +48,18 @@ export function ProjectList() {
 
   // Set initial focus when projects are loaded
   useEffect(() => {
-    if (projects.length === 0) {
+    if (visibleProjects.length === 0) {
       setFocusedProjectId(null);
       return;
     }
 
-    if (!focusedProjectId || !projects.some((p) => p.id === focusedProjectId)) {
-      setFocusedProjectId(projects[0].id);
+    if (
+      !focusedProjectId ||
+      !visibleProjects.some((p) => p.id === focusedProjectId)
+    ) {
+      setFocusedProjectId(visibleProjects[0].id);
     }
-  }, [projects, focusedProjectId]);
+  }, [visibleProjects, focusedProjectId]);
 
   return (
     <div className="space-y-6 p-8 pb-16 md:pb-8 h-full overflow-auto">
@@ -74,7 +88,7 @@ export function ProjectList() {
           <Loader2 className="mr-2 h-4 w-4 animate-spin" />
           {t('loading')}
         </div>
-      ) : projects.length === 0 ? (
+      ) : visibleProjects.length === 0 ? (
         <Card>
           <CardContent className="py-12 text-center">
             <div className="mx-auto flex h-12 w-12 items-center justify-center rounded-lg bg-muted">
@@ -92,7 +106,7 @@ export function ProjectList() {
         </Card>
       ) : (
         <div className="grid gap-6 md:grid-cols-2 lg:grid-cols-3">
-          {projects.map((project) => (
+          {visibleProjects.map((project) => (
             <ProjectCard
               key={project.id}
               project={project}

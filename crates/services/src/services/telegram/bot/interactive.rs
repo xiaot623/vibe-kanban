@@ -352,16 +352,29 @@ async fn handle_dialogue_text(
         return Ok(());
     }
 
+    let text = msg.text().unwrap_or("").trim();
+    if text.is_empty() {
+        return Ok(());
+    }
+
+    // Unknown slash commands should not auto-create tasks.
+    if text.starts_with('/') {
+        return Ok(());
+    }
+
     let state = match dialogue.get().await {
         Ok(Some(state)) => state,
-        _ => return Ok(()), // No active dialogue — ignore plain text
+        _ => DialogueState::Idle,
     };
-
-    let text = msg.text().unwrap_or("").trim();
 
     match state {
         DialogueState::Idle => {
-            // Not in a dialogue — ignore
+            // No active dialogue: treat plain text as a Daily task.
+            if let Err(err) = service.create_daily_task_from_message(text).await {
+                bot.send_message(msg.chat.id, err)
+                    .reply_markup(keyboard::home_only_keyboard())
+                    .await?;
+            }
         }
         DialogueState::CreatingTaskTitle {
             project_id,

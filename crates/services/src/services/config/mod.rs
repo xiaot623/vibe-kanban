@@ -38,6 +38,7 @@ pub type GitHubConfig = versions::v2::GitHubConfig;
 pub type UiLanguage = versions::v2::UiLanguage;
 pub type ShowcaseState = versions::v2::ShowcaseState;
 pub type ProxyConfig = versions::v2::ProxyConfig;
+pub type DailyModeConfig = versions::v2::DailyModeConfig;
 pub type TelegramConfig = versions::v2::TelegramConfig;
 pub type McpServerConfig = versions::v2::McpServerConfig;
 pub type PowerMode = versions::v2::PowerMode;

@@ -140,6 +140,7 @@ fn generate_types_content() -> String {
         services::services::config::PowerMode::decl(),
         services::services::config::ShowcaseState::decl(),
         services::services::config::ProxyConfig::decl(),
+        services::services::config::DailyModeConfig::decl(),
         services::services::config::TelegramConfig::decl(),
         services::services::config::McpServerConfig::decl(),
         services::services::git::GitBranch::decl(),

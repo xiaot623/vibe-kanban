@@ -45,6 +45,9 @@
     "https_proxy": null,
     "no_proxy": null
   },
+  "daily_mode": {
+    "project_id": null
+  },
   "telegram": {
     "enabled": false,
     "interactive_bot": true,

@@ -137,7 +137,10 @@ impl TelegramHandler for TaskCreatedHandler {
         if tg.interactive_bot {
             let result = tg
                 .bot
-                .send_message(tg.chat_id, format!("✅ Task created: {}", task.title))
+                .send_message(
+                    tg.chat_id,
+                    format!("✅ Task created: {}\n\nRun it now?", task.title),
+                )
                 .reply_markup(keyboard::task_detail_keyboard(task.id, &task.status))
                 .await;
 
@@ -157,8 +160,8 @@ impl TelegramHandler for TaskCreatedHandler {
         };
 
         let message = format!(
-            "[{}]Task Created\nProject: {}; Task: {}",
-            short_id, project_name, task.title
+            "[{}]Task Created\nProject: {}; Task: {}\n\nRun now? /run {}",
+            short_id, project_name, task.title, short_id
         );
         tracing::info!("Sending telegram notification: {}", message);
 

@@ -232,6 +232,11 @@ export const projectsApi = {
     return handleApiResponse<Project>(response);
   },
 
+  getById: async (id: string): Promise<Project> => {
+    const response = await makeRequest(`/api/projects/${id}`);
+    return handleApiResponse<Project>(response);
+  },
+
   update: async (id: string, data: UpdateProject): Promise<Project> => {
     const response = await makeRequest(`/api/projects/${id}`, {
       method: 'PUT',

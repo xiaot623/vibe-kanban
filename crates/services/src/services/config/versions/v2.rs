@@ -18,6 +18,11 @@ pub struct ProxyConfig {
     pub no_proxy: Option<String>,
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize, TS, Default)]
+pub struct DailyModeConfig {
+    pub project_id: Option<String>,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, TS)]
 pub struct TelegramConfig {
     pub enabled: bool,
@@ -287,6 +292,8 @@ pub struct Config {
     #[serde(default)]
     pub proxy: ProxyConfig,
     #[serde(default)]
+    pub daily_mode: DailyModeConfig,
+    #[serde(default)]
     pub telegram: TelegramConfig,
     #[serde(default)]
     pub mcp_server: McpServerConfig,
@@ -362,6 +369,7 @@ impl From<super::v1::Config> for Config {
                 https_proxy: v1.proxy.https_proxy,
                 no_proxy: v1.proxy.no_proxy,
             },
+            daily_mode: DailyModeConfig::default(),
             // New fields with defaults
             local_network_access: false,
             local_network_password: None,

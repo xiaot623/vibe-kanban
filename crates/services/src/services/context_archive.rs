@@ -4,7 +4,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use anyhow::{anyhow, Context};
+use anyhow::{Context, anyhow};
 use chrono::Utc;
 use db::models::{
     coding_agent_turn::CodingAgentTurn, execution_process::ExecutionProcess, project::Project,
@@ -14,7 +14,7 @@ use executors::{
     executors::BaseCodingAgent,
     logs::{ActionType, NormalizedEntry, NormalizedEntryType, ToolStatus},
 };
-use serde_json::{json, Map, Value};
+use serde_json::{Map, Value, json};
 use sqlx::SqlitePool;
 use tokio::io::AsyncWriteExt;
 use uuid::Uuid;

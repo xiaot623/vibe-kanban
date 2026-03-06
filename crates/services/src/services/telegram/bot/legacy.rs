@@ -1,7 +1,12 @@
 use std::sync::Arc;
 
 use db::models::short_id_mapping::ShortIdMapping;
-use teloxide::{prelude::*, utils::command::BotCommands};
+use teloxide::{
+    dispatching::{Dispatcher, UpdateFilterExt},
+    dptree,
+    prelude::*,
+    utils::command::BotCommands,
+};
 
 use super::TelegramBotService;
 
@@ -30,11 +35,24 @@ pub enum LegacyCommand {
 
 pub(super) async fn run_dispatcher(service: TelegramBotService, bot: Bot, chat_id: ChatId) {
     let service = Arc::new(service);
-    LegacyCommand::repl(bot, move |bot: Bot, msg: Message, cmd: LegacyCommand| {
-        let service = Arc::clone(&service);
-        async move { handle_command(bot, msg, cmd, service, chat_id).await }
-    })
-    .await;
+    let handler = dptree::entry()
+        .branch(
+            Update::filter_message()
+                .filter_command::<LegacyCommand>()
+                .endpoint(handle_command),
+        )
+        .branch(Update::filter_message().endpoint(handle_plain_text));
+
+    let deps = dptree::deps![service, chat_id];
+
+    Dispatcher::builder(bot, handler)
+        .dependencies(deps)
+        .default_handler(|upd: Arc<Update>| async move {
+            tracing::trace!("Unhandled update: {:?}", upd.id);
+        })
+        .build()
+        .dispatch()
+        .await;
 }
 
 pub(super) async fn handle_command(
@@ -69,6 +87,35 @@ pub(super) async fn handle_command(
 
     if let Some(text) = response {
         bot.send_message(msg.chat.id, text).await?;
+    }
+
+    Ok(())
+}
+
+async fn handle_plain_text(
+    bot: Bot,
+    msg: Message,
+    service: Arc<TelegramBotService>,
+    allowed_chat_id: ChatId,
+) -> ResponseResult<()> {
+    if msg.chat.id != allowed_chat_id {
+        tracing::warn!(
+            "Ignoring telegram message from unexpected chat: {}",
+            msg.chat.id.0
+        );
+        return Ok(());
+    }
+
+    let text = msg.text().unwrap_or("").trim();
+    if text.is_empty() || text.starts_with('/') {
+        return Ok(());
+    }
+
+    // Lazily clean up expired short ID mappings
+    ShortIdMapping::cleanup_expired(&service.db.pool).await;
+
+    if let Err(err) = service.create_daily_task_from_message(text).await {
+        bot.send_message(msg.chat.id, err).await?;
     }
 
     Ok(())

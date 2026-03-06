@@ -27,6 +27,51 @@ use crate::services::{git::GitBranch, telegram::EXIT_PLAN_MODE_NAME};
 // ─── Shared command logic (used by both modes) ───────────────────────
 
 impl TelegramBotService {
+    pub(super) async fn create_daily_task_from_message(
+        &self,
+        message: &str,
+    ) -> Result<Task, String> {
+        let Some((title, description)) = parse_message_as_task(message) else {
+            return Err("Message is empty. Please send a task title.".to_string());
+        };
+
+        let daily_project_id_raw = {
+            let config = self.config.read().await;
+            config.daily_mode.project_id.clone()
+        };
+
+        let Some(daily_project_id_raw) = daily_project_id_raw else {
+            return Err(
+                "Daily Mode is not configured. Open the app and enter Daily Mode once first."
+                    .to_string(),
+            );
+        };
+
+        let daily_project_id = Uuid::parse_str(&daily_project_id_raw).map_err(|_| {
+            "Daily Mode project id is invalid. Please reconfigure Daily Mode in the app."
+                .to_string()
+        })?;
+
+        let daily_project = Project::find_by_id(&self.db.pool, daily_project_id)
+            .await
+            .map_err(|e| format!("Failed to load Daily project: {e}"))?;
+        if daily_project.is_none() {
+            return Err(
+                "Daily project was not found. Please reconfigure Daily Mode in the app."
+                    .to_string(),
+            );
+        }
+
+        let task_id = Uuid::new_v4();
+        Task::create(
+            &self.db.pool,
+            &CreateTask::from_title_description(daily_project_id, title, description),
+            task_id,
+        )
+        .await
+        .map_err(|e| format!("Failed to create Daily task: {e}"))
+    }
+
     pub(super) async fn list_projects(&self) -> String {
         match Project::find_all(&self.db.pool).await {
             Ok(projects) if projects.is_empty() => "No projects found.".to_string(),
@@ -785,4 +830,52 @@ pub(super) async fn api_base_url() -> Result<String, std::io::Error> {
         )
     })?;
     Ok(format!("http://127.0.0.1:{port}/api"))
+}
+
+fn parse_message_as_task(message: &str) -> Option<(String, Option<String>)> {
+    let trimmed = message.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    let mut lines = trimmed.lines();
+    let title = lines.next()?.trim();
+    if title.is_empty() {
+        return None;
+    }
+
+    let description_raw = lines.collect::<Vec<_>>().join("\n");
+    let description = if description_raw.trim().is_empty() {
+        None
+    } else {
+        Some(description_raw.trim().to_string())
+    };
+
+    Some((title.to_string(), description))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_message_as_task;
+
+    #[test]
+    fn parse_message_as_task_uses_first_line_as_title() {
+        let parsed = parse_message_as_task("Finish report\nInclude metrics\nand summary").unwrap();
+
+        assert_eq!(parsed.0, "Finish report");
+        assert_eq!(parsed.1.as_deref(), Some("Include metrics\nand summary"));
+    }
+
+    #[test]
+    fn parse_message_as_task_handles_single_line() {
+        let parsed = parse_message_as_task("Quick follow-up").unwrap();
+
+        assert_eq!(parsed.0, "Quick follow-up");
+        assert_eq!(parsed.1, None);
+    }
+
+    #[test]
+    fn parse_message_as_task_rejects_empty_input() {
+        assert!(parse_message_as_task("   \n  ").is_none());
+    }
 }
