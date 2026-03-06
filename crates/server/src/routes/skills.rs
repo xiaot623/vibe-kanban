@@ -1,6 +1,5 @@
 use std::{
     collections::{BTreeSet, HashMap, HashSet},
-    ffi::OsString,
     path::{Component, Path, PathBuf},
 };
 
@@ -167,6 +166,9 @@ async fn link_skills(
         })?;
 
         let link_path = agent_dir.join(skill_name);
+        if link_path == canonical_skill.path {
+            continue;
+        }
         if is_matching_symlink(&link_path, &canonical_skill.path)? {
             continue;
         }
@@ -192,9 +194,15 @@ async fn unlink_skill(
 ) -> Result<ResponseJson<ApiResponse<GetSkillLinksResponse>>, ApiError> {
     let skill_name = normalize_skill_name(&query.skill_name)?;
     let agent_dir = ensure_agent_skills_dir(query.executor)?;
+    let canonical_dir = ensure_canonical_skills_dir()?;
+    if agent_dir == canonical_dir {
+        return Err(ApiError::BadRequest(format!(
+            "Executor `{}` uses the canonical skills directory directly and does not support unlink",
+            query.executor
+        )));
+    }
     unlink_skill_path(&agent_dir.join(&skill_name))?;
 
-    let canonical_dir = ensure_canonical_skills_dir()?;
     let canonical_skills = discover_skills_in_dir(&canonical_dir)?;
     let response = build_links_response(query.executor, &agent_dir, &canonical_skills)?;
     Ok(ResponseJson(ApiResponse::success(response)))
@@ -808,8 +816,11 @@ fn build_links_response(
         .map(|skill| {
             let agent_path = agent_dir.join(&skill.folder_name);
             let is_linked_to_canonical = is_matching_symlink(&agent_path, &skill.path)?;
-            let is_legacy = !is_linked_to_canonical && is_legacy_skill_path(&agent_path)?;
-            let state = if is_linked_to_canonical || is_legacy {
+            let uses_canonical_dir_directly = agent_path == skill.path;
+            let is_legacy = !is_linked_to_canonical
+                && !uses_canonical_dir_directly
+                && is_legacy_skill_path(&agent_path)?;
+            let state = if is_linked_to_canonical || uses_canonical_dir_directly || is_legacy {
                 SkillLinkState::Linked
             } else {
                 SkillLinkState::NotLinked
@@ -963,7 +974,7 @@ fn user_home_dir() -> Result<PathBuf, ApiError> {
 }
 
 fn canonical_skills_dir_for_home(home_dir: &Path) -> PathBuf {
-    home_dir.join(".kanban").join("skills")
+    home_dir.join(".config").join("agents").join("skills")
 }
 
 fn ensure_canonical_skills_dir() -> Result<PathBuf, ApiError> {
@@ -979,8 +990,7 @@ fn ensure_canonical_skills_dir_for_home(home_dir: &Path) -> Result<PathBuf, ApiE
 
 fn ensure_agent_skills_dir(executor: BaseCodingAgent) -> Result<PathBuf, ApiError> {
     let home_dir = user_home_dir()?;
-    let codex_home = std::env::var_os("CODEX_HOME");
-    let agent_dir = resolve_agent_skills_dir(executor, &home_dir, codex_home)?;
+    let agent_dir = resolve_agent_skills_dir(executor, &home_dir)?;
     std::fs::create_dir_all(&agent_dir)?;
     Ok(agent_dir)
 }
@@ -988,16 +998,11 @@ fn ensure_agent_skills_dir(executor: BaseCodingAgent) -> Result<PathBuf, ApiErro
 fn resolve_agent_skills_dir(
     executor: BaseCodingAgent,
     home_dir: &Path,
-    codex_home: Option<OsString>,
 ) -> Result<PathBuf, ApiError> {
     match executor {
         BaseCodingAgent::ClaudeCode => Ok(home_dir.join(".claude").join("skills")),
-        BaseCodingAgent::Codex => {
-            let codex_root = codex_home
-                .map(PathBuf::from)
-                .filter(|path| !path.as_os_str().is_empty())
-                .unwrap_or_else(|| home_dir.join(".codex"));
-            Ok(codex_root.join("skills"))
+        BaseCodingAgent::Codex | BaseCodingAgent::Gemini | BaseCodingAgent::Opencode => {
+            Ok(canonical_skills_dir_for_home(home_dir))
         }
         _ => Err(ApiError::BadRequest(format!(
             "Executor `{executor}` is not supported for Skills manager"
@@ -1173,11 +1178,47 @@ mod tests {
     }
 
     #[test]
-    fn canonical_dir_resolution_points_to_kanban_skills() {
+    fn canonical_dir_resolution_points_to_shared_agents_skills() {
         let home_dir = PathBuf::from("/tmp/example-home");
         assert_eq!(
             canonical_skills_dir_for_home(&home_dir),
-            home_dir.join(".kanban").join("skills")
+            home_dir.join(".config").join("agents").join("skills")
+        );
+    }
+
+    #[test]
+    fn agent_skills_dir_resolution_matches_executor_layout() {
+        let home_dir = PathBuf::from("/tmp/example-home");
+        assert_eq!(
+            resolve_agent_skills_dir(BaseCodingAgent::ClaudeCode, &home_dir)
+                .expect("resolve claude skills dir"),
+            home_dir.join(".claude").join("skills")
+        );
+        assert_eq!(
+            resolve_agent_skills_dir(BaseCodingAgent::Codex, &home_dir)
+                .expect("resolve codex skills dir"),
+            canonical_skills_dir_for_home(&home_dir)
+        );
+        assert_eq!(
+            resolve_agent_skills_dir(BaseCodingAgent::Gemini, &home_dir)
+                .expect("resolve gemini skills dir"),
+            canonical_skills_dir_for_home(&home_dir)
+        );
+        assert_eq!(
+            resolve_agent_skills_dir(BaseCodingAgent::Opencode, &home_dir)
+                .expect("resolve opencode skills dir"),
+            canonical_skills_dir_for_home(&home_dir)
+        );
+    }
+
+    #[test]
+    fn droid_skills_dir_resolution_is_rejected() {
+        let home_dir = PathBuf::from("/tmp/example-home");
+        let err = resolve_agent_skills_dir(BaseCodingAgent::Droid, &home_dir)
+            .expect_err("droid should not be supported");
+        assert!(
+            err.to_string()
+                .contains("is not supported for Skills manager")
         );
     }
 
@@ -1299,6 +1340,29 @@ mod tests {
             .expect("find canonical skill link");
         assert_eq!(link.state, SkillLinkState::Linked);
         assert!(link.is_legacy);
+    }
+
+    #[test]
+    fn links_response_treats_shared_canonical_dir_as_linked() {
+        let temp = TestTempDir::new("shared-canonical");
+        let canonical_dir = temp.path().join("canonical");
+        write_skill(
+            &canonical_dir.join("skill-a"),
+            "Skill A",
+            "Canonical description",
+        );
+        let canonical_skills = discover_skills_in_dir(&canonical_dir).expect("discover skills");
+
+        let response =
+            build_links_response(BaseCodingAgent::Codex, &canonical_dir, &canonical_skills)
+                .expect("build links response");
+        let link = response
+            .links
+            .iter()
+            .find(|entry| entry.skill_name == "skill-a")
+            .expect("find canonical skill link");
+        assert_eq!(link.state, SkillLinkState::Linked);
+        assert!(!link.is_legacy);
     }
 
     #[test]
