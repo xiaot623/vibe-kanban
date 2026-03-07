@@ -539,14 +539,22 @@ impl TelegramBotService {
         }
 
         let session_id = self.find_latest_follow_up_session_id(task_id).await?;
+        let latest_profile =
+            ExecutionProcess::latest_executor_profile_for_session(&self.db.pool, session_id)
+                .await
+                .map_err(|e| format!("Failed to load follow-up executor profile: {e}"))?;
+        let (variant, executor) = match latest_profile {
+            Some(profile) => (profile.variant, Some(profile.executor)),
+            None => (None, None),
+        };
         let base_url = api_base_url()
             .await
             .map_err(|e| format!("Failed to locate API server: {e}"))?;
 
         let request = CreateFollowUpAttemptBody {
             prompt: prompt.to_string(),
-            variant: None,
-            executor: None,
+            variant,
+            executor,
             retry_process_id: None,
             force_when_dirty: None,
             perform_git_reset: None,
