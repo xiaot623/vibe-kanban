@@ -1,6 +1,6 @@
 {
   "name": "vibe-kanban",
-  "version": "0.1.15",
+  "version": "0.1.16",
   "private": true,
   "scripts": {
     "frontend:lint": "cd frontend && npm run lint",
