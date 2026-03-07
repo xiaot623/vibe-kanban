@@ -416,11 +416,14 @@
       "nav": {
         "all": "全部",
         "claude": "Claude",
-        "codex": "Codex"
+        "codex": "Codex",
+        "gemini": "Gemini",
+        "opencode": "Opencode",
+        "pi": "Pi"
       },
       "all": {
         "title": "全局技能",
-        "description": "管理保存在 ~/.kanban/skills 中的全局技能。",
+        "description": "管理保存在共享目录 ~/.agents/skills 中的技能。",
         "canonicalPath": "全局路径"
       },
       "agent": {
@@ -466,7 +469,7 @@
       },
       "importDialog": {
         "title": "从 Git/GitHub 导入技能",
-        "description": "导入包含 SKILL.md 的技能目录到 ~/.kanban/skills。",
+        "description": "导入包含 SKILL.md 的技能目录到 ~/.agents/skills。",
         "source": "来源",
         "sourcePlaceholder": "owner/repo 或 git URL",
         "advancedOptions": "高级选项",

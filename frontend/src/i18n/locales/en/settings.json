@@ -416,11 +416,14 @@
       "nav": {
         "all": "All",
         "claude": "Claude",
-        "codex": "Codex"
+        "codex": "Codex",
+        "gemini": "Gemini",
+        "opencode": "Opencode",
+        "pi": "Pi"
       },
       "all": {
         "title": "Canonical Skills",
-        "description": "Manage skills stored in the canonical ~/.kanban/skills directory.",
+        "description": "Manage skills stored in the shared ~/.agents/skills directory.",
         "canonicalPath": "Canonical path"
       },
       "agent": {
@@ -466,7 +469,7 @@
       },
       "importDialog": {
         "title": "Import Skills from Git/GitHub",
-        "description": "Import skill directories containing SKILL.md into ~/.kanban/skills.",
+        "description": "Import skill directories containing SKILL.md into ~/.agents/skills.",
         "source": "Source",
         "sourcePlaceholder": "owner/repo or git URL",
         "advancedOptions": "Advanced options",

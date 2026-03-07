@@ -149,7 +149,7 @@ export function SkillsAllSettings() {
         <div className="text-sm text-muted-foreground">
           {t('settings.skills.all.canonicalPath')}:{' '}
           <span className="font-mono text-foreground">
-            {skillsResponse?.canonical_dir ?? '~/.kanban/skills'}
+            {skillsResponse?.canonical_dir ?? '~/.agents/skills'}
           </span>
         </div>
 

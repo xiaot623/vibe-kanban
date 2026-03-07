@@ -974,7 +974,7 @@ fn user_home_dir() -> Result<PathBuf, ApiError> {
 }
 
 fn canonical_skills_dir_for_home(home_dir: &Path) -> PathBuf {
-    home_dir.join(".config").join("agents").join("skills")
+    home_dir.join(".agents").join("skills")
 }
 
 fn ensure_canonical_skills_dir() -> Result<PathBuf, ApiError> {
@@ -1001,9 +1001,10 @@ fn resolve_agent_skills_dir(
 ) -> Result<PathBuf, ApiError> {
     match executor {
         BaseCodingAgent::ClaudeCode => Ok(home_dir.join(".claude").join("skills")),
-        BaseCodingAgent::Codex | BaseCodingAgent::Gemini | BaseCodingAgent::Opencode => {
-            Ok(canonical_skills_dir_for_home(home_dir))
-        }
+        BaseCodingAgent::Codex
+        | BaseCodingAgent::Gemini
+        | BaseCodingAgent::Opencode
+        | BaseCodingAgent::Pi => Ok(canonical_skills_dir_for_home(home_dir)),
         _ => Err(ApiError::BadRequest(format!(
             "Executor `{executor}` is not supported for Skills manager"
         ))),
@@ -1182,7 +1183,7 @@ mod tests {
         let home_dir = PathBuf::from("/tmp/example-home");
         assert_eq!(
             canonical_skills_dir_for_home(&home_dir),
-            home_dir.join(".config").join("agents").join("skills")
+            home_dir.join(".agents").join("skills")
         );
     }
 
@@ -1207,6 +1208,11 @@ mod tests {
         assert_eq!(
             resolve_agent_skills_dir(BaseCodingAgent::Opencode, &home_dir)
                 .expect("resolve opencode skills dir"),
+            canonical_skills_dir_for_home(&home_dir)
+        );
+        assert_eq!(
+            resolve_agent_skills_dir(BaseCodingAgent::Pi, &home_dir)
+                .expect("resolve pi skills dir"),
             canonical_skills_dir_for_home(&home_dir)
         );
     }

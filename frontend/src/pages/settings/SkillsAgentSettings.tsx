@@ -59,6 +59,26 @@ function isLegacyLink(link: AgentSkillLinkInfo): boolean {
   return link.is_legacy;
 }
 
+function executorLabel(
+  executor: BaseCodingAgent,
+  t: (key: string) => string
+): string {
+  switch (executor) {
+    case BaseCodingAgent.CLAUDE_CODE:
+      return t('settings.skills.nav.claude');
+    case BaseCodingAgent.CODEX:
+      return t('settings.skills.nav.codex');
+    case BaseCodingAgent.GEMINI:
+      return t('settings.skills.nav.gemini');
+    case BaseCodingAgent.OPENCODE:
+      return t('settings.skills.nav.opencode');
+    case BaseCodingAgent.PI:
+      return t('settings.skills.nav.pi');
+    default:
+      return executor;
+  }
+}
+
 export function SkillsAgentSettings() {
   const { t } = useTranslation('settings');
   const queryClient = useQueryClient();
@@ -180,10 +200,7 @@ export function SkillsAgentSettings() {
     canonicalSkillsByFolder.get(link.skill_name)?.description ||
     (isLegacyLink(link) ? t('settings.skills.labels.legacyDescription') : '');
 
-  const pageLabel =
-    executor === BaseCodingAgent.CLAUDE_CODE
-      ? t('settings.skills.nav.claude')
-      : t('settings.skills.nav.codex');
+  const pageLabel = executorLabel(executor, (key) => t(key));
 
   return (
     <div className="space-y-4">
@@ -200,7 +217,7 @@ export function SkillsAgentSettings() {
               setSelectedSkillNames([]);
             }}
           >
-            <SelectTrigger id="executor-select" className="w-[140px]">
+            <SelectTrigger id="executor-select" className="w-[160px]">
               <SelectValue />
             </SelectTrigger>
             <SelectContent>
@@ -209,6 +226,15 @@ export function SkillsAgentSettings() {
               </SelectItem>
               <SelectItem value={BaseCodingAgent.CODEX}>
                 {t('settings.skills.nav.codex')}
+              </SelectItem>
+              <SelectItem value={BaseCodingAgent.GEMINI}>
+                {t('settings.skills.nav.gemini')}
+              </SelectItem>
+              <SelectItem value={BaseCodingAgent.OPENCODE}>
+                {t('settings.skills.nav.opencode')}
+              </SelectItem>
+              <SelectItem value={BaseCodingAgent.PI}>
+                {t('settings.skills.nav.pi')}
               </SelectItem>
             </SelectContent>
           </Select>
