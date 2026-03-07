@@ -73,6 +73,7 @@ import {
   Workspace,
   StartReviewRequest,
   ReviewError,
+  StartReviewSubtaskRequest,
   ReviewCommand,
   SaveReviewCommandRequest,
   UpdateReviewCommandStatusRequest,
@@ -498,6 +499,20 @@ export const attemptsApi = {
       }
     );
     return handleApiResponse<RunAgentSetupResponse>(response);
+  },
+
+  startReviewSubtask: async (
+    attemptId: string,
+    data: StartReviewSubtaskRequest
+  ): Promise<TaskWithAttemptStatus> => {
+    const response = await makeRequest(
+      `/api/task-attempts/${attemptId}/review-subtask/start`,
+      {
+        method: 'POST',
+        body: JSON.stringify(data),
+      }
+    );
+    return handleApiResponse<TaskWithAttemptStatus>(response);
   },
 
   openEditor: async (

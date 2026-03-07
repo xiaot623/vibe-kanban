@@ -51,6 +51,11 @@
           "placeholder": "Select profile",
           "helper": "Choose the default agent configuration to use when creating a task attempt."
         },
+        "reviewExecutor": {
+          "label": "Review Default Agent Configuration",
+          "placeholder": "Select profile",
+          "helper": "Choose the default agent configuration used when creating a review task."
+        },
         "variant": "DEFAULT",
         "defaultLabel": "Default"
       },

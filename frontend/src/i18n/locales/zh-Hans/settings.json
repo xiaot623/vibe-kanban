@@ -51,6 +51,11 @@
           "placeholder": "选择配置文件",
           "helper": "选择创建任务尝试时使用的默认代理配置。"
         },
+        "reviewExecutor": {
+          "label": "审查默认代理配置",
+          "placeholder": "选择配置文件",
+          "helper": "选择创建审查任务时使用的默认代理配置。"
+        },
         "variant": "默认",
         "defaultLabel": "默认"
       },

@@ -18,6 +18,7 @@ import { CreateAttemptDialog } from '@/components/dialogs/tasks/CreateAttemptDia
 import { GitActionsDialog } from '@/components/dialogs/tasks/GitActionsDialog';
 import { EditBranchNameDialog } from '@/components/dialogs/tasks/EditBranchNameDialog';
 import { ExportContextDialog } from '@/components/dialogs/tasks/ExportContextDialog';
+import { CreateReviewTaskDialog } from '@/components/dialogs/tasks/CreateReviewTaskDialog';
 import { useProject } from '@/contexts/ProjectContext';
 import { openTaskForm } from '@/lib/openTaskForm';
 
@@ -111,6 +112,15 @@ export function ActionsDropdown({ task, attempt }: ActionsDropdownProps) {
     });
   };
 
+  const handleCreateReviewTask = (e: React.MouseEvent) => {
+    e.stopPropagation();
+    if (!attempt?.id || !projectId) return;
+    CreateReviewTaskDialog.show({
+      attemptId: attempt.id,
+      projectId,
+    });
+  };
+
   const handleGitActions = (e: React.MouseEvent) => {
     e.stopPropagation();
     if (!attempt?.id || !task) return;
@@ -182,6 +192,12 @@ export function ActionsDropdown({ task, attempt }: ActionsDropdownProps) {
                 onClick={handleCreateSubtask}
               >
                 {t('actionsMenu.createSubtask')}
+              </DropdownMenuItem>
+              <DropdownMenuItem
+                disabled={!projectId || !attempt}
+                onClick={handleCreateReviewTask}
+              >
+                {t('actionsMenu.createReviewTask')}
               </DropdownMenuItem>
               <DropdownMenuItem
                 disabled={!attempt?.id || !task}

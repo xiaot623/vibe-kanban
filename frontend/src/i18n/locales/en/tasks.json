@@ -436,6 +436,13 @@
     "creating": "Creating...",
     "start": "Start"
   },
+  "createReviewTaskDialog": {
+    "title": "Create review task",
+    "description": "Create a review subtask from this attempt and immediately start it with the selected coding agent.",
+    "error": "Failed to create review task. Please try again.",
+    "creating": "Creating...",
+    "start": "Create and Start"
+  },
   "repoBranchSelector": {
     "label": "Base branch"
   },
@@ -476,6 +483,7 @@
     "viewRelatedTasks": "View related tasks",
     "createNewAttempt": "Create new attempt",
     "createSubtask": "Create subtask",
+    "createReviewTask": "Create review task",
     "gitActions": "Git actions",
     "editBranchName": "Edit branch name",
     "exportContext": "Export context",

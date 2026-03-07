@@ -260,6 +260,9 @@ pub struct Config {
     pub config_version: String,
     pub theme: ThemeMode,
     pub executor_profile: ExecutorProfileId,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub review_executor_profile: Option<ExecutorProfileId>,
     pub disclaimer_acknowledged: bool,
     pub onboarding_acknowledged: bool,
     pub notifications: NotificationConfig,
@@ -319,6 +322,7 @@ impl From<super::v1::Config> for Config {
                 super::v1::ThemeMode::System => ThemeMode::System,
             },
             executor_profile: v1.executor_profile,
+            review_executor_profile: None,
             disclaimer_acknowledged: v1.disclaimer_acknowledged,
             onboarding_acknowledged: v1.onboarding_acknowledged,
             notifications: NotificationConfig {

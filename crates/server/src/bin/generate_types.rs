@@ -102,6 +102,7 @@ fn generate_types_content() -> String {
         server::routes::task_attempts::WorkspaceRepoInput::decl(),
         server::routes::task_attempts::RunAgentSetupRequest::decl(),
         server::routes::task_attempts::RunAgentSetupResponse::decl(),
+        server::routes::task_attempts::StartReviewSubtaskRequest::decl(),
         server::routes::task_attempts::gh_cli_setup::GhCliSetupError::decl(),
         server::routes::task_attempts::RebaseTaskAttemptRequest::decl(),
         server::routes::task_attempts::AbortConflictsRequest::decl(),

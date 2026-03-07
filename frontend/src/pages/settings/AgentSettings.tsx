@@ -77,12 +77,23 @@ export function AgentSettings() {
   const [executorDraft, setExecutorDraft] = useState<ExecutorProfileId | null>(
     () => (config?.executor_profile ? cloneDeep(config.executor_profile) : null)
   );
+  const [reviewExecutorDraft, setReviewExecutorDraft] =
+    useState<ExecutorProfileId | null>(() =>
+      config?.review_executor_profile
+        ? cloneDeep(config.review_executor_profile)
+        : config?.executor_profile
+          ? cloneDeep(config.executor_profile)
+          : null
+    );
   const [executorSaving, setExecutorSaving] = useState(false);
   const [executorSuccess, setExecutorSuccess] = useState(false);
   const [executorError, setExecutorError] = useState<string | null>(null);
 
   // Check agent availability when draft executor changes
   const agentAvailability = useAgentAvailability(executorDraft?.executor);
+  const reviewAgentAvailability = useAgentAvailability(
+    reviewExecutorDraft?.executor
+  );
 
   // Sync server state to local state when not dirty
   useEffect(() => {
@@ -100,10 +111,17 @@ export function AgentSettings() {
   }, [serverProfilesContent, isDirty]);
 
   // Check if executor draft differs from saved config
-  const executorDirty =
-    executorDraft && config?.executor_profile
-      ? !isEqual(executorDraft, config.executor_profile)
-      : false;
+  const savedReviewExecutorProfile =
+    config?.review_executor_profile ?? config?.executor_profile ?? null;
+  const defaultExecutorDirty = !isEqual(
+    executorDraft ?? null,
+    config?.executor_profile ?? null
+  );
+  const reviewExecutorDirty = !isEqual(
+    reviewExecutorDraft ?? null,
+    savedReviewExecutorProfile
+  );
+  const executorDirty = defaultExecutorDirty || reviewExecutorDirty;
 
   // Sync executor draft when config changes (only if not dirty)
   useEffect(() => {
@@ -118,20 +136,44 @@ export function AgentSettings() {
     }
   }, [config?.executor_profile]);
 
+  // Sync review executor draft when config changes (only if not dirty)
+  useEffect(() => {
+    const currentReviewProfile =
+      config?.review_executor_profile ?? config?.executor_profile;
+    if (currentReviewProfile) {
+      setReviewExecutorDraft((currentDraft) => {
+        if (!currentDraft || isEqual(currentDraft, currentReviewProfile)) {
+          return cloneDeep(currentReviewProfile);
+        }
+        return currentDraft;
+      });
+    }
+  }, [config?.review_executor_profile, config?.executor_profile]);
+
   // Update executor draft
   const updateExecutorDraft = (newProfile: ExecutorProfileId) => {
     setExecutorDraft(newProfile);
   };
 
+  // Update review executor draft
+  const updateReviewExecutorDraft = (newProfile: ExecutorProfileId) => {
+    setReviewExecutorDraft(newProfile);
+  };
+
   // Save executor profile
   const handleSaveExecutorProfile = async () => {
-    if (!executorDraft || !config) return;
+    if (!executorDraft || !reviewExecutorDraft || !config) return;
 
     setExecutorSaving(true);
     setExecutorError(null);
 
     try {
-      await updateAndSaveConfig({ executor_profile: executorDraft });
+      await updateAndSaveConfig({
+        executor_profile: executorDraft,
+        review_executor_profile: isEqual(reviewExecutorDraft, executorDraft)
+          ? undefined
+          : reviewExecutorDraft,
+      });
       setExecutorSuccess(true);
       setTimeout(() => setExecutorSuccess(false), 3000);
       reloadSystem();
@@ -582,6 +624,117 @@ export function AgentSettings() {
             <AgentAvailabilityIndicator availability={agentAvailability} />
             <p className="text-sm text-muted-foreground">
               {t('settings.general.taskExecution.executor.helper')}
+            </p>
+          </div>
+          <div className="space-y-2">
+            <Label htmlFor="review-executor">
+              {t('settings.general.taskExecution.reviewExecutor.label')}
+            </Label>
+            <div className="grid grid-cols-2 gap-2">
+              <Select
+                value={reviewExecutorDraft?.executor ?? ''}
+                onValueChange={(value: string) => {
+                  const variants = profiles?.[value];
+                  const keepCurrentVariant =
+                    variants &&
+                    reviewExecutorDraft?.variant &&
+                    variants[reviewExecutorDraft.variant];
+
+                  const newProfile: ExecutorProfileId = {
+                    executor: value as BaseCodingAgent,
+                    variant: keepCurrentVariant
+                      ? reviewExecutorDraft!.variant
+                      : null,
+                  };
+                  updateReviewExecutorDraft(newProfile);
+                }}
+                disabled={!profiles}
+              >
+                <SelectTrigger id="review-executor">
+                  <SelectValue
+                    placeholder={t(
+                      'settings.general.taskExecution.reviewExecutor.placeholder'
+                    )}
+                  />
+                </SelectTrigger>
+                <SelectContent>
+                  {profiles &&
+                    Object.entries(profiles)
+                      .sort((a, b) => a[0].localeCompare(b[0]))
+                      .map(([profileKey]) => (
+                        <SelectItem key={profileKey} value={profileKey}>
+                          {profileKey}
+                        </SelectItem>
+                      ))}
+                </SelectContent>
+              </Select>
+
+              {(() => {
+                const currentProfileVariant = reviewExecutorDraft;
+                const selectedProfile =
+                  profiles?.[currentProfileVariant?.executor || ''];
+                const hasVariants =
+                  selectedProfile && Object.keys(selectedProfile).length > 0;
+
+                if (hasVariants) {
+                  return (
+                    <DropdownMenu>
+                      <DropdownMenuTrigger asChild>
+                        <Button
+                          variant="outline"
+                          className="w-full h-10 px-2 flex items-center justify-between"
+                        >
+                          <span className="text-sm truncate flex-1 text-left">
+                            {currentProfileVariant?.variant ||
+                              t('settings.general.taskExecution.defaultLabel')}
+                          </span>
+                          <ChevronDown className="h-4 w-4 ml-1 flex-shrink-0" />
+                        </Button>
+                      </DropdownMenuTrigger>
+                      <DropdownMenuContent>
+                        {Object.entries(selectedProfile).map(
+                          ([variantLabel]) => (
+                            <DropdownMenuItem
+                              key={variantLabel}
+                              onClick={() => {
+                                const newProfile: ExecutorProfileId = {
+                                  executor: currentProfileVariant!.executor,
+                                  variant: variantLabel,
+                                };
+                                updateReviewExecutorDraft(newProfile);
+                              }}
+                              className={
+                                currentProfileVariant?.variant === variantLabel
+                                  ? 'bg-accent'
+                                  : ''
+                              }
+                            >
+                              {variantLabel}
+                            </DropdownMenuItem>
+                          )
+                        )}
+                      </DropdownMenuContent>
+                    </DropdownMenu>
+                  );
+                } else if (selectedProfile) {
+                  return (
+                    <Button
+                      variant="outline"
+                      className="w-full h-10 px-2 flex items-center justify-between"
+                      disabled
+                    >
+                      <span className="text-sm truncate flex-1 text-left">
+                        {t('settings.general.taskExecution.defaultLabel')}
+                      </span>
+                    </Button>
+                  );
+                }
+                return null;
+              })()}
+            </div>
+            <AgentAvailabilityIndicator availability={reviewAgentAvailability} />
+            <p className="text-sm text-muted-foreground">
+              {t('settings.general.taskExecution.reviewExecutor.helper')}
             </p>
           </div>
           <div className="flex justify-end">

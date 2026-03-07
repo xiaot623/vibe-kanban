@@ -28,7 +28,7 @@ use db::models::{
     project::SearchResult,
     repo::{Repo, RepoError},
     session::{CreateSession, Session},
-    task::{Task, TaskRelationships, TaskStatus},
+    task::{CreateTask, Task, TaskRelationships, TaskStatus, TaskWithAttemptStatus},
     workspace::{CreateWorkspace, ReviewCommand, Workspace, WorkspaceError},
     workspace_repo::{CreateWorkspaceRepo, RepoWithTargetBranch, WorkspaceRepo},
 };
@@ -266,6 +266,11 @@ pub struct RunAgentSetupRequest {
     pub executor_profile_id: ExecutorProfileId,
 }
 
+#[derive(Debug, Deserialize, Serialize, TS)]
+pub struct StartReviewSubtaskRequest {
+    pub executor_profile_id: ExecutorProfileId,
+}
+
 #[derive(Debug, Serialize, TS)]
 pub struct RunAgentSetupResponse {}
 
@@ -389,6 +394,152 @@ pub async fn run_agent_setup(
         .await;
 
     Ok(ResponseJson(ApiResponse::success(RunAgentSetupResponse {})))
+}
+
+#[axum::debug_handler]
+pub async fn start_review_subtask(
+    Extension(workspace): Extension<Workspace>,
+    State(deployment): State<DeploymentImpl>,
+    Json(payload): Json<StartReviewSubtaskRequest>,
+) -> Result<ResponseJson<ApiResponse<TaskWithAttemptStatus>>, ApiError> {
+    let pool = &deployment.db().pool;
+
+    let parent_task = workspace
+        .parent_task(pool)
+        .await?
+        .ok_or(WorkspaceError::TaskNotFound)?;
+
+    let project = parent_task
+        .parent_project(pool)
+        .await?
+        .ok_or(WorkspaceError::ProjectNotFound)?;
+
+    let archive_context = context_archive::load_archive_context_for_workspace(pool, &workspace)
+        .await
+        .map_err(|err| {
+            tracing::error!(
+                "Failed to load archived context for workspace {}: {err:#}",
+                workspace.id
+            );
+            ApiError::BadRequest("Failed to load archived context".to_string())
+        })?
+        .ok_or_else(|| ApiError::BadRequest("No archived context available yet".to_string()))?;
+
+    let current_workspace_repos = WorkspaceRepo::find_by_workspace_id(pool, workspace.id).await?;
+    if current_workspace_repos.is_empty() {
+        return Err(ApiError::BadRequest(
+            "At least one repository is required".to_string(),
+        ));
+    }
+
+    let mut repos = Vec::with_capacity(current_workspace_repos.len());
+    for workspace_repo in &current_workspace_repos {
+        let repo = Repo::find_by_id(pool, workspace_repo.repo_id)
+            .await?
+            .ok_or(RepoError::NotFound)?;
+
+        if !deployment
+            .git()
+            .check_branch_exists(&repo.path, &workspace.branch)?
+        {
+            return Err(ApiError::BadRequest(format!(
+                "Branch '{}' does not exist in repository '{}'",
+                workspace.branch, repo.name
+            )));
+        }
+
+        repos.push(repo);
+    }
+
+    let review_task_title = build_review_subtask_title(&parent_task.title);
+    let review_task_description =
+        build_review_subtask_description(&parent_task, &workspace.branch, &archive_context);
+
+    let task = Task::create(
+        pool,
+        &CreateTask {
+            project_id: project.id,
+            title: review_task_title,
+            description: Some(review_task_description),
+            status: Some(TaskStatus::Todo),
+            parent_workspace_id: Some(workspace.id),
+            image_ids: None,
+        },
+        Uuid::new_v4(),
+    )
+    .await?;
+
+    deployment
+        .track_if_analytics_allowed(
+            "task_created",
+            serde_json::json!({
+                "task_id": task.id.to_string(),
+                "project_id": task.project_id,
+                "has_description": task.description.is_some(),
+                "has_images": false,
+            }),
+        )
+        .await;
+
+    let attempt_id = Uuid::new_v4();
+    let git_branch_name = deployment
+        .container()
+        .git_branch_from_workspace(&attempt_id, &task.title)
+        .await;
+
+    let agent_working_dir = if repos.len() == 1 {
+        Some(repos[0].name.clone())
+    } else {
+        None
+    };
+
+    let review_workspace = Workspace::create(
+        pool,
+        &CreateWorkspace {
+            branch: git_branch_name,
+            agent_working_dir,
+        },
+        attempt_id,
+        task.id,
+    )
+    .await?;
+
+    let workspace_repos: Vec<CreateWorkspaceRepo> = current_workspace_repos
+        .into_iter()
+        .map(|repo| CreateWorkspaceRepo {
+            repo_id: repo.repo_id,
+            target_branch: workspace.branch.clone(),
+        })
+        .collect();
+    WorkspaceRepo::create_many(pool, review_workspace.id, &workspace_repos).await?;
+
+    let is_attempt_running = deployment
+        .container()
+        .start_workspace(&review_workspace, payload.executor_profile_id.clone())
+        .await
+        .inspect_err(|err| tracing::error!("Failed to start review subtask attempt: {}", err))
+        .is_ok();
+
+    deployment
+        .track_if_analytics_allowed(
+            "task_attempt_started",
+            serde_json::json!({
+                "task_id": task.id.to_string(),
+                "executor": &payload.executor_profile_id.executor,
+                "variant": &payload.executor_profile_id.variant,
+                "workspace_id": review_workspace.id.to_string(),
+                "repository_count": repos.len(),
+                "parent_workspace_id": workspace.id.to_string(),
+            }),
+        )
+        .await;
+
+    Ok(ResponseJson(ApiResponse::success(TaskWithAttemptStatus {
+        task,
+        has_in_progress_attempt: is_attempt_running,
+        last_attempt_failed: false,
+        executor: payload.executor_profile_id.executor.to_string(),
+    })))
 }
 
 #[axum::debug_handler]
@@ -1803,6 +1954,22 @@ fn longest_backtick_run(markdown: &str) -> usize {
     max_run
 }
 
+fn build_review_subtask_title(parent_task_title: &str) -> String {
+    format!("Code review: {parent_task_title}")
+}
+
+fn build_review_subtask_description(
+    parent_task: &Task,
+    reviewed_branch: &str,
+    archive_context: &str,
+) -> String {
+    let archived_context_block = wrap_markdown_as_text_code_block(archive_context);
+    format!(
+        "Review the implementation for \"{}\".\n\nFocus on correctness, regressions, edge cases, and missing tests. Group findings by severity and include concrete file-level references.\n\nBranch under review: `{}`\n\nArchived context from the parent attempt:\n{}",
+        parent_task.title, reviewed_branch, archived_context_block
+    )
+}
+
 pub async fn export_context(
     Extension(workspace): Extension<Workspace>,
     State(deployment): State<DeploymentImpl>,
@@ -2060,6 +2227,7 @@ pub fn router(deployment: &DeploymentImpl) -> Router<DeploymentImpl> {
         .route("/search", get(search_workspace_files))
         .route("/first-message", get(get_first_user_message))
         .route("/export-context", get(export_context))
+        .route("/review-subtask/start", post(start_review_subtask))
         .route("/mark-seen", put(mark_seen))
         .route(
             "/review-command",
