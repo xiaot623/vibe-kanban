@@ -28,7 +28,7 @@ use db::{
     },
 };
 use executors::logs::{
-    NormalizedEntry, NormalizedEntryError, NormalizedEntryType, TokenUsageInfo, ToolStatus,
+    NormalizedEntry, NormalizedEntryType, TokenUsageInfo, ToolStatus,
     utils::patch::extract_normalized_entry_from_patch,
 };
 use teloxide::prelude::*;
@@ -566,9 +566,8 @@ fn classify_entry_behavior(entry: &NormalizedEntry) -> EntryDeliveryBehavior {
         NormalizedEntryType::Thinking | NormalizedEntryType::Loading => {
             EntryDeliveryBehavior::Ignore
         }
-        NormalizedEntryType::UserFeedback { .. } | NormalizedEntryType::ErrorMessage { .. } => {
-            EntryDeliveryBehavior::RealtimeOnly
-        }
+        NormalizedEntryType::UserFeedback { .. } => EntryDeliveryBehavior::RealtimeOnly,
+        NormalizedEntryType::ErrorMessage { .. } => EntryDeliveryBehavior::Ignore,
         NormalizedEntryType::NextAction { .. } => EntryDeliveryBehavior::RealtimeAndSummaryTrigger,
         NormalizedEntryType::ToolUse { status, .. } => match status {
             ToolStatus::PendingApproval { .. }
@@ -869,17 +868,6 @@ async fn emit_realtime_card_for_entry(
                 "🚫 User rejected tool: {}\n{}",
                 denied_tool,
                 truncate_for_telegram(&update.current.content, 220)
-            );
-            send_telegram_card(tg, message, None).await;
-        }
-        NormalizedEntryType::ErrorMessage { error_type } => {
-            let error_kind = match error_type {
-                NormalizedEntryError::SetupRequired => "setup_required",
-                NormalizedEntryError::Other => "other",
-            };
-            let message = format!(
-                "❌ Error ({error_kind})\n{}",
-                truncate_for_telegram(&update.current.content, 280)
             );
             send_telegram_card(tg, message, None).await;
         }
@@ -1344,7 +1332,9 @@ async fn find_exit_plan_approval(
 
 #[cfg(test)]
 mod tests {
-    use executors::logs::{ActionType, NormalizedEntry, NormalizedEntryType, ToolStatus};
+    use executors::logs::{
+        ActionType, NormalizedEntry, NormalizedEntryError, NormalizedEntryType, ToolStatus,
+    };
 
     use super::*;
 
@@ -1436,7 +1426,7 @@ mod tests {
                     },
                     "error",
                 ),
-                EntryDeliveryBehavior::RealtimeOnly,
+                EntryDeliveryBehavior::Ignore,
             ),
             (
                 entry(NormalizedEntryType::Thinking, "thinking"),
