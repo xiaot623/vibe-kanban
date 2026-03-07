@@ -1,10 +1,12 @@
-use std::sync::Arc;
+use std::{sync::Arc, time::Duration};
 
 use db::models::short_id_mapping::ShortIdMapping;
 use teloxide::{
     dispatching::{Dispatcher, UpdateFilterExt},
     dptree,
+    error_handlers::LoggingErrorHandler,
     prelude::*,
+    update_listeners::Polling,
     utils::command::BotCommands,
 };
 
@@ -45,13 +47,29 @@ pub(super) async fn run_dispatcher(service: TelegramBotService, bot: Bot, chat_i
 
     let deps = dptree::deps![service, chat_id];
 
-    Dispatcher::builder(bot, handler)
+    if let Err(err) = bot.delete_webhook().send().await {
+        tracing::warn!(
+            "Failed to delete Telegram webhook before polling startup: {:?}",
+            err
+        );
+    }
+
+    let listener = Polling::builder(bot.clone())
+        .timeout(Duration::from_secs(10))
+        .build();
+
+    let mut dispatcher = Dispatcher::builder(bot, handler)
         .dependencies(deps)
         .default_handler(|upd: Arc<Update>| async move {
             tracing::trace!("Unhandled update: {:?}", upd.id);
         })
-        .build()
-        .dispatch()
+        .build();
+
+    dispatcher
+        .dispatch_with_listener(
+            listener,
+            LoggingErrorHandler::with_custom_text("An error from the update listener"),
+        )
         .await;
 }
 

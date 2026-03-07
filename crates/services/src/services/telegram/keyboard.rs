@@ -206,6 +206,32 @@ pub fn review_notification_keyboard(task_id: Uuid) -> InlineKeyboardMarkup {
     ]])
 }
 
+/// Build approval buttons for tool execution requests.
+pub fn tool_approval_keyboard(approval_id: &str) -> InlineKeyboardMarkup {
+    InlineKeyboardMarkup::new(vec![vec![
+        btn(
+            "✅ Approve",
+            CallbackAction::ToolApprove {
+                approval_id: approval_id.to_string(),
+            },
+        ),
+        btn(
+            "🛑 Reject",
+            CallbackAction::ToolReject {
+                approval_id: approval_id.to_string(),
+            },
+        ),
+    ]])
+}
+
+/// Build a follow-up reply button shown after stage summaries.
+pub fn stage_summary_reply_keyboard(task_id: Uuid) -> InlineKeyboardMarkup {
+    InlineKeyboardMarkup::new(vec![vec![btn(
+        "💬 Reply",
+        CallbackAction::FollowUpReply { task_id },
+    )]])
+}
+
 /// Build a task list with inline buttons for each task.
 pub fn task_list_keyboard(
     tasks: &[(Uuid, String, String)], // (task_id, short_id, title)

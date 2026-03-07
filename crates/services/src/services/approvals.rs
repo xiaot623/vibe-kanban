@@ -310,6 +310,13 @@ impl Approvals {
         map.get(execution_process_id).cloned()
     }
 
+    pub(crate) async fn get_msg_store_for_execution_process(
+        &self,
+        execution_process_id: &Uuid,
+    ) -> Option<Arc<MsgStore>> {
+        self.msg_store_by_id(execution_process_id).await
+    }
+
     /// Check which execution processes have pending approvals.
     /// Returns a set of execution_process_ids that have at least one pending approval.
     pub fn get_pending_execution_process_ids(
@@ -340,6 +347,17 @@ impl Approvals {
                 entry: entry.value().entry.clone(),
             })
             .collect()
+    }
+
+    pub(crate) fn pending_by_id(&self, approval_id: &str) -> Option<PendingApprovalInfo> {
+        self.pending
+            .get(approval_id)
+            .map(|entry| PendingApprovalInfo {
+                id: entry.key().clone(),
+                tool_name: entry.value().tool_name.clone(),
+                execution_process_id: entry.value().execution_process_id,
+                entry: entry.value().entry.clone(),
+            })
     }
 }
 

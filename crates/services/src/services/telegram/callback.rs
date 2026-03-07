@@ -41,6 +41,10 @@ pub enum CallbackAction {
     ApproveYes { task_id: Uuid },
     /// Reject plan — enter reason input (enters dialogue)
     RejectInput { task_id: Uuid },
+    /// Approve tool execution request by approval id
+    ToolApprove { approval_id: String },
+    /// Reject tool execution request by approval id
+    ToolReject { approval_id: String },
     /// Show pending approvals list
     Pending,
     /// Start new task creation — pick project (enters dialogue)
@@ -49,6 +53,8 @@ pub enum CallbackAction {
     NewTaskProject { project_id: Uuid },
     /// Refresh / reload current view
     Refresh { task_id: Uuid },
+    /// Send a follow-up reply for a task (opens text input dialogue)
+    FollowUpReply { task_id: Uuid },
     /// Pagination for task lists
     TaskPage { project_id: Uuid, page: u16 },
     /// Cancel current dialogue and go home
@@ -75,10 +81,13 @@ impl CallbackAction {
             Self::ApproveConfirm { .. } => "ac",
             Self::ApproveYes { .. } => "ay",
             Self::RejectInput { .. } => "ri",
+            Self::ToolApprove { .. } => "ta",
+            Self::ToolReject { .. } => "tr",
             Self::Pending => "pe",
             Self::NewTask => "nt",
             Self::NewTaskProject { .. } => "np",
             Self::Refresh { .. } => "rf",
+            Self::FollowUpReply { .. } => "fr",
             Self::TaskPage { .. } => "tp",
             Self::Cancel => "ca",
             Self::Skip => "sk",
@@ -112,8 +121,12 @@ impl CallbackAction {
             | Self::ApproveConfirm { task_id }
             | Self::ApproveYes { task_id }
             | Self::RejectInput { task_id }
-            | Self::Refresh { task_id } => {
+            | Self::Refresh { task_id }
+            | Self::FollowUpReply { task_id } => {
                 format!("v1|{}|{}", self.tag(), short_uuid(task_id))
+            }
+            Self::ToolApprove { approval_id } | Self::ToolReject { approval_id } => {
+                format!("v1|{}|{}", self.tag(), approval_id)
             }
             Self::RunWith { task_id, executor } => {
                 format!("v1|{}|{}|{}", self.tag(), short_uuid(task_id), executor)
@@ -201,10 +214,19 @@ impl CallbackAction {
             "ri" => Some(Self::RejectInput {
                 task_id: parse_short_uuid(parts.get(2)?)?,
             }),
+            "ta" => Some(Self::ToolApprove {
+                approval_id: parts.get(2)?.to_string(),
+            }),
+            "tr" => Some(Self::ToolReject {
+                approval_id: parts.get(2)?.to_string(),
+            }),
             "np" => Some(Self::NewTaskProject {
                 project_id: parse_short_uuid(parts.get(2)?)?,
             }),
             "rf" => Some(Self::Refresh {
+                task_id: parse_short_uuid(parts.get(2)?)?,
+            }),
+            "fr" => Some(Self::FollowUpReply {
                 task_id: parse_short_uuid(parts.get(2)?)?,
             }),
             "tp" => {
@@ -290,7 +312,14 @@ mod tests {
             CallbackAction::ApproveConfirm { task_id: id },
             CallbackAction::ApproveYes { task_id: id },
             CallbackAction::RejectInput { task_id: id },
+            CallbackAction::ToolApprove {
+                approval_id: Uuid::new_v4().to_string(),
+            },
+            CallbackAction::ToolReject {
+                approval_id: Uuid::new_v4().to_string(),
+            },
             CallbackAction::Refresh { task_id: id },
+            CallbackAction::FollowUpReply { task_id: id },
             CallbackAction::NewTaskProject { project_id: id },
         ];
         for action in actions {
@@ -402,7 +431,14 @@ mod tests {
             CallbackAction::ApproveConfirm { task_id: id },
             CallbackAction::ApproveYes { task_id: id },
             CallbackAction::RejectInput { task_id: id },
+            CallbackAction::ToolApprove {
+                approval_id: id.to_string(),
+            },
+            CallbackAction::ToolReject {
+                approval_id: id.to_string(),
+            },
             CallbackAction::Refresh { task_id: id },
+            CallbackAction::FollowUpReply { task_id: id },
             CallbackAction::NewTaskProject { project_id: id },
             CallbackAction::TaskPage {
                 project_id: id,

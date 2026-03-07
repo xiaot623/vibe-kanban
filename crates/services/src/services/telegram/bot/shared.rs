@@ -1,7 +1,7 @@
 use std::{path::PathBuf, str::FromStr};
 
 use db::models::{
-    execution_process::ExecutionProcess,
+    execution_process::{ExecutionProcess, ExecutionProcessRunReason},
     project::Project,
     project_repo::ProjectRepo,
     session::Session,
@@ -528,6 +528,52 @@ impl TelegramBotService {
         }
     }
 
+    pub(super) async fn send_follow_up_reply(
+        &self,
+        task_id: Uuid,
+        prompt: &str,
+    ) -> Result<(), String> {
+        let prompt = prompt.trim();
+        if prompt.is_empty() {
+            return Err("Reply cannot be empty.".to_string());
+        }
+
+        let session_id = self.find_latest_follow_up_session_id(task_id).await?;
+        let base_url = api_base_url()
+            .await
+            .map_err(|e| format!("Failed to locate API server: {e}"))?;
+
+        let request = CreateFollowUpAttemptBody {
+            prompt: prompt.to_string(),
+            variant: None,
+            executor: None,
+            retry_process_id: None,
+            force_when_dirty: None,
+            perform_git_reset: None,
+        };
+
+        let client = reqwest::Client::new();
+        let response = client
+            .post(format!("{base_url}/sessions/{session_id}/follow-up"))
+            .json(&request)
+            .send()
+            .await
+            .map_err(|e| format!("Failed to send follow-up reply: {e}"))?;
+
+        let api_response: ApiResponse<ExecutionProcess> = response
+            .json()
+            .await
+            .map_err(|e| format!("Failed to parse follow-up response: {e}"))?;
+
+        let error_message = api_response.message().map(String::from);
+        match api_response.into_data() {
+            Some(_) => Ok(()),
+            None => {
+                Err(error_message.unwrap_or_else(|| "Failed to send follow-up reply.".to_string()))
+            }
+        }
+    }
+
     pub(super) async fn edit_task_from_command(&self, payload: &str) -> String {
         let lines: Vec<&str> = payload.lines().collect();
         if lines.len() < 3 {
@@ -706,6 +752,52 @@ impl TelegramBotService {
         }
         ShortIdMapping::resolve(&self.db.pool, trimmed).await
     }
+
+    async fn find_latest_follow_up_session_id(&self, task_id: Uuid) -> Result<Uuid, String> {
+        let workspaces = Workspace::fetch_all(&self.db.pool, Some(task_id))
+            .await
+            .map_err(|e| format!("Failed to load task attempts: {e}"))?;
+        if workspaces.is_empty() {
+            return Err("No task attempts found. Run the task once before replying.".to_string());
+        }
+
+        let mut latest_coding_process: Option<ExecutionProcess> = None;
+        let mut latest_session: Option<Session> = None;
+
+        for workspace in workspaces {
+            if let Ok(Some(process)) = ExecutionProcess::find_latest_by_workspace_and_run_reason(
+                &self.db.pool,
+                workspace.id,
+                &ExecutionProcessRunReason::CodingAgent,
+            )
+            .await
+                && latest_coding_process
+                    .as_ref()
+                    .is_none_or(|current| process.created_at > current.created_at)
+            {
+                latest_coding_process = Some(process);
+            }
+
+            if let Ok(Some(session)) =
+                Session::find_latest_by_workspace_id(&self.db.pool, workspace.id).await
+                && latest_session
+                    .as_ref()
+                    .is_none_or(|current| session.updated_at > current.updated_at)
+            {
+                latest_session = Some(session);
+            }
+        }
+
+        if let Some(process) = latest_coding_process {
+            return Ok(process.session_id);
+        }
+
+        if let Some(session) = latest_session {
+            return Ok(session.id);
+        }
+
+        Err("No session found for this task. Run the task once before replying.".to_string())
+    }
 }
 
 // ─── Internal types ──────────────────────────────────────────────────
@@ -720,6 +812,16 @@ struct CreateTaskAttemptBody {
     task_id: Uuid,
     executor_profile_id: ExecutorProfileId,
     repos: Vec<WorkspaceRepoInput>,
+}
+
+#[derive(Debug, Serialize)]
+struct CreateFollowUpAttemptBody {
+    prompt: String,
+    variant: Option<String>,
+    executor: Option<BaseCodingAgent>,
+    retry_process_id: Option<Uuid>,
+    force_when_dirty: Option<bool>,
+    perform_git_reset: Option<bool>,
 }
 
 #[derive(Debug, Serialize)]

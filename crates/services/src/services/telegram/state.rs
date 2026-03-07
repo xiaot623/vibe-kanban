@@ -40,4 +40,7 @@ pub enum DialogueState {
 
     /// Rejecting a plan — waiting for the user to type a reason.
     RejectingPlan { task_id: Uuid },
+
+    /// Sending a follow-up reply — waiting for the user input text.
+    ReplyingFollowUp { task_id: Uuid },
 }

@@ -1,4 +1,4 @@
-use std::{str::FromStr, sync::Arc};
+use std::{str::FromStr, sync::Arc, time::Duration};
 
 use db::models::{
     execution_process::ExecutionProcess,
@@ -10,8 +10,10 @@ use executors::{executors::BaseCodingAgent, profile::ExecutorConfigs};
 use teloxide::{
     dispatching::{Dispatcher, UpdateFilterExt, dialogue::InMemStorage},
     dptree,
+    error_handlers::LoggingErrorHandler,
     prelude::*,
     types::{InlineKeyboardMarkup, ParseMode},
+    update_listeners::Polling,
     utils::command::BotCommands,
 };
 use utils::{
@@ -25,8 +27,9 @@ use super::{
     legacy::{self, LegacyCommand},
     shared::{api_base_url, parse_task_status, truncate_text},
 };
-use crate::services::telegram::{
-    EXIT_PLAN_MODE_NAME, callback::CallbackAction, keyboard, state::DialogueState,
+use crate::services::{
+    approvals::{ApprovalError, PendingApprovalInfo},
+    telegram::{EXIT_PLAN_MODE_NAME, callback::CallbackAction, keyboard, state::DialogueState},
 };
 
 /// Type alias for the dialogue handle used in handlers.
@@ -80,13 +83,29 @@ pub(super) async fn run_dispatcher(service: TelegramBotService, bot: Bot, chat_i
 
     let deps = dptree::deps![storage, service, chat_id];
 
-    Dispatcher::builder(bot, handler)
+    if let Err(err) = bot.delete_webhook().send().await {
+        tracing::warn!(
+            "Failed to delete Telegram webhook before polling startup: {:?}",
+            err
+        );
+    }
+
+    let listener = Polling::builder(bot.clone())
+        .timeout(Duration::from_secs(10))
+        .build();
+
+    let mut dispatcher = Dispatcher::builder(bot, handler)
         .dependencies(deps)
         .default_handler(|upd: Arc<Update>| async move {
             tracing::trace!("Unhandled update: {:?}", upd.id);
         })
-        .build()
-        .dispatch()
+        .build();
+
+    dispatcher
+        .dispatch_with_listener(
+            listener,
+            LoggingErrorHandler::with_custom_text("An error from the update listener"),
+        )
         .await;
 }
 
@@ -325,6 +344,15 @@ async fn handle_callback(
         CallbackAction::RejectInput { task_id } => {
             handle_reject_start(&bot, chat_id, task_id, &dialogue).await?;
         }
+        CallbackAction::FollowUpReply { task_id } => {
+            handle_follow_up_reply_start(&bot, chat_id, task_id, &dialogue).await?;
+        }
+        CallbackAction::ToolApprove { approval_id } => {
+            handle_tool_approval_callback(&bot, &q, chat_id, &service, &approval_id, true).await?;
+        }
+        CallbackAction::ToolReject { approval_id } => {
+            handle_tool_approval_callback(&bot, &q, chat_id, &service, &approval_id, false).await?;
+        }
         CallbackAction::Refresh { task_id } => {
             show_task_detail(&bot, chat_id, &service, task_id).await?;
         }
@@ -337,6 +365,97 @@ async fn handle_callback(
     }
 
     Ok(())
+}
+
+async fn handle_tool_approval_callback(
+    bot: &Bot,
+    q: &CallbackQuery,
+    chat_id: ChatId,
+    service: &TelegramBotService,
+    approval_id: &str,
+    approve: bool,
+) -> ResponseResult<()> {
+    let Some(pending_approval) = service.approvals.pending_by_id(approval_id) else {
+        send_or_edit(
+            bot,
+            q,
+            chat_id,
+            "This approval is no longer pending.",
+            Some(empty_inline_keyboard()),
+        )
+        .await?;
+        return Ok(());
+    };
+
+    if approval_requires_structured_input(&pending_approval) {
+        send_or_edit(
+            bot,
+            q,
+            chat_id,
+            "This approval requires structured input. Please continue in the Web UI.",
+            Some(empty_inline_keyboard()),
+        )
+        .await?;
+        return Ok(());
+    }
+
+    let response_status = if approve {
+        ApprovalStatus::Approved
+    } else {
+        ApprovalStatus::Denied {
+            reason: Some("Rejected from Telegram".to_string()),
+        }
+    };
+
+    match service
+        .approvals
+        .respond(
+            &service.db.pool,
+            approval_id,
+            ApprovalResponse {
+                execution_process_id: pending_approval.execution_process_id,
+                status: response_status,
+            },
+        )
+        .await
+    {
+        Ok(_) => {
+            let message = if approve {
+                "✅ Tool request approved."
+            } else {
+                "🛑 Tool request rejected."
+            };
+            send_or_edit(bot, q, chat_id, message, Some(empty_inline_keyboard())).await?;
+        }
+        Err(ApprovalError::NotFound | ApprovalError::AlreadyCompleted) => {
+            send_or_edit(
+                bot,
+                q,
+                chat_id,
+                "This approval has already been handled.",
+                Some(empty_inline_keyboard()),
+            )
+            .await?;
+        }
+        Err(e) => {
+            send_or_edit(
+                bot,
+                q,
+                chat_id,
+                &format!("Failed to process approval: {e}"),
+                Some(keyboard::home_only_keyboard()),
+            )
+            .await?;
+        }
+    }
+
+    Ok(())
+}
+
+fn approval_requires_structured_input(approval: &PendingApprovalInfo) -> bool {
+    approval
+        .tool_name
+        .eq_ignore_ascii_case("request_user_input")
 }
 
 // ─── Dialogue text handler ───────────────────────────────────────────
@@ -490,6 +609,20 @@ async fn handle_dialogue_text(
             };
             dialogue.reset().await.ok();
             handle_reject_finish(&bot, msg.chat.id, &service, task_id, reason.as_deref()).await?;
+        }
+        DialogueState::ReplyingFollowUp { task_id } => {
+            if text.is_empty() {
+                bot.send_message(
+                    msg.chat.id,
+                    "Reply cannot be empty. Please enter follow-up text:",
+                )
+                .reply_markup(keyboard::cancel_keyboard())
+                .await?;
+                return Ok(());
+            }
+
+            dialogue.reset().await.ok();
+            handle_follow_up_reply_finish(&bot, msg.chat.id, &service, task_id, text).await?;
         }
     }
 
@@ -954,6 +1087,44 @@ async fn handle_reject_finish(
     Ok(())
 }
 
+async fn handle_follow_up_reply_start(
+    bot: &Bot,
+    chat_id: ChatId,
+    task_id: Uuid,
+    dialogue: &BotDialogue,
+) -> ResponseResult<()> {
+    dialogue
+        .update(DialogueState::ReplyingFollowUp { task_id })
+        .await
+        .ok();
+    bot.send_message(chat_id, "Type your reply here:")
+        .reply_markup(keyboard::cancel_keyboard())
+        .await?;
+    Ok(())
+}
+
+async fn handle_follow_up_reply_finish(
+    bot: &Bot,
+    chat_id: ChatId,
+    service: &TelegramBotService,
+    task_id: Uuid,
+    prompt: &str,
+) -> ResponseResult<()> {
+    match service.send_follow_up_reply(task_id, prompt).await {
+        Ok(()) => {
+            bot.send_message(chat_id, "✅ Reply sent. The task is running again.")
+                .reply_markup(keyboard::home_only_keyboard())
+                .await?;
+        }
+        Err(err) => {
+            bot.send_message(chat_id, format!("Failed to send reply: {err}"))
+                .reply_markup(keyboard::home_only_keyboard())
+                .await?;
+        }
+    }
+    Ok(())
+}
+
 async fn handle_edit_start(
     bot: &Bot,
     chat_id: ChatId,
@@ -1206,13 +1377,50 @@ fn escape_markdown_v2(text: &str) -> String {
     escaped
 }
 
+fn empty_inline_keyboard() -> InlineKeyboardMarkup {
+    InlineKeyboardMarkup::new(Vec::<Vec<teloxide::types::InlineKeyboardButton>>::new())
+}
+
 #[cfg(test)]
 mod tests {
-    use super::escape_markdown_v2;
+    use executors::logs::{ActionType, NormalizedEntry, NormalizedEntryType, ToolStatus};
+    use uuid::Uuid;
+
+    use super::{approval_requires_structured_input, escape_markdown_v2};
+    use crate::services::approvals::PendingApprovalInfo;
 
     #[test]
     fn escape_markdown_v2_escapes_reserved_characters() {
         let project_name = "xx-yyy.v1";
         assert_eq!(escape_markdown_v2(project_name), "xx\\-yyy\\.v1");
+    }
+
+    #[test]
+    fn request_user_input_requires_structured_handling() {
+        let approval = PendingApprovalInfo {
+            id: Uuid::new_v4().to_string(),
+            tool_name: "request_user_input".to_string(),
+            execution_process_id: Uuid::new_v4(),
+            entry: NormalizedEntry {
+                timestamp: None,
+                entry_type: NormalizedEntryType::ToolUse {
+                    tool_name: "request_user_input".to_string(),
+                    action_type: ActionType::Tool {
+                        tool_name: "request_user_input".to_string(),
+                        arguments: None,
+                        result: None,
+                    },
+                    status: ToolStatus::PendingApproval {
+                        approval_id: Uuid::new_v4().to_string(),
+                        requested_at: chrono::Utc::now(),
+                        timeout_at: chrono::Utc::now(),
+                    },
+                },
+                content: "request user input".to_string(),
+                metadata: None,
+            },
+        };
+
+        assert!(approval_requires_structured_input(&approval));
     }
 }
