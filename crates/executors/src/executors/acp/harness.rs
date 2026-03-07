@@ -300,7 +300,8 @@ impl AcpAgentHarness {
                         let session_manager = std::sync::Arc::new(session_manager);
 
                         // Create ACP client with approvals support
-                        let client = AcpClient::new(event_tx.clone(), approvals.clone());
+                        let client =
+                            AcpClient::new(event_tx.clone(), approvals.clone(), cwd.clone());
                         let client_feedback_handle = client.clone();
 
                         client.record_user_prompt_event(&prompt);

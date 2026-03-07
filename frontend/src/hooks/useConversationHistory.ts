@@ -578,7 +578,9 @@ export const useConversationHistory = ({
         if (
           lastEntry.type === 'NORMALIZED_ENTRY' &&
           lastEntry.content.entry_type.type === 'tool_use' &&
-          lastEntry.content.entry_type.tool_name === 'ExitPlanMode'
+          (lastEntry.content.entry_type.tool_name === 'ExitPlanMode' ||
+            lastEntry.content.entry_type.action_type.action ===
+              'plan_presentation')
         ) {
           modifiedAddEntryType = 'plan';
         }

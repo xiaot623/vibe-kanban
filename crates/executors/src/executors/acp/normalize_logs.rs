@@ -22,6 +22,10 @@ use crate::{
     },
 };
 
+const EXIT_PLAN_MODE_NAME: &str = "ExitPlanMode";
+const GEMINI_EXIT_PLAN_TOOL_CALL_ID_PREFIX: &str = "exit_plan_mode-";
+const GEMINI_PLAN_APPROVAL_TITLE_PREFIX: &str = "Requesting plan approval for:";
+
 pub fn normalize_logs(msg_store: Arc<MsgStore>, worktree_path: &Path) {
     // stderr normalization
     let entry_index = EntryIndexProvider::start_from(&msg_store);
@@ -228,10 +232,7 @@ pub fn normalize_logs(msg_store: Arc<MsgStore>, worktree_path: &Path) {
                         if let ApprovalStatus::Denied { reason } = resp.status {
                             let tool_name = tool_states
                                 .get(&resp.tool_call_id)
-                                .map(|t| {
-                                    extract_tool_name_from_id(t.id.0.as_ref())
-                                        .unwrap_or_else(|| t.title.clone())
-                                })
+                                .map(derive_tool_use_name)
                                 .unwrap_or_default();
                             let idx = entry_index.next();
                             let entry = NormalizedEntry {
@@ -274,15 +275,15 @@ pub fn normalize_logs(msg_store: Arc<MsgStore>, worktree_path: &Path) {
             if is_new {
                 tool_data.index = entry_index.next();
             }
-            let action = map_to_action_type(tool_data);
+            let action = map_to_action_type(tool_data, worktree_path);
             let entry = NormalizedEntry {
                 timestamp: None,
                 entry_type: NormalizedEntryType::ToolUse {
-                    tool_name: tool_data.title.clone(),
+                    tool_name: derive_tool_use_name(tool_data),
                     action_type: action,
                     status: convert_tool_status(&tool_data.status),
                 },
-                content: get_tool_content(tool_data),
+                content: get_tool_content(tool_data, worktree_path),
                 metadata: serde_json::to_value(ToolCallMetadata {
                     tool_call_id: tool_data.id.0.to_string(),
                 })
@@ -296,7 +297,13 @@ pub fn normalize_logs(msg_store: Arc<MsgStore>, worktree_path: &Path) {
             msg_store.push_patch(patch);
         }
 
-        fn map_to_action_type(tc: &PartialToolCallData) -> ActionType {
+        fn map_to_action_type(tc: &PartialToolCallData, worktree_path: &Path) -> ActionType {
+            if is_gemini_exit_plan_tool_call(tc.id.0.as_ref()) {
+                return ActionType::PlanPresentation {
+                    plan: resolve_exit_plan_content(tc, worktree_path),
+                };
+            }
+
             match tc.kind {
                 agent_client_protocol::ToolKind::Read => {
                     // Special-case: read_many_files style titles parsed via helper
@@ -524,7 +531,11 @@ pub fn normalize_logs(msg_store: Arc<MsgStore>, worktree_path: &Path) {
             changes
         }
 
-        fn get_tool_content(tc: &PartialToolCallData) -> String {
+        fn get_tool_content(tc: &PartialToolCallData, worktree_path: &Path) -> String {
+            if is_gemini_exit_plan_tool_call(tc.id.0.as_ref()) {
+                return resolve_exit_plan_content(tc, worktree_path);
+            }
+
             match tc.kind {
                 agent_client_protocol::ToolKind::Execute => {
                     AcpEventParser::parse_execute_command(tc)
@@ -604,6 +615,82 @@ pub fn normalize_logs(msg_store: Arc<MsgStore>, worktree_path: &Path) {
             }
         }
     });
+}
+
+fn derive_tool_use_name(tc: &PartialToolCallData) -> String {
+    if is_gemini_exit_plan_tool_call(tc.id.0.as_ref()) {
+        EXIT_PLAN_MODE_NAME.to_string()
+    } else {
+        tc.title.clone()
+    }
+}
+
+fn resolve_exit_plan_content(tc: &PartialToolCallData, worktree_path: &Path) -> String {
+    read_plan_from_title(&tc.title, worktree_path)
+        .or_else(|| collect_text_content_from_tool_call(tc))
+        .unwrap_or_else(|| tc.title.clone())
+}
+
+fn collect_text_content_from_tool_call(tc: &PartialToolCallData) -> Option<String> {
+    let mut out = String::new();
+    for content in &tc.content {
+        if let agent_client_protocol::ToolCallContent::Content(inner) = content
+            && let agent_client_protocol::ContentBlock::Text(text) = &inner.content
+        {
+            out.push_str(&text.text);
+            if !out.ends_with('\n') {
+                out.push('\n');
+            }
+        }
+    }
+    if out.is_empty() { None } else { Some(out) }
+}
+
+fn is_gemini_exit_plan_tool_call(tool_call_id: &str) -> bool {
+    tool_call_id.starts_with(GEMINI_EXIT_PLAN_TOOL_CALL_ID_PREFIX)
+}
+
+fn parse_plan_path_from_title(title: &str) -> Option<String> {
+    let raw_path = title
+        .strip_prefix(GEMINI_PLAN_APPROVAL_TITLE_PREFIX)?
+        .trim();
+    if raw_path.is_empty() {
+        return None;
+    }
+
+    let normalized = raw_path.trim_matches(|c| matches!(c, '"' | '\'' | '`'));
+    if normalized.is_empty() {
+        None
+    } else {
+        Some(normalized.to_string())
+    }
+}
+
+fn resolve_plan_path(plan_path: &str, worktree_path: &Path) -> PathBuf {
+    let path = PathBuf::from(plan_path);
+    if path.is_relative() {
+        worktree_path.join(path)
+    } else {
+        path
+    }
+}
+
+fn read_plan_from_title(title: &str, worktree_path: &Path) -> Option<String> {
+    let plan_path = parse_plan_path_from_title(title)?;
+    let resolved_path = resolve_plan_path(&plan_path, worktree_path);
+
+    match std::fs::read_to_string(&resolved_path) {
+        Ok(plan) => Some(plan),
+        Err(err) => {
+            tracing::debug!(
+                "Failed to read Gemini plan file '{}' from title '{}': {}",
+                resolved_path.display(),
+                title,
+                err
+            );
+            None
+        }
+    }
 }
 
 struct PartialToolCallData {
@@ -766,4 +853,133 @@ struct EditInput {
     old_string: Option<String>,
     #[serde(default)]
     new_string: Option<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{fs, sync::Arc, time::Duration};
+
+    use workspace_utils::log_msg::LogMsg;
+
+    use super::*;
+    use crate::{
+        approvals::ToolCallMetadata,
+        logs::{
+            ActionType, NormalizedEntry, NormalizedEntryType, ToolStatus,
+            utils::patch::extract_normalized_entry_from_patch,
+        },
+    };
+
+    fn create_temp_dir(test_name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "vk-acp-normalize-{test_name}-{}",
+            uuid::Uuid::new_v4()
+        ));
+        fs::create_dir_all(&dir).expect("create temporary test directory");
+        dir
+    }
+
+    fn latest_tool_use_entry(history: &[LogMsg]) -> Option<NormalizedEntry> {
+        history.iter().rev().find_map(|msg| {
+            if let LogMsg::JsonPatch(patch) = msg
+                && let Some((_, entry)) = extract_normalized_entry_from_patch(patch)
+                && matches!(entry.entry_type, NormalizedEntryType::ToolUse { .. })
+            {
+                return Some(entry);
+            }
+            None
+        })
+    }
+
+    async fn wait_for_tool_use_entry(msg_store: &MsgStore) -> NormalizedEntry {
+        for _ in 0..100 {
+            if let Some(entry) = latest_tool_use_entry(&msg_store.get_history()) {
+                return entry;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        panic!("timed out waiting for normalized tool use entry");
+    }
+
+    #[tokio::test]
+    async fn exit_plan_mode_tool_call_normalizes_to_plan_presentation_entry() {
+        let worktree = create_temp_dir("plan-presentation");
+        let plan_text = "# Plan\n- step 1\n- step 2\n";
+        let plan_path = worktree.join("plan.md");
+        fs::write(&plan_path, plan_text).expect("write plan file");
+
+        let msg_store = Arc::new(MsgStore::new());
+        normalize_logs(msg_store.clone(), &worktree);
+
+        let title = format!("Requesting plan approval for: {}", plan_path.display());
+        let tool_call = agent_client_protocol::ToolCall::new("exit_plan_mode-7", title)
+            .kind(agent_client_protocol::ToolKind::Other)
+            .status(agent_client_protocol::ToolCallStatus::Pending);
+
+        msg_store.push_stdout(format!(
+            "{}\n",
+            serde_json::to_string(&AcpEvent::ToolCall(tool_call))
+                .expect("serialize tool call event")
+        ));
+
+        let entry = wait_for_tool_use_entry(msg_store.as_ref()).await;
+        match entry.entry_type {
+            NormalizedEntryType::ToolUse {
+                tool_name,
+                action_type,
+                status,
+            } => {
+                assert_eq!(tool_name, EXIT_PLAN_MODE_NAME);
+                assert!(matches!(status, ToolStatus::Created));
+                match action_type {
+                    ActionType::PlanPresentation { plan } => assert_eq!(plan, plan_text),
+                    other => panic!("expected plan_presentation action type, got {other:?}"),
+                }
+            }
+            other => panic!("expected tool_use entry, got {other:?}"),
+        }
+        assert_eq!(entry.content, plan_text);
+        let metadata: ToolCallMetadata = serde_json::from_value(
+            entry
+                .metadata
+                .expect("tool entry should include tool_call_id metadata"),
+        )
+        .expect("metadata should deserialize");
+        assert_eq!(metadata.tool_call_id, "exit_plan_mode-7");
+    }
+
+    #[tokio::test]
+    async fn exit_plan_mode_falls_back_to_title_when_plan_file_cannot_be_read() {
+        let worktree = create_temp_dir("plan-fallback");
+        let msg_store = Arc::new(MsgStore::new());
+        normalize_logs(msg_store.clone(), &worktree);
+
+        let title = "Requesting plan approval for: missing-plan.md".to_string();
+        let tool_call = agent_client_protocol::ToolCall::new("exit_plan_mode-8", title.clone())
+            .kind(agent_client_protocol::ToolKind::Other)
+            .status(agent_client_protocol::ToolCallStatus::Pending);
+
+        msg_store.push_stdout(format!(
+            "{}\n",
+            serde_json::to_string(&AcpEvent::ToolCall(tool_call))
+                .expect("serialize tool call event")
+        ));
+
+        let entry = wait_for_tool_use_entry(msg_store.as_ref()).await;
+        match entry.entry_type {
+            NormalizedEntryType::ToolUse {
+                tool_name,
+                action_type,
+                ..
+            } => {
+                assert_eq!(tool_name, EXIT_PLAN_MODE_NAME);
+                match action_type {
+                    ActionType::PlanPresentation { plan } => assert_eq!(plan, title),
+                    other => panic!("expected plan_presentation action type, got {other:?}"),
+                }
+            }
+            other => panic!("expected tool_use entry, got {other:?}"),
+        }
+        assert_eq!(entry.content, title);
+    }
 }
