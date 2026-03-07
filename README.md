@@ -38,15 +38,14 @@ kanban --server --port 8080
 - [x] add powermode manage feature
 - [x] add local network visting with auth 
 - [x] create a global context bus for sharing between different agent (P0)
-- [ ] chat mode and auto router to different agent (P1)
+- [x] chat mode support(daily task kanban) (P1)
 - [x] skills manager (P0)
+- [x] better experience of telegram bot(interactive mode refactor)
+- [x] perf for long task log
 - [ ] configure sync (by using git repo) (P1)
-- [ ] better experience of telegram bot(interactive mode refactor)
-- [ ] perf for long task log
-- [ ] acp protocol wrapper to link with any agent
+- [ ] acp protocol wrapper to link with any agent (P0)
 - [ ] mobile app support with auto-detection
-- [ ] add "dangerously_skip_permissions" and "plan" setting when create a task
-- [ ] add web terminal support && open workspace in terminal(such as iterm2)
+- [ ] open workspace in system default terminal (p1)
 - [ ] add support for more user-friendly pages to modify or submit a task
 - [ ] ...
 
@@ -55,7 +54,10 @@ kanban --server --port 8080
 - [x] remote collaboration feature(local first, run the executor remote will be implemented in the several weeks)
 
 ## Stage Two: feature for remote environment `Remote Version`
-- [ ] todo
+- [ ] FIFO queue to separate executor and "state log" (P2)
+- [ ] command line && TUI running mode (P1)
+- [ ] ssh connect tunnel
+- [ ] master && slave config
 
 ## Stage Three: feature for cloud native environment `Distributed Version`
 - [ ] todo
