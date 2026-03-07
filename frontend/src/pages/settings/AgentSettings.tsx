@@ -732,7 +732,9 @@ export function AgentSettings() {
                 return null;
               })()}
             </div>
-            <AgentAvailabilityIndicator availability={reviewAgentAvailability} />
+            <AgentAvailabilityIndicator
+              availability={reviewAgentAvailability}
+            />
             <p className="text-sm text-muted-foreground">
               {t('settings.general.taskExecution.reviewExecutor.helper')}
             </p>

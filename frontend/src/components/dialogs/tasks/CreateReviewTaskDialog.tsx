@@ -27,8 +27,8 @@ export interface CreateReviewTaskDialogProps {
   projectId: string;
 }
 
-const CreateReviewTaskDialogImpl = NiceModal.create<CreateReviewTaskDialogProps>(
-  ({ attemptId, projectId }) => {
+const CreateReviewTaskDialogImpl =
+  NiceModal.create<CreateReviewTaskDialogProps>(({ attemptId, projectId }) => {
     const modal = useModal();
     const navigate = useNavigateWithSearch();
     const queryClient = useQueryClient();
@@ -39,10 +39,7 @@ const CreateReviewTaskDialogImpl = NiceModal.create<CreateReviewTaskDialogProps>
       useState<ExecutorProfileId | null>(null);
 
     const defaultProfile = useMemo(
-      () =>
-        config?.review_executor_profile ??
-        config?.executor_profile ??
-        null,
+      () => config?.review_executor_profile ?? config?.executor_profile ?? null,
       [config?.review_executor_profile, config?.executor_profile]
     );
 
@@ -69,7 +66,9 @@ const CreateReviewTaskDialogImpl = NiceModal.create<CreateReviewTaskDialogProps>
       }
     }, [modal.visible]);
 
-    const canCreate = Boolean(effectiveProfile && !createReviewTaskMutation.isPending);
+    const canCreate = Boolean(
+      effectiveProfile && !createReviewTaskMutation.isPending
+    );
 
     const handleCreate = async () => {
       if (!effectiveProfile) return;
@@ -139,8 +138,7 @@ const CreateReviewTaskDialogImpl = NiceModal.create<CreateReviewTaskDialogProps>
         </DialogContent>
       </Dialog>
     );
-  }
-);
+  });
 
 export const CreateReviewTaskDialog = defineModal<
   CreateReviewTaskDialogProps,

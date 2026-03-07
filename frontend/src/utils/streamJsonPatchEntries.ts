@@ -54,7 +54,10 @@ export function streamJsonPatchEntries<E = unknown>(
   url: string,
   opts: StreamOptions<E> = {}
 ): StreamController<E> {
-  const batchWindowMs = Math.max(1, opts.batchWindowMs ?? DEFAULT_BATCH_WINDOW_MS);
+  const batchWindowMs = Math.max(
+    1,
+    opts.batchWindowMs ?? DEFAULT_BATCH_WINDOW_MS
+  );
   let connected = false;
   let snapshot: PatchContainer<E> = structuredClone(
     opts.initial ?? ({ entries: [] } as PatchContainer<E>)

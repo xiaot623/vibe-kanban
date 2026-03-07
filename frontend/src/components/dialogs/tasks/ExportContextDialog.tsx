@@ -257,7 +257,10 @@ const ExportContextDialogImpl = NiceModal.create<ExportContextDialogProps>(
     };
 
     return (
-      <Dialog open={modal.visible} onOpenChange={(open) => !open && handleCancel()}>
+      <Dialog
+        open={modal.visible}
+        onOpenChange={(open) => !open && handleCancel()}
+      >
         <DialogContent className="sm:max-w-md">
           <DialogHeader>
             <DialogTitle>{t('exportContextDialog.title')}</DialogTitle>
