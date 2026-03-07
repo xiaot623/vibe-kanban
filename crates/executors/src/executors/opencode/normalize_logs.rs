@@ -5,9 +5,14 @@ use serde::Deserialize;
 use serde_json::Value;
 use workspace_utils::{approvals::ApprovalStatus, msg_store::MsgStore, path::make_path_relative};
 
-use super::types::{
-    MessageInfo, MessagePartDeltaEvent, MessageRole, OpencodeExecutorEvent, Part,
-    PermissionAskedEvent, SdkEvent, SdkTodo, SessionStatus, ToolPart, ToolStateUpdate,
+use super::{
+    EXIT_PLAN_MODE_NAME,
+    plan_mode::{REQUEST_USER_INPUT_TOOL_NAME, parse_plan_exit_relative_path},
+    types::{
+        MessageInfo, MessagePartDeltaEvent, MessageRole, OpencodeExecutorEvent, Part,
+        PermissionAskedEvent, QuestionAskedEvent, SdkEvent, SdkTodo, SessionStatus, ToolPart,
+        ToolStateUpdate,
+    },
 };
 use crate::{
     approvals::ToolCallMetadata,
@@ -64,7 +69,9 @@ pub fn normalize_logs(msg_store: Arc<MsgStore>, worktree_path: &Path) {
                     }
                 }
                 OpencodeExecutorEvent::SdkEvent { event } => {
-                    state.handle_sdk_event(&event, &worktree_path, &msg_store);
+                    state
+                        .handle_sdk_event(&event, &worktree_path, &msg_store)
+                        .await;
                 }
                 OpencodeExecutorEvent::ApprovalResponse {
                     tool_call_id,
@@ -162,7 +169,12 @@ impl LogState {
         }
     }
 
-    fn handle_sdk_event(&mut self, raw: &Value, worktree_path: &Path, msg_store: &Arc<MsgStore>) {
+    async fn handle_sdk_event(
+        &mut self,
+        raw: &Value,
+        worktree_path: &Path,
+        msg_store: &Arc<MsgStore>,
+    ) {
         let Some(event) = SdkEvent::parse(raw) else {
             let raw_text = raw.to_string();
             if !raw_text.trim().is_empty() {
@@ -203,7 +215,19 @@ impl LogState {
             SdkEvent::PermissionAsked(event) => {
                 self.handle_permission_asked(event, worktree_path, msg_store);
             }
+            SdkEvent::QuestionAsked(event) => {
+                self.handle_question_asked(event, worktree_path, msg_store)
+                    .await;
+            }
+            SdkEvent::QuestionReplied(event) => {
+                tracing::debug!(
+                    request_id = %event.request_id,
+                    session_id = %event.session_id,
+                    "OpenCode question replied"
+                );
+            }
             SdkEvent::PermissionReplied
+            | SdkEvent::QuestionRejected
             | SdkEvent::MessageRemoved
             | SdkEvent::MessagePartRemoved
             | SdkEvent::CommandExecuted
@@ -593,6 +617,60 @@ impl LogState {
         }
     }
 
+    async fn handle_question_asked(
+        &mut self,
+        event: QuestionAskedEvent,
+        worktree_path: &Path,
+        msg_store: &Arc<MsgStore>,
+    ) {
+        let call_id = event
+            .tool
+            .as_ref()
+            .map(|tool| tool.call_id.trim().to_string())
+            .filter(|call_id| !call_id.is_empty())
+            .unwrap_or_else(|| event.id.clone());
+
+        if call_id.trim().is_empty() {
+            return;
+        }
+
+        let tool_state = self
+            .tool_states
+            .entry(call_id.clone())
+            .or_insert_with(|| ToolCallState::new(call_id.clone()));
+
+        tool_state.set_approval_if_missing(self.approvals.get(&call_id).cloned());
+
+        if let Some(plan_exit) = detect_plan_exit_question(&event) {
+            let mut plan_content = tokio::fs::read_to_string(
+                worktree_path.join(plan_exit.plan_relative_path.as_str()),
+            )
+            .await
+            .unwrap_or_default();
+            if plan_content.trim().is_empty() {
+                plan_content = event
+                    .questions
+                    .first()
+                    .map(|q| q.question.trim())
+                    .filter(|q| !q.is_empty())
+                    .map(str::to_string)
+                    .unwrap_or_default();
+            }
+
+            tool_state.set_plan_presentation(plan_content);
+        } else {
+            tool_state.set_request_user_input(build_question_approval_input(&event));
+        }
+
+        let entry = tool_state.to_normalized_entry(worktree_path);
+        if let Some(index) = tool_state.index {
+            replace_normalized_entry(msg_store, index, entry);
+        } else {
+            let index = add_normalized_entry(msg_store, &self.entry_index, entry);
+            tool_state.index = Some(index);
+        }
+    }
+
     fn add_normalized_entry(&mut self, entry: NormalizedEntry) -> usize {
         add_normalized_entry(&self.msg_store, &self.entry_index, entry)
     }
@@ -688,6 +766,9 @@ enum ToolData {
     Task {
         description: Option<String>,
     },
+    PlanPresentation {
+        plan: String,
+    },
     Other {
         input: Option<Value>,
         metadata: Option<Value>,
@@ -737,6 +818,9 @@ impl ToolCallState {
         if name.trim().is_empty() {
             return;
         }
+        if matches!(self.data, ToolData::PlanPresentation { .. }) {
+            return;
+        }
         self.tool_name = name;
         self.maybe_promote();
     }
@@ -749,6 +833,21 @@ impl ToolCallState {
 
     fn set_approval(&mut self, approval: ApprovalStatus) {
         self.approval = Some(approval);
+    }
+
+    fn set_plan_presentation(&mut self, plan: String) {
+        self.tool_name = EXIT_PLAN_MODE_NAME.to_string();
+        self.data = ToolData::PlanPresentation { plan };
+    }
+
+    fn set_request_user_input(&mut self, input: Value) {
+        self.tool_name = REQUEST_USER_INPUT_TOOL_NAME.to_string();
+        self.data = ToolData::Other {
+            input: Some(input),
+            metadata: None,
+            output: None,
+            error: None,
+        };
     }
 
     fn tool_status(&self) -> ToolStatus {
@@ -911,6 +1010,7 @@ impl ToolCallState {
                     *description = Some(d);
                 }
             }
+            ToolData::PlanPresentation { .. } => {}
             ToolData::Unknown => {
                 // Upgrade Unknown to Other when we receive tool data
                 self.data = ToolData::Other {
@@ -1083,6 +1183,9 @@ impl ToolCallState {
             ToolData::Task { description } => ActionType::TaskCreate {
                 description: description.clone().unwrap_or_default(),
             },
+            ToolData::PlanPresentation { plan } => {
+                ActionType::PlanPresentation { plan: plan.clone() }
+            }
             ToolData::Unknown => ActionType::Tool {
                 tool_name: self.tool_name.clone(),
                 arguments: None,
@@ -1113,6 +1216,7 @@ impl ToolCallState {
             ActionType::FileEdit { path, .. } => path.clone(),
             ActionType::Search { query } => query.clone(),
             ActionType::WebFetch { url } => url.clone(),
+            ActionType::PlanPresentation { plan } => plan.clone(),
             ActionType::TodoManagement { .. } => "TODO list updated".to_string(),
             _ => String::new(),
         }
@@ -1240,16 +1344,114 @@ fn extract_file_path_from_permission_metadata(metadata: &Value) -> Option<&str> 
     }
 }
 
+#[derive(Debug)]
+struct PlanExitQuestion {
+    plan_relative_path: String,
+}
+
+fn detect_plan_exit_question(event: &QuestionAskedEvent) -> Option<PlanExitQuestion> {
+    let plan_relative_path = event
+        .questions
+        .iter()
+        .find_map(|question| parse_plan_exit_relative_path(&question.question))?;
+
+    Some(PlanExitQuestion { plan_relative_path })
+}
+
+fn build_question_approval_input(event: &QuestionAskedEvent) -> Value {
+    let questions = event
+        .questions
+        .iter()
+        .enumerate()
+        .map(|(index, question)| {
+            let options = question
+                .options
+                .iter()
+                .map(|option| {
+                    let mut payload = serde_json::Map::new();
+                    payload.insert("label".to_string(), Value::String(option.label.clone()));
+                    payload.insert("value".to_string(), Value::String(option.label.clone()));
+                    if let Some(description) = option
+                        .description
+                        .as_ref()
+                        .map(|description| description.trim())
+                        .filter(|description| !description.is_empty())
+                    {
+                        payload.insert(
+                            "description".to_string(),
+                            Value::String(description.to_string()),
+                        );
+                    }
+                    Value::Object(payload)
+                })
+                .collect::<Vec<_>>();
+
+            let mut payload = serde_json::Map::new();
+            payload.insert("id".to_string(), Value::String(question_approval_id(index)));
+            payload.insert(
+                "header".to_string(),
+                Value::String(
+                    question
+                        .header
+                        .as_deref()
+                        .map(str::trim)
+                        .filter(|header| !header.is_empty())
+                        .map(str::to_string)
+                        .unwrap_or_else(|| format!("Question {}", index + 1)),
+                ),
+            );
+            payload.insert(
+                "question".to_string(),
+                Value::String(question.question.trim().to_string()),
+            );
+            payload.insert("options".to_string(), Value::Array(options));
+
+            if question.multiple.unwrap_or(false) {
+                payload.insert("multiSelectMin".to_string(), Value::Number(1.into()));
+                payload.insert(
+                    "multiSelectMax".to_string(),
+                    Value::Number((question.options.len().max(1) as u64).into()),
+                );
+            }
+
+            if let Some(custom) = question.custom {
+                payload.insert("custom".to_string(), Value::Bool(custom));
+            }
+
+            Value::Object(payload)
+        })
+        .collect::<Vec<_>>();
+
+    serde_json::json!({
+        "id": event.id,
+        "session_id": event.session_id,
+        "questions": questions,
+    })
+}
+
+fn question_approval_id(index: usize) -> String {
+    format!("question_{}", index + 1)
+}
+
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeMap;
+    use std::{
+        collections::BTreeMap,
+        fs,
+        path::PathBuf,
+        time::{SystemTime, UNIX_EPOCH},
+    };
 
-    use serde_json::json;
+    use serde_json::{Value, json};
     use workspace_utils::{log_msg::LogMsg, msg_store::MsgStore};
 
     use super::*;
-    use crate::logs::{
-        NormalizedEntry, NormalizedEntryType, utils::patch::extract_normalized_entry_from_patch,
+    use crate::{
+        approvals::ToolCallMetadata,
+        logs::{
+            ActionType, NormalizedEntry, NormalizedEntryType, ToolStatus,
+            utils::patch::extract_normalized_entry_from_patch,
+        },
     };
 
     fn new_state() -> (LogState, Arc<MsgStore>) {
@@ -1272,70 +1474,78 @@ mod tests {
         entries.into_values().collect()
     }
 
-    #[test]
-    fn message_part_delta_appends_assistant_text() {
+    #[tokio::test]
+    async fn message_part_delta_appends_assistant_text() {
         let (mut state, msg_store) = new_state();
         let worktree_path = Path::new("/tmp");
 
-        state.handle_sdk_event(
-            &json!({
-                "type": "message.updated",
-                "properties": {
-                    "info": {
-                        "id": "message-1",
-                        "role": "assistant"
+        state
+            .handle_sdk_event(
+                &json!({
+                    "type": "message.updated",
+                    "properties": {
+                        "info": {
+                            "id": "message-1",
+                            "role": "assistant"
+                        }
                     }
-                }
-            }),
-            worktree_path,
-            &msg_store,
-        );
+                }),
+                worktree_path,
+                &msg_store,
+            )
+            .await;
 
-        state.handle_sdk_event(
-            &json!({
-                "type": "message.part.updated",
-                "properties": {
-                    "part": {
-                        "type": "text",
-                        "id": "part-1",
+        state
+            .handle_sdk_event(
+                &json!({
+                    "type": "message.part.updated",
+                    "properties": {
+                        "part": {
+                            "type": "text",
+                            "id": "part-1",
+                            "messageID": "message-1",
+                            "text": ""
+                        }
+                    }
+                }),
+                worktree_path,
+                &msg_store,
+            )
+            .await;
+
+        state
+            .handle_sdk_event(
+                &json!({
+                    "type": "message.part.delta",
+                    "properties": {
+                        "sessionID": "session-1",
                         "messageID": "message-1",
-                        "text": ""
+                        "partID": "part-1",
+                        "field": "text",
+                        "delta": "Hel"
                     }
-                }
-            }),
-            worktree_path,
-            &msg_store,
-        );
+                }),
+                worktree_path,
+                &msg_store,
+            )
+            .await;
 
-        state.handle_sdk_event(
-            &json!({
-                "type": "message.part.delta",
-                "properties": {
-                    "sessionID": "session-1",
-                    "messageID": "message-1",
-                    "partID": "part-1",
-                    "field": "text",
-                    "delta": "Hel"
-                }
-            }),
-            worktree_path,
-            &msg_store,
-        );
-
-        state.handle_sdk_event(
-            &json!({
-                "type": "message.part.delta",
-                "properties": {
-                    "sessionID": "session-1",
-                    "messageID": "message-1",
-                    "partID": "part-1",
-                    "field": "text",
-                    "delta": "lo"
-                }
-            }),
-            worktree_path,
-            &msg_store,
-        );
+        state
+            .handle_sdk_event(
+                &json!({
+                    "type": "message.part.delta",
+                    "properties": {
+                        "sessionID": "session-1",
+                        "messageID": "message-1",
+                        "partID": "part-1",
+                        "field": "text",
+                        "delta": "lo"
+                    }
+                }),
+                worktree_path,
+                &msg_store,
+            )
+            .await;
 
         let entries = collect_entries(&msg_store);
         let assistant_entry = entries
@@ -1351,70 +1561,78 @@ mod tests {
         }));
     }
 
-    #[test]
-    fn message_part_delta_appends_reasoning_text() {
+    #[tokio::test]
+    async fn message_part_delta_appends_reasoning_text() {
         let (mut state, msg_store) = new_state();
         let worktree_path = Path::new("/tmp");
 
-        state.handle_sdk_event(
-            &json!({
-                "type": "message.updated",
-                "properties": {
-                    "info": {
-                        "id": "message-2",
-                        "role": "assistant"
+        state
+            .handle_sdk_event(
+                &json!({
+                    "type": "message.updated",
+                    "properties": {
+                        "info": {
+                            "id": "message-2",
+                            "role": "assistant"
+                        }
                     }
-                }
-            }),
-            worktree_path,
-            &msg_store,
-        );
+                }),
+                worktree_path,
+                &msg_store,
+            )
+            .await;
 
-        state.handle_sdk_event(
-            &json!({
-                "type": "message.part.updated",
-                "properties": {
-                    "part": {
-                        "type": "reasoning",
-                        "id": "part-2",
+        state
+            .handle_sdk_event(
+                &json!({
+                    "type": "message.part.updated",
+                    "properties": {
+                        "part": {
+                            "type": "reasoning",
+                            "id": "part-2",
+                            "messageID": "message-2",
+                            "text": ""
+                        }
+                    }
+                }),
+                worktree_path,
+                &msg_store,
+            )
+            .await;
+
+        state
+            .handle_sdk_event(
+                &json!({
+                    "type": "message.part.delta",
+                    "properties": {
+                        "sessionID": "session-1",
                         "messageID": "message-2",
-                        "text": ""
+                        "partID": "part-2",
+                        "field": "text",
+                        "delta": "Think"
                     }
-                }
-            }),
-            worktree_path,
-            &msg_store,
-        );
+                }),
+                worktree_path,
+                &msg_store,
+            )
+            .await;
 
-        state.handle_sdk_event(
-            &json!({
-                "type": "message.part.delta",
-                "properties": {
-                    "sessionID": "session-1",
-                    "messageID": "message-2",
-                    "partID": "part-2",
-                    "field": "text",
-                    "delta": "Think"
-                }
-            }),
-            worktree_path,
-            &msg_store,
-        );
-
-        state.handle_sdk_event(
-            &json!({
-                "type": "message.part.delta",
-                "properties": {
-                    "sessionID": "session-1",
-                    "messageID": "message-2",
-                    "partID": "part-2",
-                    "field": "text",
-                    "delta": "ing"
-                }
-            }),
-            worktree_path,
-            &msg_store,
-        );
+        state
+            .handle_sdk_event(
+                &json!({
+                    "type": "message.part.delta",
+                    "properties": {
+                        "sessionID": "session-1",
+                        "messageID": "message-2",
+                        "partID": "part-2",
+                        "field": "text",
+                        "delta": "ing"
+                    }
+                }),
+                worktree_path,
+                &msg_store,
+            )
+            .await;
 
         let entries = collect_entries(&msg_store);
         let thinking_entry = entries
@@ -1424,27 +1642,342 @@ mod tests {
         assert_eq!(thinking_entry.content, "Thinking");
     }
 
-    #[test]
-    fn message_part_delta_for_unknown_part_is_ignored() {
+    #[tokio::test]
+    async fn message_part_delta_for_unknown_part_is_ignored() {
         let (mut state, msg_store) = new_state();
         let worktree_path = Path::new("/tmp");
 
-        state.handle_sdk_event(
-            &json!({
-                "type": "message.part.delta",
-                "properties": {
-                    "sessionID": "session-1",
-                    "messageID": "message-3",
-                    "partID": "unknown-part",
-                    "field": "text",
-                    "delta": "ignored"
-                }
-            }),
-            worktree_path,
-            &msg_store,
-        );
+        state
+            .handle_sdk_event(
+                &json!({
+                    "type": "message.part.delta",
+                    "properties": {
+                        "sessionID": "session-1",
+                        "messageID": "message-3",
+                        "partID": "unknown-part",
+                        "field": "text",
+                        "delta": "ignored"
+                    }
+                }),
+                worktree_path,
+                &msg_store,
+            )
+            .await;
 
         let entries = collect_entries(&msg_store);
         assert!(entries.is_empty());
+    }
+
+    fn create_temp_worktree(plan_content: &str) -> PathBuf {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock should be monotonic")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("opencode-normalize-{unique}"));
+        fs::create_dir_all(root.join(".opencode/plans")).expect("create plan dir");
+        fs::write(root.join(".opencode/plans/test-plan.md"), plan_content)
+            .expect("write plan file");
+        root
+    }
+
+    fn find_tool_entry<'a>(entries: &'a [NormalizedEntry], call_id: &str) -> &'a NormalizedEntry {
+        entries
+            .iter()
+            .find(|entry| {
+                let NormalizedEntryType::ToolUse { .. } = &entry.entry_type else {
+                    return false;
+                };
+
+                entry
+                    .metadata
+                    .as_ref()
+                    .and_then(|metadata| {
+                        serde_json::from_value::<ToolCallMetadata>(metadata.clone()).ok()
+                    })
+                    .is_some_and(|metadata| metadata.tool_call_id == call_id)
+            })
+            .expect("tool entry should exist")
+    }
+
+    #[tokio::test]
+    async fn question_asked_plan_exit_creates_plan_presentation_entry() {
+        let (mut state, msg_store) = new_state();
+        let plan_text = "# Plan\n- Investigate\n- Implement";
+        let worktree_path = create_temp_worktree(plan_text);
+
+        state.handle_sdk_event(
+            &json!({
+                "type": "question.asked",
+                "properties": {
+                    "id": "question-1",
+                    "sessionID": "session-1",
+                    "questions": [{
+                        "question": "Plan at .opencode/plans/test-plan.md is complete. Would you like to switch to the build agent and start implementing?",
+                        "header": "Build Agent",
+                        "options": [
+                            {"label": "Yes", "description": "Switch"},
+                            {"label": "No", "description": "Stay"}
+                        ],
+                        "custom": false
+                    }],
+                    "tool": {
+                        "messageID": "message-1",
+                        "callID": "call-plan-1"
+                    }
+                }
+            }),
+            worktree_path.as_path(),
+            &msg_store,
+        ).await;
+
+        let entries = collect_entries(&msg_store);
+        let entry = find_tool_entry(&entries, "call-plan-1");
+        assert_eq!(entry.content, plan_text);
+        match &entry.entry_type {
+            NormalizedEntryType::ToolUse {
+                tool_name,
+                action_type,
+                status,
+            } => {
+                assert_eq!(tool_name, EXIT_PLAN_MODE_NAME);
+                assert!(matches!(status, ToolStatus::Created));
+                assert!(matches!(
+                    action_type,
+                    ActionType::PlanPresentation { plan } if plan == plan_text
+                ));
+            }
+            _ => panic!("expected tool entry"),
+        }
+
+        let _ = fs::remove_dir_all(worktree_path);
+    }
+
+    #[tokio::test]
+    async fn question_asked_plan_exit_without_tool_metadata_uses_question_id() {
+        let (mut state, msg_store) = new_state();
+        let plan_text = "# Plan\n- Research\n- Ship";
+        let worktree_path = create_temp_worktree(plan_text);
+        let absolute_plan_path = worktree_path
+            .join(".opencode/plans/test-plan.md")
+            .to_string_lossy()
+            .to_string();
+
+        state
+            .handle_sdk_event(
+                &json!({
+                    "type": "question.asked",
+                    "properties": {
+                        "id": "question-no-tool",
+                        "sessionID": "session-1",
+                        "questions": [{
+                            "question": format!(
+                                "Plan ready at {absolute_plan_path}; switch to build mode now?"
+                            ),
+                            "header": "Build Agent",
+                            "options": [
+                                {"label": "Yes", "description": "Switch"},
+                                {"label": "No", "description": "Stay"}
+                            ],
+                            "custom": false
+                        }]
+                    }
+                }),
+                worktree_path.as_path(),
+                &msg_store,
+            )
+            .await;
+
+        let entries = collect_entries(&msg_store);
+        let entry = find_tool_entry(&entries, "question-no-tool");
+        assert_eq!(entry.content, plan_text);
+        match &entry.entry_type {
+            NormalizedEntryType::ToolUse {
+                tool_name,
+                action_type,
+                status,
+            } => {
+                assert_eq!(tool_name, EXIT_PLAN_MODE_NAME);
+                assert!(matches!(status, ToolStatus::Created));
+                assert!(matches!(
+                    action_type,
+                    ActionType::PlanPresentation { plan } if plan == plan_text
+                ));
+            }
+            _ => panic!("expected tool entry"),
+        }
+
+        let _ = fs::remove_dir_all(worktree_path);
+    }
+
+    #[tokio::test]
+    async fn question_asked_non_plan_creates_request_user_input_entry() {
+        let (mut state, msg_store) = new_state();
+        let worktree_path = create_temp_worktree("# Plan");
+
+        state
+            .handle_sdk_event(
+                &json!({
+                    "type": "question.asked",
+                    "properties": {
+                        "id": "question-input-1",
+                        "sessionID": "session-1",
+                        "questions": [{
+                            "question": "Which format should I use?",
+                            "header": "Format",
+                            "options": [
+                                {"label": "JSON", "description": "Structured output"},
+                                {"label": "Markdown", "description": "Human-readable output"}
+                            ],
+                            "custom": true
+                        }],
+                        "tool": {
+                            "messageID": "message-3",
+                            "callID": "call-input-1"
+                        }
+                    }
+                }),
+                worktree_path.as_path(),
+                &msg_store,
+            )
+            .await;
+
+        let entries = collect_entries(&msg_store);
+        let entry = find_tool_entry(&entries, "call-input-1");
+        match &entry.entry_type {
+            NormalizedEntryType::ToolUse {
+                tool_name,
+                action_type,
+                status,
+            } => {
+                assert_eq!(tool_name, REQUEST_USER_INPUT_TOOL_NAME);
+                assert!(matches!(status, ToolStatus::Created));
+                match action_type {
+                    ActionType::Tool {
+                        tool_name,
+                        arguments: Some(arguments),
+                        ..
+                    } => {
+                        assert_eq!(tool_name, REQUEST_USER_INPUT_TOOL_NAME);
+                        assert_eq!(arguments.get("id"), Some(&json!("question-input-1")));
+                        assert_eq!(
+                            arguments
+                                .pointer("/questions/0/options/0/value")
+                                .and_then(Value::as_str),
+                            Some("JSON")
+                        );
+                    }
+                    other => panic!("expected generic tool action, got {other:?}"),
+                }
+            }
+            _ => panic!("expected tool entry"),
+        }
+
+        let _ = fs::remove_dir_all(worktree_path);
+    }
+
+    #[tokio::test]
+    async fn plan_presentation_survives_tool_state_and_approval_updates() {
+        let (mut state, msg_store) = new_state();
+        let plan_text = "# Plan\n- Step 1\n- Step 2";
+        let worktree_path = create_temp_worktree(plan_text);
+
+        state.handle_sdk_event(
+            &json!({
+                "type": "question.asked",
+                "properties": {
+                    "id": "question-2",
+                    "sessionID": "session-1",
+                    "questions": [{
+                        "question": "Plan at .opencode/plans/test-plan.md is complete. Would you like to switch to the build agent and start implementing?",
+                        "header": "Build Agent",
+                        "options": [
+                            {"label": "Yes", "description": "Switch"},
+                            {"label": "No", "description": "Stay"}
+                        ],
+                        "custom": false
+                    }],
+                    "tool": {
+                        "messageID": "message-2",
+                        "callID": "call-plan-2"
+                    }
+                }
+            }),
+            worktree_path.as_path(),
+            &msg_store,
+        ).await;
+
+        state
+            .handle_sdk_event(
+                &json!({
+                    "type": "message.part.updated",
+                    "properties": {
+                        "part": {
+                            "type": "tool",
+                            "id": "part-1",
+                            "messageID": "message-2",
+                            "callID": "call-plan-2",
+                            "tool": "plan_exit",
+                            "state": {
+                                "status": "running",
+                                "title": "Waiting for plan approval"
+                            }
+                        }
+                    }
+                }),
+                worktree_path.as_path(),
+                &msg_store,
+            )
+            .await;
+
+        state.handle_approval_response(
+            "call-plan-2",
+            ApprovalStatus::Approved,
+            worktree_path.as_path(),
+            &msg_store,
+        );
+
+        state
+            .handle_sdk_event(
+                &json!({
+                    "type": "message.part.updated",
+                    "properties": {
+                        "part": {
+                            "type": "tool",
+                            "id": "part-1",
+                            "messageID": "message-2",
+                            "callID": "call-plan-2",
+                            "tool": "plan_exit",
+                            "state": {
+                                "status": "completed",
+                                "output": "done"
+                            }
+                        }
+                    }
+                }),
+                worktree_path.as_path(),
+                &msg_store,
+            )
+            .await;
+
+        let entries = collect_entries(&msg_store);
+        let entry = find_tool_entry(&entries, "call-plan-2");
+        assert_eq!(entry.content, plan_text);
+        match &entry.entry_type {
+            NormalizedEntryType::ToolUse {
+                tool_name,
+                action_type,
+                status,
+            } => {
+                assert_eq!(tool_name, EXIT_PLAN_MODE_NAME);
+                assert!(matches!(status, ToolStatus::Success));
+                assert!(matches!(
+                    action_type,
+                    ActionType::PlanPresentation { plan } if plan == plan_text
+                ));
+            }
+            _ => panic!("expected tool entry"),
+        }
+
+        let _ = fs::remove_dir_all(worktree_path);
     }
 }

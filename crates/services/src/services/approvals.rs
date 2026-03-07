@@ -13,8 +13,9 @@ use db::models::{
 };
 use executors::{
     approvals::ToolCallMetadata,
+    executors::opencode::EXIT_PLAN_MODE_NAME,
     logs::{
-        NormalizedEntry, NormalizedEntryType, ToolStatus,
+        ActionType, NormalizedEntry, NormalizedEntryType, ToolStatus,
         utils::patch::{ConversationPatch, extract_normalized_entry_from_patch},
     },
 };
@@ -29,11 +30,11 @@ use utils::{
 };
 use uuid::Uuid;
 
-const EXIT_PLAN_MODE_NAME: &str = "ExitPlanMode";
-
+const TOOL_USE_MATCH_WAIT_TIMEOUT: StdDuration = StdDuration::from_millis(400);
+const TOOL_USE_MATCH_POLL_INTERVAL: StdDuration = StdDuration::from_millis(10);
 #[derive(Debug)]
 struct PendingApproval {
-    entry_index: usize,
+    entry_index: Option<usize>,
     entry: NormalizedEntry,
     execution_process_id: Uuid,
     tool_name: String,
@@ -99,11 +100,18 @@ impl Approvals {
             .shared();
         let req_id = request.id.clone();
 
-        if let Some(store) = self.msg_store_by_id(&request.execution_process_id).await {
-            // Find the matching tool use entry by name and input
-            let matching_tool = find_matching_tool_use(store.clone(), &request.tool_call_id);
+        let (entry_index, entry) = if let Some(store) =
+            self.msg_store_by_id(&request.execution_process_id).await
+        {
+            if let Some((idx, matching_tool)) = wait_for_matching_tool_use(
+                store.clone(),
+                &request.tool_call_id,
+                TOOL_USE_MATCH_WAIT_TIMEOUT,
+            )
+            .await
+            {
+                let matching_tool = ensure_plan_presentation_entry(&request, matching_tool);
 
-            if let Some((idx, matching_tool)) = matching_tool {
                 let approval_entry = matching_tool
                     .with_tool_status(ToolStatus::PendingApproval {
                         approval_id: req_id.clone(),
@@ -113,35 +121,39 @@ impl Approvals {
                     .ok_or(ApprovalError::NoToolUseEntry)?;
                 store.push_patch(ConversationPatch::replace(idx, approval_entry));
 
-                self.pending.insert(
-                    req_id.clone(),
-                    PendingApproval {
-                        entry_index: idx,
-                        entry: matching_tool,
-                        execution_process_id: request.execution_process_id,
-                        tool_name: request.tool_name.clone(),
-                        response_tx: tx,
-                    },
-                );
                 tracing::debug!(
                     "Created approval {} for tool '{}' at entry index {}",
                     req_id,
                     request.tool_name,
                     idx
                 );
+                (Some(idx), matching_tool)
             } else {
                 tracing::warn!(
-                    "No matching tool use entry found for approval request: tool='{}', execution_process_id={}",
+                    "No matching tool use entry found for approval request after waiting: tool='{}', execution_process_id={}; using fallback entry",
                     request.tool_name,
                     request.execution_process_id
                 );
+                (None, build_fallback_tool_use_entry(&request))
             }
         } else {
             tracing::warn!(
-                "No msg_store found for execution_process_id: {}",
+                "No msg_store found for execution_process_id: {}; using fallback entry",
                 request.execution_process_id
             );
-        }
+            (None, build_fallback_tool_use_entry(&request))
+        };
+
+        self.pending.insert(
+            req_id.clone(),
+            PendingApproval {
+                entry_index,
+                entry,
+                execution_process_id: request.execution_process_id,
+                tool_name: request.tool_name.clone(),
+                response_tx: tx,
+            },
+        );
 
         self.spawn_timeout_watcher(req_id.clone(), request.timeout_at, waiter.clone());
         Ok((request, waiter))
@@ -159,15 +171,17 @@ impl Approvals {
             let _ = p.response_tx.send(req.status.clone());
 
             if let Some(store) = self.msg_store_by_id(&p.execution_process_id).await {
-                let status = ToolStatus::from_approval_status(&req.status).ok_or(
-                    ApprovalError::Custom(anyhow::anyhow!("Invalid approval status")),
-                )?;
-                let updated_entry = p
-                    .entry
-                    .with_tool_status(status)
-                    .ok_or(ApprovalError::NoToolUseEntry)?;
+                if let Some(entry_index) = p.entry_index {
+                    let status = ToolStatus::from_approval_status(&req.status).ok_or(
+                        ApprovalError::Custom(anyhow::anyhow!("Invalid approval status")),
+                    )?;
+                    let updated_entry = p
+                        .entry
+                        .with_tool_status(status)
+                        .ok_or(ApprovalError::NoToolUseEntry)?;
 
-                store.push_patch(ConversationPatch::replace(p.entry_index, updated_entry));
+                    store.push_patch(ConversationPatch::replace(entry_index, updated_entry));
+                }
             } else {
                 tracing::warn!(
                     "No msg_store found for execution_process_id: {}",
@@ -281,19 +295,19 @@ impl Approvals {
                 };
 
                 if let Some(store) = store {
-                    if let Some(updated_entry) = pending_approval
-                        .entry
-                        .with_tool_status(ToolStatus::TimedOut)
-                    {
-                        store.push_patch(ConversationPatch::replace(
-                            pending_approval.entry_index,
-                            updated_entry,
-                        ));
-                    } else {
-                        tracing::warn!(
-                            "Timed out approval '{}' but couldn't update tool status (no tool-use entry).",
-                            id
-                        );
+                    if let Some(entry_index) = pending_approval.entry_index {
+                        if let Some(updated_entry) = pending_approval
+                            .entry
+                            .with_tool_status(ToolStatus::TimedOut)
+                        {
+                            store
+                                .push_patch(ConversationPatch::replace(entry_index, updated_entry));
+                        } else {
+                            tracing::warn!(
+                                "Timed out approval '{}' but couldn't update tool status (no tool-use entry).",
+                                id
+                            );
+                        }
                     }
                 } else {
                     tracing::warn!(
@@ -373,10 +387,96 @@ pub(crate) async fn ensure_task_in_review(pool: &SqlitePool, execution_process_i
     }
 }
 
+fn ensure_plan_presentation_entry(
+    request: &ApprovalRequest,
+    entry: NormalizedEntry,
+) -> NormalizedEntry {
+    if request.tool_name != EXIT_PLAN_MODE_NAME {
+        return entry;
+    }
+
+    let Some(plan) = request
+        .tool_input
+        .get("plan")
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|plan| !plan.is_empty())
+    else {
+        return entry;
+    };
+
+    let already_plan_entry = matches!(
+        entry.entry_type,
+        NormalizedEntryType::ToolUse {
+            action_type: executors::logs::ActionType::PlanPresentation { .. },
+            ..
+        }
+    );
+    if already_plan_entry {
+        return entry;
+    }
+
+    NormalizedEntry {
+        timestamp: entry.timestamp.clone(),
+        entry_type: NormalizedEntryType::ToolUse {
+            tool_name: EXIT_PLAN_MODE_NAME.to_string(),
+            action_type: executors::logs::ActionType::PlanPresentation {
+                plan: plan.to_string(),
+            },
+            status: ToolStatus::Created,
+        },
+        content: plan.to_string(),
+        metadata: entry.metadata.clone(),
+    }
+}
+
+fn build_fallback_tool_use_entry(request: &ApprovalRequest) -> NormalizedEntry {
+    let metadata = serde_json::to_value(ToolCallMetadata {
+        tool_call_id: request.tool_call_id.clone(),
+    })
+    .ok();
+    let plan = request
+        .tool_input
+        .get("plan")
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|plan| !plan.is_empty())
+        .map(str::to_string);
+
+    if request.tool_name == EXIT_PLAN_MODE_NAME {
+        let plan = plan.unwrap_or_else(|| "Plan content unavailable".to_string());
+        return NormalizedEntry {
+            timestamp: None,
+            entry_type: NormalizedEntryType::ToolUse {
+                tool_name: EXIT_PLAN_MODE_NAME.to_string(),
+                action_type: ActionType::PlanPresentation { plan: plan.clone() },
+                status: ToolStatus::Created,
+            },
+            content: plan,
+            metadata,
+        };
+    }
+
+    NormalizedEntry {
+        timestamp: None,
+        entry_type: NormalizedEntryType::ToolUse {
+            tool_name: request.tool_name.clone(),
+            action_type: ActionType::Tool {
+                tool_name: request.tool_name.clone(),
+                arguments: Some(request.tool_input.clone()),
+                result: None,
+            },
+            status: ToolStatus::Created,
+        },
+        content: request.tool_name.clone(),
+        metadata,
+    }
+}
+
 /// Find a matching tool use entry that hasn't been assigned to an approval yet
 /// Matches by tool call id from tool metadata
 fn find_matching_tool_use(
-    store: Arc<MsgStore>,
+    store: &MsgStore,
     tool_call_id: &str,
 ) -> Option<(usize, NormalizedEntry)> {
     let history = store.get_history();
@@ -411,12 +511,39 @@ fn find_matching_tool_use(
     None
 }
 
+async fn wait_for_matching_tool_use(
+    store: Arc<MsgStore>,
+    tool_call_id: &str,
+    timeout: StdDuration,
+) -> Option<(usize, NormalizedEntry)> {
+    let deadline = tokio::time::Instant::now() + timeout;
+
+    loop {
+        if let Some(entry) = find_matching_tool_use(store.as_ref(), tool_call_id) {
+            return Some(entry);
+        }
+
+        let now = tokio::time::Instant::now();
+        if now >= deadline {
+            return None;
+        }
+
+        let remaining = deadline.saturating_duration_since(now);
+        tokio::time::sleep(std::cmp::min(remaining, TOOL_USE_MATCH_POLL_INTERVAL)).await;
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
+    use std::{collections::HashMap, sync::Arc};
 
     use executors::logs::{ActionType, NormalizedEntry, NormalizedEntryType, ToolStatus};
-    use utils::msg_store::MsgStore;
+    use tokio::sync::RwLock;
+    use utils::{
+        approvals::{ApprovalRequest, CreateApprovalRequest},
+        log_msg::LogMsg,
+        msg_store::MsgStore,
+    };
 
     use super::*;
 
@@ -465,11 +592,11 @@ mod tests {
         );
 
         let (idx_foo, _) =
-            find_matching_tool_use(store.clone(), "foo-id").expect("Should match foo.rs");
+            find_matching_tool_use(store.as_ref(), "foo-id").expect("Should match foo.rs");
         let (idx_bar, _) =
-            find_matching_tool_use(store.clone(), "bar-id").expect("Should match bar.rs");
+            find_matching_tool_use(store.as_ref(), "bar-id").expect("Should match bar.rs");
         let (idx_baz, _) =
-            find_matching_tool_use(store.clone(), "baz-id").expect("Should match baz.rs");
+            find_matching_tool_use(store.as_ref(), "baz-id").expect("Should match baz.rs");
 
         assert_eq!(idx_foo, 0, "foo.rs should match first entry");
         assert_eq!(idx_bar, 1, "bar.rs should match second entry");
@@ -491,14 +618,185 @@ mod tests {
         );
 
         assert!(
-            find_matching_tool_use(store.clone(), "pending-id").is_none(),
+            find_matching_tool_use(store.as_ref(), "pending-id").is_none(),
             "Should not match tools in PendingApproval state"
         );
 
         // Test 3: Wrong tool id returns None
         assert!(
-            find_matching_tool_use(store.clone(), "wrong-id").is_none(),
+            find_matching_tool_use(store.as_ref(), "wrong-id").is_none(),
             "Should not match different tool ids"
         );
+    }
+
+    fn latest_entry(store: &MsgStore) -> NormalizedEntry {
+        store
+            .get_history()
+            .iter()
+            .filter_map(|msg| match msg {
+                LogMsg::JsonPatch(patch) => extract_normalized_entry_from_patch(patch),
+                _ => None,
+            })
+            .max_by_key(|(idx, _)| *idx)
+            .map(|(_, entry)| entry)
+            .expect("expected at least one normalized entry")
+    }
+
+    #[tokio::test]
+    async fn create_with_waiter_rewrites_exit_plan_mode_entry_to_plan_presentation() {
+        let store = Arc::new(MsgStore::new());
+        let execution_process_id = Uuid::new_v4();
+        let plan_text = "# Plan\n- Step 1";
+        let call_id = "plan-call-id";
+
+        let raw_entry = create_tool_use_entry("plan_exit", "plan.md", call_id, ToolStatus::Created);
+        store.push_patch(
+            executors::logs::utils::patch::ConversationPatch::add_normalized_entry(0, raw_entry),
+        );
+
+        let mut map = HashMap::new();
+        map.insert(execution_process_id, store.clone());
+        let approvals = Approvals::new(Arc::new(RwLock::new(map)));
+
+        let request = ApprovalRequest::from_create(
+            CreateApprovalRequest {
+                tool_name: EXIT_PLAN_MODE_NAME.to_string(),
+                tool_input: serde_json::json!({ "plan": plan_text }),
+                tool_call_id: call_id.to_string(),
+            },
+            execution_process_id,
+        );
+
+        let (_created_request, _waiter) = approvals
+            .create_with_waiter(request)
+            .await
+            .expect("approval request should be created");
+
+        let pending = approvals.list_pending();
+        assert_eq!(pending.len(), 1);
+
+        let pending_entry = &pending[0].entry;
+        assert_eq!(pending_entry.content, plan_text);
+        match &pending_entry.entry_type {
+            NormalizedEntryType::ToolUse {
+                tool_name,
+                action_type,
+                status,
+            } => {
+                assert_eq!(tool_name, EXIT_PLAN_MODE_NAME);
+                assert!(matches!(status, ToolStatus::Created));
+                assert!(matches!(
+                    action_type,
+                    ActionType::PlanPresentation { plan } if plan == plan_text
+                ));
+            }
+            _ => panic!("expected tool entry"),
+        }
+
+        let latest = latest_entry(&store);
+        match latest.entry_type {
+            NormalizedEntryType::ToolUse {
+                tool_name,
+                action_type,
+                status,
+            } => {
+                assert_eq!(tool_name, EXIT_PLAN_MODE_NAME);
+                assert!(matches!(status, ToolStatus::PendingApproval { .. }));
+                assert!(matches!(
+                    action_type,
+                    ActionType::PlanPresentation { plan } if plan == plan_text
+                ));
+            }
+            _ => panic!("expected pending tool entry"),
+        }
+    }
+
+    #[tokio::test]
+    async fn create_with_waiter_waits_for_delayed_tool_entry() {
+        let store = Arc::new(MsgStore::new());
+        let execution_process_id = Uuid::new_v4();
+        let call_id = "delayed-tool-id";
+
+        let mut map = HashMap::new();
+        map.insert(execution_process_id, store.clone());
+        let approvals = Approvals::new(Arc::new(RwLock::new(map)));
+
+        let delayed_store = store.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+            delayed_store.push_patch(
+                executors::logs::utils::patch::ConversationPatch::add_normalized_entry(
+                    0,
+                    create_tool_use_entry("Read", "delayed.rs", call_id, ToolStatus::Created),
+                ),
+            );
+        });
+
+        let request = ApprovalRequest::from_create(
+            CreateApprovalRequest {
+                tool_name: "Read".to_string(),
+                tool_input: serde_json::json!({ "tool_call": { "id": call_id } }),
+                tool_call_id: call_id.to_string(),
+            },
+            execution_process_id,
+        );
+
+        let (_created_request, _waiter) = approvals
+            .create_with_waiter(request)
+            .await
+            .expect("approval request should be created");
+
+        let latest = latest_entry(&store);
+        match latest.entry_type {
+            NormalizedEntryType::ToolUse { status, .. } => {
+                assert!(matches!(status, ToolStatus::PendingApproval { .. }));
+            }
+            _ => panic!("expected pending tool entry"),
+        }
+    }
+
+    #[tokio::test]
+    async fn create_with_waiter_keeps_pending_when_tool_entry_missing() {
+        let store = Arc::new(MsgStore::new());
+        let execution_process_id = Uuid::new_v4();
+        let plan_text = "# Plan\n- Fallback";
+
+        let mut map = HashMap::new();
+        map.insert(execution_process_id, store);
+        let approvals = Approvals::new(Arc::new(RwLock::new(map)));
+
+        let request = ApprovalRequest::from_create(
+            CreateApprovalRequest {
+                tool_name: EXIT_PLAN_MODE_NAME.to_string(),
+                tool_input: serde_json::json!({ "plan": plan_text }),
+                tool_call_id: "missing-tool-entry".to_string(),
+            },
+            execution_process_id,
+        );
+
+        let (_created_request, waiter) = approvals
+            .create_with_waiter(request)
+            .await
+            .expect("approval request should be created");
+
+        let wait_result = tokio::time::timeout(std::time::Duration::from_millis(30), waiter).await;
+        assert!(
+            wait_result.is_err(),
+            "waiter should remain pending instead of resolving immediately"
+        );
+
+        let pending = approvals.list_pending();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].tool_name, EXIT_PLAN_MODE_NAME);
+        assert_eq!(pending[0].entry.content, plan_text);
+        match &pending[0].entry.entry_type {
+            NormalizedEntryType::ToolUse { action_type, .. } => {
+                assert!(matches!(
+                    action_type,
+                    ActionType::PlanPresentation { plan } if plan == plan_text
+                ));
+            }
+            _ => panic!("expected tool entry"),
+        }
     }
 }

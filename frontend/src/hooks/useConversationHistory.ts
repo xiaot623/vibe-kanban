@@ -572,8 +572,8 @@ export const useConversationHistory = ({
       const entries = flattenEntriesForEmit(executionProcessState);
       let modifiedAddEntryType = addEntryType;
 
-      // Modify so that if add entry type is 'running' and last entry is a plan, emit special plan type
-      if (entries.length > 0) {
+      // If this is a live-running emit and the last entry is a plan, emit special plan type.
+      if (addEntryType === 'running' && entries.length > 0) {
         const lastEntry = entries[entries.length - 1];
         if (
           lastEntry.type === 'NORMALIZED_ENTRY' &&

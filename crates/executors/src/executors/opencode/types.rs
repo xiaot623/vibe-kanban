@@ -39,6 +39,9 @@ pub(super) enum SdkEvent {
     MessagePartRemoved,
     PermissionAsked(PermissionAskedEvent),
     PermissionReplied,
+    QuestionAsked(QuestionAskedEvent),
+    QuestionReplied(QuestionRepliedEvent),
+    QuestionRejected,
     SessionIdle,
     SessionStatus(SessionStatusEvent),
     SessionDiff,
@@ -70,6 +73,13 @@ impl SdkEvent {
                 SdkEvent::PermissionAsked(serde_json::from_value(envelope.properties).ok()?)
             }
             "permission.replied" => SdkEvent::PermissionReplied,
+            "question.asked" => {
+                SdkEvent::QuestionAsked(serde_json::from_value(envelope.properties).ok()?)
+            }
+            "question.replied" => {
+                SdkEvent::QuestionReplied(serde_json::from_value(envelope.properties).ok()?)
+            }
+            "question.rejected" => SdkEvent::QuestionRejected,
             "session.idle" => SdkEvent::SessionIdle,
             "session.status" => {
                 SdkEvent::SessionStatus(serde_json::from_value(envelope.properties).ok()?)
@@ -180,6 +190,51 @@ pub(super) struct PermissionAskedEvent {
 pub(super) struct PermissionToolInfo {
     #[serde(rename = "callID")]
     pub(super) call_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub(super) struct QuestionAskedEvent {
+    pub(super) id: String,
+    #[serde(rename = "sessionID")]
+    pub(super) session_id: String,
+    #[serde(default)]
+    pub(super) questions: Vec<QuestionInfo>,
+    #[serde(default)]
+    pub(super) tool: Option<QuestionToolInfo>,
+}
+
+#[derive(Debug, Deserialize)]
+pub(super) struct QuestionInfo {
+    pub(super) question: String,
+    #[serde(default)]
+    pub(super) header: Option<String>,
+    #[serde(default)]
+    pub(super) options: Vec<QuestionOption>,
+    #[serde(default)]
+    pub(super) multiple: Option<bool>,
+    #[serde(default)]
+    pub(super) custom: Option<bool>,
+}
+
+#[derive(Debug, Deserialize)]
+pub(super) struct QuestionOption {
+    pub(super) label: String,
+    #[serde(default)]
+    pub(super) description: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub(super) struct QuestionToolInfo {
+    #[serde(rename = "callID")]
+    pub(super) call_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub(super) struct QuestionRepliedEvent {
+    #[serde(rename = "sessionID")]
+    pub(super) session_id: String,
+    #[serde(rename = "requestID")]
+    pub(super) request_id: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -357,5 +412,45 @@ mod tests {
         assert_eq!(event.part_id, "part-1");
         assert_eq!(event.field, "text");
         assert_eq!(event.delta, "hello");
+    }
+
+    #[test]
+    fn parses_question_asked_event_with_tool_call() {
+        let raw = json!({
+            "type": "question.asked",
+            "properties": {
+                "id": "question-1",
+                "sessionID": "session-1",
+                "questions": [{
+                    "question": "Plan at .opencode/plans/123-plan.md is complete. Would you like to switch to the build agent and start implementing?",
+                    "header": "Build Agent",
+                    "options": [
+                        { "label": "Yes", "description": "Switch to build agent" },
+                        { "label": "No", "description": "Keep refining plan" }
+                    ],
+                    "custom": false
+                }],
+                "tool": {
+                    "messageID": "message-1",
+                    "callID": "tool-call-1"
+                }
+            }
+        });
+
+        let event = SdkEvent::parse(&raw).expect("question.asked should parse");
+        let SdkEvent::QuestionAsked(event) = event else {
+            panic!("expected question.asked variant");
+        };
+
+        assert_eq!(event.id, "question-1");
+        assert_eq!(event.session_id, "session-1");
+        assert_eq!(event.questions.len(), 1);
+        assert_eq!(event.questions[0].header.as_deref(), Some("Build Agent"));
+        assert_eq!(event.questions[0].options.len(), 2);
+        assert_eq!(event.questions[0].options[0].label, "Yes");
+        assert_eq!(
+            event.tool.as_ref().map(|tool| tool.call_id.as_str()),
+            Some("tool-call-1")
+        );
     }
 }

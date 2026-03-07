@@ -1,6 +1,7 @@
 use std::{
     collections::HashSet,
     io,
+    path::Path,
     sync::{Arc, Once},
     time::Duration,
 };
@@ -9,15 +10,20 @@ use eventsource_stream::Eventsource;
 use futures::{FutureExt, StreamExt};
 use reqwest::header::{HeaderMap, HeaderValue};
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{Value, json};
 use tokio::{
+    fs,
     io::{AsyncWrite, AsyncWriteExt, BufWriter},
     sync::{Mutex, mpsc, oneshot},
 };
 use tokio_util::sync::CancellationToken;
 use workspace_utils::approvals::ApprovalStatus;
 
-use super::types::OpencodeExecutorEvent;
+use super::{
+    EXIT_PLAN_MODE_NAME,
+    plan_mode::{REQUEST_USER_INPUT_TOOL_NAME, parse_plan_exit_relative_path},
+    types::{OpencodeExecutorEvent, QuestionAskedEvent},
+};
 use crate::{
     approvals::{ExecutorApprovalError, ExecutorApprovalService},
     executors::ExecutorError,
@@ -75,8 +81,8 @@ pub struct RunConfig {
     pub resume_session_id: Option<String>,
     pub model: Option<String>,
     pub agent: Option<String>,
-    pub approvals: Option<Arc<dyn ExecutorApprovalService>>,
-    pub auto_approve: bool,
+    pub permission_approvals: Option<Arc<dyn ExecutorApprovalService>>,
+    pub plan_approvals: Option<Arc<dyn ExecutorApprovalService>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -203,8 +209,8 @@ async fn run_session_inner(
             directory: config.directory.clone(),
             session_id: session_id.clone(),
             log_writer: log_writer.clone(),
-            approvals: config.approvals.clone(),
-            auto_approve: config.auto_approve,
+            permission_approvals: config.permission_approvals.clone(),
+            plan_approvals: config.plan_approvals.clone(),
             control_tx,
         },
         event_resp,
@@ -568,8 +574,8 @@ struct EventListenerConfig {
     directory: String,
     session_id: String,
     log_writer: LogWriter,
-    approvals: Option<Arc<dyn ExecutorApprovalService>>,
-    auto_approve: bool,
+    permission_approvals: Option<Arc<dyn ExecutorApprovalService>>,
+    plan_approvals: Option<Arc<dyn ExecutorApprovalService>>,
     control_tx: mpsc::UnboundedSender<ControlEvent>,
 }
 
@@ -580,12 +586,13 @@ async fn spawn_event_listener(config: EventListenerConfig, initial_resp: reqwest
         directory,
         session_id,
         log_writer,
-        approvals,
-        auto_approve,
+        permission_approvals,
+        plan_approvals,
         control_tx,
     } = config;
 
     let mut seen_permissions: HashSet<String> = HashSet::new();
+    let mut seen_questions: HashSet<String> = HashSet::new();
     let mut last_event_id: Option<String> = None;
     let mut base_retry_delay = Duration::from_millis(3000);
     let mut attempt: u32 = 0;
@@ -631,11 +638,12 @@ async fn spawn_event_listener(config: EventListenerConfig, initial_resp: reqwest
                 directory: &directory,
                 session_id: &session_id,
                 log_writer: &log_writer,
-                approvals: approvals.clone(),
-                auto_approve,
+                permission_approvals: permission_approvals.clone(),
+                plan_approvals: plan_approvals.clone(),
                 control_tx: &control_tx,
                 base_retry_delay: &mut base_retry_delay,
                 last_event_id: &mut last_event_id,
+                seen_questions: &mut seen_questions,
             },
             current_resp,
         )
@@ -674,13 +682,14 @@ enum EventStreamOutcome {
 
 struct EventStreamContext<'a> {
     seen_permissions: &'a mut HashSet<String>,
+    seen_questions: &'a mut HashSet<String>,
     client: &'a reqwest::Client,
     base_url: &'a str,
     directory: &'a str,
     session_id: &'a str,
     log_writer: &'a LogWriter,
-    approvals: Option<Arc<dyn ExecutorApprovalService>>,
-    auto_approve: bool,
+    permission_approvals: Option<Arc<dyn ExecutorApprovalService>>,
+    plan_approvals: Option<Arc<dyn ExecutorApprovalService>>,
     control_tx: &'a mpsc::UnboundedSender<ControlEvent>,
     base_retry_delay: &'a mut Duration,
     last_event_id: &'a mut Option<String>,
@@ -785,19 +794,18 @@ async fn process_event_stream(
                     .cloned()
                     .unwrap_or_else(|| serde_json::json!({}));
 
-                let approvals = ctx.approvals.clone();
+                let approvals = ctx.permission_approvals.clone();
                 let client = ctx.client.clone();
                 let base_url = ctx.base_url.to_string();
                 let directory = ctx.directory.to_string();
                 let log_writer = ctx.log_writer.clone();
-                let auto_approve = ctx.auto_approve;
                 tokio::spawn(async move {
-                    let status = request_permission_approval(
-                        auto_approve,
+                    let status = request_tool_approval(
                         approvals,
                         &permission,
                         tool_input,
                         &tool_call_id,
+                        false,
                     )
                     .await;
 
@@ -856,6 +864,115 @@ async fn process_event_stream(
                         .await;
                 });
             }
+            "question.asked" => {
+                let Some(question) = parse_question_asked_event(&data) else {
+                    let _ = ctx
+                        .log_writer
+                        .log_error(format!(
+                            "OpenCode question.asked event had invalid payload: {data}"
+                        ))
+                        .await;
+                    continue;
+                };
+
+                let request_id = question.id.trim().to_string();
+                if request_id.is_empty() || !ctx.seen_questions.insert(request_id.clone()) {
+                    continue;
+                }
+
+                let plan_exit = detect_plan_exit_question(&question);
+                let tool_call_id = plan_exit
+                    .as_ref()
+                    .map(|p| p.tool_call_id.clone())
+                    .unwrap_or_else(|| question_tool_call_id(&question));
+                let approvals = if plan_exit.is_some() {
+                    ctx.plan_approvals.clone()
+                } else {
+                    ctx.permission_approvals.clone()
+                };
+
+                let client = ctx.client.clone();
+                let base_url = ctx.base_url.to_string();
+                let directory = ctx.directory.to_string();
+                let log_writer = ctx.log_writer.clone();
+
+                tokio::spawn(async move {
+                    let is_plan_exit = plan_exit.is_some();
+                    let (tool_name, tool_input, strict_approval) =
+                        if let Some(plan_exit) = plan_exit {
+                            let mut plan_content =
+                                match load_plan_content(&directory, &plan_exit.plan_relative_path)
+                                    .await
+                                {
+                                    Ok(plan) => plan,
+                                    Err(err) => {
+                                        let _ = log_writer
+                                            .log_error(format!(
+                                                "Failed to read OpenCode plan `{}`: {err}",
+                                                plan_exit.plan_relative_path
+                                            ))
+                                            .await;
+                                        question
+                                            .questions
+                                            .first()
+                                            .map(|q| q.question.clone())
+                                            .unwrap_or_default()
+                                    }
+                                };
+
+                            if plan_content.trim().is_empty()
+                                && let Some(fallback) = question
+                                    .questions
+                                    .first()
+                                    .map(|q| q.question.trim())
+                                    .filter(|q| !q.is_empty())
+                            {
+                                plan_content = fallback.to_string();
+                            }
+
+                            (EXIT_PLAN_MODE_NAME, json!({ "plan": plan_content }), true)
+                        } else {
+                            (
+                                REQUEST_USER_INPUT_TOOL_NAME,
+                                build_question_approval_input(&question),
+                                false,
+                            )
+                        };
+
+                    let status = request_tool_approval(
+                        approvals,
+                        tool_name,
+                        tool_input,
+                        &tool_call_id,
+                        strict_approval,
+                    )
+                    .await;
+
+                    let _ = log_writer
+                        .log_event(&OpencodeExecutorEvent::ApprovalResponse {
+                            tool_call_id: tool_call_id.clone(),
+                            status: status.clone(),
+                        })
+                        .await;
+
+                    let answers = if is_plan_exit {
+                        vec![vec![plan_exit_answer_from_status(&status).to_string()]]
+                    } else {
+                        build_question_reply_answers(&question, &status)
+                    };
+
+                    if let Err(err) =
+                        send_question_reply(&client, &base_url, &directory, &request_id, answers)
+                            .await
+                    {
+                        let _ = log_writer
+                            .log_error(format!(
+                                "Failed to reply to OpenCode question `{request_id}`: {err}"
+                            ))
+                            .await;
+                    }
+                });
+            }
             _ => {}
         }
     }
@@ -871,7 +988,8 @@ fn event_matches_session(event_type: &str, event: &Value, session_id: &str) -> b
         "message.part.updated" => event
             .pointer("/properties/part/sessionID")
             .and_then(Value::as_str),
-        "permission.asked" | "permission.replied" | "session.idle" | "session.error" => event
+        "permission.asked" | "permission.replied" | "question.asked" | "question.replied"
+        | "question.rejected" | "session.idle" | "session.error" => event
             .pointer("/properties/sessionID")
             .and_then(Value::as_str),
         _ => event
@@ -892,17 +1010,233 @@ fn event_matches_session(event_type: &str, event: &Value, session_id: &str) -> b
     extracted == Some(session_id)
 }
 
-async fn request_permission_approval(
-    auto_approve: bool,
+#[derive(Debug)]
+struct PlanExitQuestion {
+    tool_call_id: String,
+    plan_relative_path: String,
+}
+
+fn parse_question_asked_event(event: &Value) -> Option<QuestionAskedEvent> {
+    event
+        .get("properties")
+        .and_then(|properties| serde_json::from_value(properties.clone()).ok())
+}
+
+fn question_tool_call_id(question: &QuestionAskedEvent) -> String {
+    question
+        .tool
+        .as_ref()
+        .map(|tool| tool.call_id.trim().to_string())
+        .filter(|call_id| !call_id.is_empty())
+        .unwrap_or_else(|| question.id.clone())
+}
+
+fn detect_plan_exit_question(question: &QuestionAskedEvent) -> Option<PlanExitQuestion> {
+    let tool_call_id = question_tool_call_id(question);
+    if tool_call_id.trim().is_empty() {
+        return None;
+    }
+
+    let plan_relative_path = question
+        .questions
+        .iter()
+        .find_map(|item| parse_plan_exit_relative_path(&item.question))?;
+
+    Some(PlanExitQuestion {
+        tool_call_id,
+        plan_relative_path,
+    })
+}
+
+async fn load_plan_content(directory: &str, relative_path: &str) -> Result<String, io::Error> {
+    let full_path = Path::new(directory).join(relative_path);
+    fs::read_to_string(full_path).await
+}
+
+fn build_question_approval_input(question: &QuestionAskedEvent) -> Value {
+    let questions = question
+        .questions
+        .iter()
+        .enumerate()
+        .map(|(index, item)| {
+            let options = item
+                .options
+                .iter()
+                .map(|option| {
+                    let mut payload = serde_json::Map::new();
+                    payload.insert("label".to_string(), Value::String(option.label.clone()));
+                    payload.insert("value".to_string(), Value::String(option.label.clone()));
+                    if let Some(description) = option
+                        .description
+                        .as_ref()
+                        .map(|desc| desc.trim())
+                        .filter(|desc| !desc.is_empty())
+                    {
+                        payload.insert(
+                            "description".to_string(),
+                            Value::String(description.to_string()),
+                        );
+                    }
+                    Value::Object(payload)
+                })
+                .collect::<Vec<_>>();
+
+            let mut payload = serde_json::Map::new();
+            payload.insert("id".to_string(), Value::String(question_approval_id(index)));
+            payload.insert(
+                "header".to_string(),
+                Value::String(
+                    item.header
+                        .as_deref()
+                        .map(str::trim)
+                        .filter(|header| !header.is_empty())
+                        .map(str::to_string)
+                        .unwrap_or_else(|| format!("Question {}", index + 1)),
+                ),
+            );
+            payload.insert(
+                "question".to_string(),
+                Value::String(item.question.trim().to_string()),
+            );
+            payload.insert("options".to_string(), Value::Array(options));
+
+            if item.multiple.unwrap_or(false) {
+                payload.insert("multiSelectMin".to_string(), json!(1));
+                payload.insert(
+                    "multiSelectMax".to_string(),
+                    json!(item.options.len().max(1)),
+                );
+            }
+
+            if let Some(custom) = item.custom {
+                payload.insert("custom".to_string(), Value::Bool(custom));
+            }
+
+            Value::Object(payload)
+        })
+        .collect::<Vec<_>>();
+
+    json!({
+        "id": question.id,
+        "session_id": question.session_id,
+        "questions": questions,
+    })
+}
+
+fn question_approval_id(index: usize) -> String {
+    format!("question_{}", index + 1)
+}
+
+fn build_question_reply_answers(
+    question: &QuestionAskedEvent,
+    status: &ApprovalStatus,
+) -> Vec<Vec<String>> {
+    let count = question.questions.len();
+    if count == 0 {
+        return Vec::new();
+    }
+
+    let mut answers = vec![Vec::new(); count];
+    if let ApprovalStatus::ProvidedInput { input } = status {
+        answers = parse_question_reply_answers_from_input(input, count);
+    }
+    answers
+}
+
+fn parse_question_reply_answers_from_input(
+    input: &Value,
+    question_count: usize,
+) -> Vec<Vec<String>> {
+    let mut answers = vec![Vec::new(); question_count];
+    let source = input
+        .get("answers")
+        .or_else(|| input.get("updated_input").and_then(|v| v.get("answers")))
+        .unwrap_or(input);
+
+    match source {
+        Value::Array(values) => {
+            for (index, value) in values.iter().take(question_count).enumerate() {
+                answers[index] = parse_answer_values(value);
+            }
+        }
+        Value::Object(values) => {
+            for index in 0..question_count {
+                let key = question_approval_id(index);
+                let alt_zero_based = index.to_string();
+                let alt_one_based = (index + 1).to_string();
+                if let Some(value) = values
+                    .get(&key)
+                    .or_else(|| values.get(&alt_zero_based))
+                    .or_else(|| values.get(&alt_one_based))
+                {
+                    answers[index] = parse_answer_values(value);
+                }
+            }
+        }
+        _ => {}
+    }
+
+    answers
+}
+
+fn parse_answer_values(value: &Value) -> Vec<String> {
+    match value {
+        Value::Array(values) => values
+            .iter()
+            .filter_map(Value::as_str)
+            .map(str::trim)
+            .filter(|answer| !answer.is_empty())
+            .map(str::to_string)
+            .collect(),
+        Value::Object(record) => record
+            .get("answers")
+            .map(parse_answer_values)
+            .unwrap_or_default(),
+        Value::String(value) => {
+            let trimmed = value.trim();
+            if trimmed.is_empty() {
+                Vec::new()
+            } else {
+                vec![trimmed.to_string()]
+            }
+        }
+        _ => Vec::new(),
+    }
+}
+
+fn plan_exit_answer_from_status(status: &ApprovalStatus) -> &'static str {
+    match status {
+        ApprovalStatus::Approved | ApprovalStatus::ProvidedInput { .. } => "Yes",
+        ApprovalStatus::Denied { .. } | ApprovalStatus::TimedOut | ApprovalStatus::Pending => "No",
+    }
+}
+
+async fn send_question_reply(
+    client: &reqwest::Client,
+    base_url: &str,
+    directory: &str,
+    request_id: &str,
+    answers: Vec<Vec<String>>,
+) -> Result<(), ExecutorError> {
+    client
+        .post(format!("{base_url}/question/{request_id}/reply"))
+        .query(&[("directory", directory)])
+        .json(&json!({ "answers": answers }))
+        .send()
+        .await
+        .map_err(|err| ExecutorError::Io(io::Error::other(err)))?
+        .error_for_status()
+        .map_err(|err| ExecutorError::Io(io::Error::other(err)))?;
+    Ok(())
+}
+
+async fn request_tool_approval(
     approvals: Option<Arc<dyn ExecutorApprovalService>>,
     tool_name: &str,
     tool_input: Value,
     tool_call_id: &str,
+    strict: bool,
 ) -> ApprovalStatus {
-    if auto_approve {
-        return ApprovalStatus::Approved;
-    }
-
     let Some(approvals) = approvals else {
         return ApprovalStatus::Approved;
     };
@@ -914,9 +1248,207 @@ async fn request_permission_approval(
         Ok(status) => status,
         Err(
             ExecutorApprovalError::ServiceUnavailable | ExecutorApprovalError::SessionNotRegistered,
-        ) => ApprovalStatus::Approved,
+        ) if !strict => ApprovalStatus::Approved,
+        Err(
+            err @ (ExecutorApprovalError::ServiceUnavailable
+            | ExecutorApprovalError::SessionNotRegistered),
+        ) => {
+            tracing::warn!(
+                tool_name,
+                tool_call_id,
+                error = %err,
+                "OpenCode strict approval failed; denying plan-exit request"
+            );
+            ApprovalStatus::Denied {
+                reason: Some(format!("Approval request failed: {err}")),
+            }
+        }
         Err(err) => ApprovalStatus::Denied {
             reason: Some(format!("Approval request failed: {err}")),
         },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use async_trait::async_trait;
+    use serde_json::json;
+    use workspace_utils::approvals::ApprovalStatus;
+
+    use super::*;
+    use crate::approvals::{ExecutorApprovalError, ExecutorApprovalService};
+
+    enum StubApprovalResult {
+        ServiceUnavailable,
+        SessionNotRegistered,
+    }
+
+    struct StubApprovalService {
+        result: StubApprovalResult,
+    }
+
+    #[async_trait]
+    impl ExecutorApprovalService for StubApprovalService {
+        async fn request_tool_approval(
+            &self,
+            _tool_name: &str,
+            _tool_input: Value,
+            _tool_call_id: &str,
+        ) -> Result<ApprovalStatus, ExecutorApprovalError> {
+            match &self.result {
+                StubApprovalResult::ServiceUnavailable => {
+                    Err(ExecutorApprovalError::ServiceUnavailable)
+                }
+                StubApprovalResult::SessionNotRegistered => {
+                    Err(ExecutorApprovalError::SessionNotRegistered)
+                }
+            }
+        }
+    }
+
+    fn sample_question_event(question_count: usize) -> QuestionAskedEvent {
+        let questions = (0..question_count)
+            .map(|index| {
+                json!({
+                    "question": format!("Question {}", index + 1),
+                    "header": format!("Header {}", index + 1),
+                    "options": [
+                        { "label": "Yes", "description": "approve" },
+                        { "label": "No", "description": "reject" }
+                    ],
+                    "custom": false
+                })
+            })
+            .collect::<Vec<_>>();
+
+        serde_json::from_value(json!({
+            "id": "question-1",
+            "sessionID": "session-1",
+            "questions": questions,
+            "tool": {
+                "callID": "call-1"
+            }
+        }))
+        .expect("question payload should deserialize")
+    }
+
+    fn sample_plan_question_event(with_tool_call: bool) -> QuestionAskedEvent {
+        let mut payload = json!({
+            "id": "question-plan-1",
+            "sessionID": "session-1",
+            "questions": [{
+                "question": "Plan generated at /tmp/worktree/.opencode/plans/plan-1.md; switch to build mode?",
+                "header": "Build Agent",
+                "options": [
+                    { "label": "Yes", "description": "Switch to build agent" },
+                    { "label": "No", "description": "Keep refining plan" }
+                ],
+                "custom": false
+            }]
+        });
+
+        if with_tool_call {
+            payload["tool"] = json!({ "callID": "call-plan-1" });
+        }
+
+        serde_json::from_value(payload).expect("plan question payload should deserialize")
+    }
+
+    #[test]
+    fn build_question_reply_answers_parses_nested_answer_shapes() {
+        let question = sample_question_event(3);
+        let status = ApprovalStatus::ProvidedInput {
+            input: json!({
+                "updated_input": {
+                    "answers": {
+                        "question_1": [" yes ", ""],
+                        "1": " no ",
+                        "question_3": { "answers": ["Option A", " Option B "] }
+                    }
+                }
+            }),
+        };
+
+        let answers = build_question_reply_answers(&question, &status);
+        assert_eq!(
+            answers,
+            vec![
+                vec!["yes".to_string()],
+                vec!["no".to_string()],
+                vec!["Option A".to_string(), "Option B".to_string()]
+            ]
+        );
+    }
+
+    #[test]
+    fn detect_plan_exit_question_parses_absolute_plan_path() {
+        let question = sample_plan_question_event(true);
+        let detected = detect_plan_exit_question(&question).expect("plan exit should be detected");
+        assert_eq!(detected.tool_call_id, "call-plan-1");
+        assert_eq!(detected.plan_relative_path, ".opencode/plans/plan-1.md");
+    }
+
+    #[test]
+    fn detect_plan_exit_question_falls_back_to_question_id_when_tool_missing() {
+        let question = sample_plan_question_event(false);
+        let detected = detect_plan_exit_question(&question).expect("plan exit should be detected");
+        assert_eq!(detected.tool_call_id, "question-plan-1");
+        assert_eq!(detected.plan_relative_path, ".opencode/plans/plan-1.md");
+    }
+
+    #[tokio::test]
+    async fn request_tool_approval_non_strict_service_errors_auto_approve() {
+        let service = Arc::new(StubApprovalService {
+            result: StubApprovalResult::ServiceUnavailable,
+        });
+
+        let status = request_tool_approval(
+            Some(service),
+            REQUEST_USER_INPUT_TOOL_NAME,
+            json!({}),
+            "call-1",
+            false,
+        )
+        .await;
+        assert!(matches!(status, ApprovalStatus::Approved));
+    }
+
+    #[tokio::test]
+    async fn request_tool_approval_strict_service_errors_deny() {
+        let service = Arc::new(StubApprovalService {
+            result: StubApprovalResult::SessionNotRegistered,
+        });
+
+        let status = request_tool_approval(
+            Some(service),
+            EXIT_PLAN_MODE_NAME,
+            json!({ "plan": "# Plan" }),
+            "call-plan-1",
+            true,
+        )
+        .await;
+
+        match status {
+            ApprovalStatus::Denied { reason } => {
+                let reason = reason.expect("strict denial should include reason");
+                assert!(reason.contains("session not registered"));
+            }
+            other => panic!("expected denied status, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn request_tool_approval_none_defaults_to_approved() {
+        let status = request_tool_approval(
+            None,
+            REQUEST_USER_INPUT_TOOL_NAME,
+            json!({}),
+            "call-none",
+            true,
+        )
+        .await;
+        assert!(matches!(status, ApprovalStatus::Approved));
     }
 }

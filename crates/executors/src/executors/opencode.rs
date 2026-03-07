@@ -28,9 +28,11 @@ use crate::{
 };
 
 mod normalize_logs;
+mod plan_mode;
 mod sdk;
 mod types;
 
+pub use plan_mode::EXIT_PLAN_MODE_NAME;
 use sdk::{LogWriter, RunConfig, run_session};
 
 static CODEX_COMMAND: LazyLock<String> =
@@ -146,7 +148,7 @@ impl Opencode {
 
         let directory = current_dir.to_string_lossy().to_string();
         let base_url = wait_for_server_url(server_stdout).await?;
-        let approvals = if self.auto_approve {
+        let permission_approvals = if self.auto_approve {
             None
         } else {
             self.approvals.clone()
@@ -159,8 +161,9 @@ impl Opencode {
             resume_session_id: resume_session.map(|s| s.to_string()),
             model: self.model.clone(),
             agent: self.mode.clone(),
-            approvals,
-            auto_approve: self.auto_approve,
+            permission_approvals,
+            // Plan approvals always require review when an approval service is available.
+            plan_approvals: self.approvals.clone(),
         };
 
         tokio::spawn(async move {
