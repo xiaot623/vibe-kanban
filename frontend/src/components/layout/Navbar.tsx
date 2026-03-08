@@ -27,7 +27,7 @@ import { useOpenProjectInEditor } from '@/hooks/useOpenProjectInEditor';
 import { OpenInIdeButton } from '@/components/ide/OpenInIdeButton';
 import { useProjectRepos } from '@/hooks';
 import { RepoPickerDialog } from '@/components/dialogs/shared/RepoPickerDialog';
-import { projectsApi } from '@/lib/api';
+import { projectsApi, tasksApi } from '@/lib/api';
 import { useUserSystem } from '@/components/ConfigProvider';
 
 const INTERNAL_NAV = [{ label: 'Projects', icon: FolderOpen, to: '/projects' }];
@@ -136,6 +136,61 @@ export function Navbar() {
     navigate(`/projects/${dailyProject.id}/tasks`);
   }, [navigate, updateAndSaveConfig]);
 
+  const cleanupStaleDailyInReviewTasks = useCallback(
+    async (dailyProjectId: string) => {
+      try {
+        const tasks = await tasksApi.getByProject(dailyProjectId);
+        const now = new Date();
+        const minAgeMs = 12 * 60 * 60 * 1000;
+
+        const staleInReviewTasks = tasks.filter((task) => {
+          if (task.status !== 'inreview') {
+            return false;
+          }
+
+          const createdAt = new Date(task.created_at);
+          if (Number.isNaN(createdAt.getTime())) {
+            return false;
+          }
+
+          const ageMs = now.getTime() - createdAt.getTime();
+          if (ageMs < minAgeMs) {
+            return false;
+          }
+
+          const createdToday =
+            createdAt.getFullYear() === now.getFullYear() &&
+            createdAt.getMonth() === now.getMonth() &&
+            createdAt.getDate() === now.getDate();
+
+          return !createdToday;
+        });
+
+        if (staleInReviewTasks.length === 0) {
+          return;
+        }
+
+        const cleanupResults = await Promise.allSettled(
+          staleInReviewTasks.map((task) =>
+            tasksApi.delete(task.id, { expectedStatus: 'inreview' })
+          )
+        );
+
+        const failedCount = cleanupResults.filter(
+          (result) => result.status === 'rejected'
+        ).length;
+        if (failedCount > 0) {
+          console.warn(
+            `Daily cleanup skipped ${failedCount}/${staleInReviewTasks.length} tasks due to delete failures.`
+          );
+        }
+      } catch (error) {
+        console.warn('Failed to cleanup stale Daily InReview tasks.', error);
+      }
+    },
+    []
+  );
+
   const handleEnterDailyMode = useCallback(async () => {
     if (!config || enterDailyModeInFlightRef.current) {
       return;
@@ -149,6 +204,7 @@ export function Navbar() {
       if (dailyProjectId) {
         try {
           await projectsApi.getById(dailyProjectId);
+          await cleanupStaleDailyInReviewTasks(dailyProjectId);
           navigate(`/projects/${dailyProjectId}/tasks`);
           return;
         } catch (error) {
@@ -171,7 +227,13 @@ export function Navbar() {
       enterDailyModeInFlightRef.current = false;
       setIsEnteringDailyMode(false);
     }
-  }, [clearDailyModeProject, config, navigate, runDailyModeOnboarding]);
+  }, [
+    cleanupStaleDailyInReviewTasks,
+    clearDailyModeProject,
+    config,
+    navigate,
+    runDailyModeOnboarding,
+  ]);
 
   return (
     <div className="border-b bg-background">

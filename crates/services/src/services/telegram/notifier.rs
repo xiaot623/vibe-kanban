@@ -38,7 +38,7 @@ use utils::{log_msg::LogMsg, msg_store::MsgStore};
 use uuid::Uuid;
 
 use super::{EXIT_PLAN_MODE_NAME, keyboard};
-use crate::services::{approvals::Approvals, git::GitService};
+use crate::services::{approvals::Approvals, config::Config, git::GitService};
 
 /// Telegram context for event handlers.
 #[derive(Clone)]
@@ -47,6 +47,7 @@ pub struct TelegramContext {
     pub bot: Bot,
     pub chat_id: ChatId,
     pub interactive_bot: bool,
+    pub config: Arc<RwLock<Config>>,
     pub approvals: Approvals,
     pub git: GitService,
 }
@@ -464,6 +465,7 @@ struct RunFeedAccumulator {
     current_seq: usize,
     last_summary_seq: usize,
     task_id: Option<Uuid>,
+    task_project_id: Option<Uuid>,
     task_title: Option<String>,
     sent_pending_approvals: HashSet<String>,
     sent_terminal_tool_updates: HashSet<(usize, &'static str)>,
@@ -555,8 +557,9 @@ impl RunFeedAccumulator {
         self.last_summary_seq = self.current_seq;
     }
 
-    fn remember_task(&mut self, task_id: Uuid, title: &str) {
+    fn remember_task(&mut self, task_id: Uuid, task_project_id: Uuid, title: &str) {
         self.task_id = Some(task_id);
+        self.task_project_id = Some(task_project_id);
         self.task_title = Some(title.to_string());
     }
 }
@@ -647,7 +650,7 @@ async fn run_feed_watcher_loop(
                 return;
             }
         };
-        accumulator.remember_task(task.id, &task.title);
+        accumulator.remember_task(task.id, task.project_id, &task.title);
 
         if task.status != TaskStatus::InProgress {
             emit_stage_summary(&tg, &mut accumulator, SummaryTrigger::TaskLeftInProgress).await;
@@ -1065,18 +1068,57 @@ async fn emit_stage_summary(
         lines.push("Token usage: n/a".to_string());
     }
 
-    let summary_markup = if matches!(
+    let is_daily_task = is_daily_project_task(tg, accumulator.task_project_id).await;
+    let summary_markup = stage_summary_keyboard(trigger, accumulator.task_id, is_daily_task);
+    send_split_telegram_card(tg, lines.join("\n"), summary_markup).await;
+    accumulator.finalize_stage();
+}
+
+fn stage_summary_keyboard(
+    trigger: SummaryTrigger,
+    task_id: Option<Uuid>,
+    is_daily_task: bool,
+) -> Option<teloxide::types::InlineKeyboardMarkup> {
+    if !matches!(
         trigger,
         SummaryTrigger::ExecutionFinished | SummaryTrigger::TaskLeftInProgress
     ) {
-        accumulator
-            .task_id
-            .map(keyboard::stage_summary_reply_keyboard)
+        return None;
+    }
+
+    let task_id = task_id?;
+    Some(if is_daily_task {
+        keyboard::stage_summary_reply_done_keyboard(task_id)
     } else {
-        None
+        keyboard::stage_summary_reply_keyboard(task_id)
+    })
+}
+
+async fn is_daily_project_task(tg: &TelegramContext, task_project_id: Option<Uuid>) -> bool {
+    let Some(task_project_id) = task_project_id else {
+        return false;
     };
-    send_split_telegram_card(tg, lines.join("\n"), summary_markup).await;
-    accumulator.finalize_stage();
+
+    let daily_project_id = {
+        let config = tg.config.read().await;
+        config.daily_mode.project_id.clone()
+    };
+
+    let Some(daily_project_id) = daily_project_id else {
+        return false;
+    };
+
+    match Uuid::parse_str(&daily_project_id) {
+        Ok(daily_project_id) => task_project_id == daily_project_id,
+        Err(err) => {
+            tracing::warn!(
+                "Invalid daily_mode.project_id in config: {} ({})",
+                daily_project_id,
+                err
+            );
+            false
+        }
+    }
 }
 
 async fn send_telegram_card(
@@ -1335,8 +1377,10 @@ mod tests {
     use executors::logs::{
         ActionType, NormalizedEntry, NormalizedEntryError, NormalizedEntryType, ToolStatus,
     };
+    use serde_json::Value;
 
     use super::*;
+    use crate::services::telegram::callback::CallbackAction;
 
     #[test]
     fn split_plan_empty() {
@@ -1363,6 +1407,67 @@ mod tests {
     fn split_telegram_message_splits_when_over_limit() {
         let chunks = split_telegram_message("abcdefghij", 4);
         assert_eq!(chunks, vec!["abcd", "efgh", "ij"]);
+    }
+
+    #[test]
+    fn stage_summary_keyboard_uses_reply_done_for_daily_task() {
+        let task_id = Uuid::new_v4();
+        let markup = stage_summary_keyboard(SummaryTrigger::ExecutionFinished, Some(task_id), true)
+            .expect("keyboard should be present");
+        let value = serde_json::to_value(markup).expect("keyboard should serialize");
+        let row = value["inline_keyboard"]
+            .get(0)
+            .and_then(Value::as_array)
+            .expect("first row should be present");
+
+        assert_eq!(row.len(), 2);
+        assert_eq!(
+            CallbackAction::decode(
+                row[0]["callback_data"]
+                    .as_str()
+                    .expect("reply callback should exist")
+            ),
+            Some(CallbackAction::FollowUpReply { task_id })
+        );
+        assert_eq!(
+            CallbackAction::decode(
+                row[1]["callback_data"]
+                    .as_str()
+                    .expect("done callback should exist")
+            ),
+            Some(CallbackAction::DoneTask { task_id })
+        );
+    }
+
+    #[test]
+    fn stage_summary_keyboard_uses_reply_only_for_non_daily_task() {
+        let task_id = Uuid::new_v4();
+        let markup =
+            stage_summary_keyboard(SummaryTrigger::TaskLeftInProgress, Some(task_id), false)
+                .expect("keyboard should be present");
+        let value = serde_json::to_value(markup).expect("keyboard should serialize");
+        let row = value["inline_keyboard"]
+            .get(0)
+            .and_then(Value::as_array)
+            .expect("first row should be present");
+
+        assert_eq!(row.len(), 1);
+        assert_eq!(
+            CallbackAction::decode(
+                row[0]["callback_data"]
+                    .as_str()
+                    .expect("reply callback should exist")
+            ),
+            Some(CallbackAction::FollowUpReply { task_id })
+        );
+    }
+
+    #[test]
+    fn stage_summary_keyboard_omits_buttons_for_next_action_trigger() {
+        assert!(
+            stage_summary_keyboard(SummaryTrigger::NextAction, Some(Uuid::new_v4()), true)
+                .is_none()
+        );
     }
 
     fn entry(entry_type: NormalizedEntryType, content: &str) -> NormalizedEntry {

@@ -55,6 +55,8 @@ pub enum CallbackAction {
     Refresh { task_id: Uuid },
     /// Send a follow-up reply for a task (opens text input dialogue)
     FollowUpReply { task_id: Uuid },
+    /// Mark a Daily task as Done (attempt merge first when needed)
+    DoneTask { task_id: Uuid },
     /// Pagination for task lists
     TaskPage { project_id: Uuid, page: u16 },
     /// Cancel current dialogue and go home
@@ -88,6 +90,7 @@ impl CallbackAction {
             Self::NewTaskProject { .. } => "np",
             Self::Refresh { .. } => "rf",
             Self::FollowUpReply { .. } => "fr",
+            Self::DoneTask { .. } => "fd",
             Self::TaskPage { .. } => "tp",
             Self::Cancel => "ca",
             Self::Skip => "sk",
@@ -122,7 +125,8 @@ impl CallbackAction {
             | Self::ApproveYes { task_id }
             | Self::RejectInput { task_id }
             | Self::Refresh { task_id }
-            | Self::FollowUpReply { task_id } => {
+            | Self::FollowUpReply { task_id }
+            | Self::DoneTask { task_id } => {
                 format!("v1|{}|{}", self.tag(), short_uuid(task_id))
             }
             Self::ToolApprove { approval_id } | Self::ToolReject { approval_id } => {
@@ -229,6 +233,9 @@ impl CallbackAction {
             "fr" => Some(Self::FollowUpReply {
                 task_id: parse_short_uuid(parts.get(2)?)?,
             }),
+            "fd" => Some(Self::DoneTask {
+                task_id: parse_short_uuid(parts.get(2)?)?,
+            }),
             "tp" => {
                 let project_id = parse_short_uuid(parts.get(2)?)?;
                 let page: u16 = parts.get(3)?.parse().ok()?;
@@ -320,6 +327,7 @@ mod tests {
             },
             CallbackAction::Refresh { task_id: id },
             CallbackAction::FollowUpReply { task_id: id },
+            CallbackAction::DoneTask { task_id: id },
             CallbackAction::NewTaskProject { project_id: id },
         ];
         for action in actions {
@@ -439,6 +447,7 @@ mod tests {
             },
             CallbackAction::Refresh { task_id: id },
             CallbackAction::FollowUpReply { task_id: id },
+            CallbackAction::DoneTask { task_id: id },
             CallbackAction::NewTaskProject { project_id: id },
             CallbackAction::TaskPage {
                 project_id: id,

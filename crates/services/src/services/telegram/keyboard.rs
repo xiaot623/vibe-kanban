@@ -232,6 +232,14 @@ pub fn stage_summary_reply_keyboard(task_id: Uuid) -> InlineKeyboardMarkup {
     )]])
 }
 
+/// Build follow-up + done buttons shown after Daily task stage summaries.
+pub fn stage_summary_reply_done_keyboard(task_id: Uuid) -> InlineKeyboardMarkup {
+    InlineKeyboardMarkup::new(vec![vec![
+        btn("💬 Reply", CallbackAction::FollowUpReply { task_id }),
+        btn("✅ Done", CallbackAction::DoneTask { task_id }),
+    ]])
+}
+
 /// Build a task list with inline buttons for each task.
 pub fn task_list_keyboard(
     tasks: &[(Uuid, String, String)], // (task_id, short_id, title)
@@ -308,5 +316,61 @@ fn truncate(s: &str, max: usize) -> String {
     } else {
         let truncated: String = s.chars().take(max).collect();
         format!("{truncated}…")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::Value;
+
+    use super::*;
+
+    fn callback_data(button: &Value) -> &str {
+        button
+            .get("callback_data")
+            .and_then(Value::as_str)
+            .expect("callback_data should be present")
+    }
+
+    #[test]
+    fn stage_summary_reply_done_keyboard_contains_reply_and_done_buttons() {
+        let task_id = Uuid::new_v4();
+        let keyboard = stage_summary_reply_done_keyboard(task_id);
+        let value = serde_json::to_value(keyboard).expect("keyboard should serialize");
+        let row = value["inline_keyboard"]
+            .get(0)
+            .and_then(Value::as_array)
+            .expect("first row should exist");
+
+        assert_eq!(row.len(), 2);
+        assert_eq!(row[0]["text"], "💬 Reply");
+        assert_eq!(
+            CallbackAction::decode(callback_data(&row[0])),
+            Some(CallbackAction::FollowUpReply { task_id })
+        );
+        assert_eq!(row[1]["text"], "✅ Done");
+        assert_eq!(
+            CallbackAction::decode(callback_data(&row[1])),
+            Some(CallbackAction::DoneTask { task_id })
+        );
+    }
+
+    #[test]
+    fn stage_summary_reply_done_keyboard_callback_data_stays_within_limit() {
+        let task_id = Uuid::new_v4();
+        let keyboard = stage_summary_reply_done_keyboard(task_id);
+        let value = serde_json::to_value(keyboard).expect("keyboard should serialize");
+        let row = value["inline_keyboard"]
+            .get(0)
+            .and_then(Value::as_array)
+            .expect("first row should exist");
+
+        for button in row {
+            assert!(
+                callback_data(button).len() <= 64,
+                "callback_data exceeds Telegram limit: {}",
+                callback_data(button)
+            );
+        }
     }
 }

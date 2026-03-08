@@ -81,6 +81,7 @@ impl TelegramBotService {
             bot: bot.clone(),
             chat_id,
             interactive_bot,
+            config: self.config.clone(),
             approvals: self.approvals.clone(),
             git: self.git.clone(),
         };

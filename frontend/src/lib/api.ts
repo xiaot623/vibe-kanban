@@ -24,6 +24,7 @@ import {
   SearchMode,
   SearchResult,
   Task,
+  TaskStatus,
   TaskRelationships,
   Tag,
   TagSearchParams,
@@ -320,6 +321,13 @@ export const tasksApi = {
     return handleApiResponse<Task>(response);
   },
 
+  getByProject: async (projectId: string): Promise<TaskWithAttemptStatus[]> => {
+    const response = await makeRequest(
+      `/api/tasks?project_id=${encodeURIComponent(projectId)}`
+    );
+    return handleApiResponse<TaskWithAttemptStatus[]>(response);
+  },
+
   create: async (data: CreateTask): Promise<Task> => {
     const response = await makeRequest(`/api/tasks`, {
       method: 'POST',
@@ -346,8 +354,18 @@ export const tasksApi = {
     return handleApiResponse<Task>(response);
   },
 
-  delete: async (taskId: string): Promise<void> => {
-    const response = await makeRequest(`/api/tasks/${taskId}`, {
+  delete: async (
+    taskId: string,
+    options?: { expectedStatus?: TaskStatus }
+  ): Promise<void> => {
+    const params = new URLSearchParams();
+    if (options?.expectedStatus) {
+      params.set('expected_status', options.expectedStatus);
+    }
+    const query = params.toString();
+    const path = query ? `/api/tasks/${taskId}?${query}` : `/api/tasks/${taskId}`;
+
+    const response = await makeRequest(path, {
       method: 'DELETE',
     });
     return handleApiResponse<void>(response);

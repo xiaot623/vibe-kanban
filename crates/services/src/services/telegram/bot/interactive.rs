@@ -5,8 +5,10 @@ use db::models::{
     project::Project,
     short_id_mapping::ShortIdMapping,
     task::{CreateTask, Task, TaskStatus, UpdateTask},
+    workspace::Workspace,
 };
 use executors::{executors::BaseCodingAgent, profile::ExecutorConfigs};
+use serde::{Deserialize, Serialize};
 use teloxide::{
     dispatching::{Dispatcher, UpdateFilterExt, dialogue::InMemStorage},
     dptree,
@@ -35,6 +37,17 @@ use crate::services::{
 /// Type alias for the dialogue handle used in handlers.
 type BotDialogue =
     teloxide::dispatching::dialogue::Dialogue<DialogueState, InMemStorage<DialogueState>>;
+
+#[derive(Debug, Deserialize)]
+struct DoneRepoBranchStatus {
+    repo_id: Uuid,
+    commits_ahead: Option<usize>,
+}
+
+#[derive(Debug, Serialize)]
+struct MergeTaskAttemptBody {
+    repo_id: Uuid,
+}
 
 // ─── Commands ────────────────────────────────────────────────────────
 
@@ -346,6 +359,9 @@ async fn handle_callback(
         }
         CallbackAction::FollowUpReply { task_id } => {
             handle_follow_up_reply_start(&bot, chat_id, task_id, &dialogue).await?;
+        }
+        CallbackAction::DoneTask { task_id } => {
+            handle_done_task(&bot, chat_id, &service, task_id).await?;
         }
         CallbackAction::ToolApprove { approval_id } => {
             handle_tool_approval_callback(&bot, &q, chat_id, &service, &approval_id, true).await?;
@@ -1123,6 +1139,214 @@ async fn handle_follow_up_reply_finish(
         }
     }
     Ok(())
+}
+
+async fn handle_done_task(
+    bot: &Bot,
+    chat_id: ChatId,
+    service: &TelegramBotService,
+    task_id: Uuid,
+) -> ResponseResult<()> {
+    let task = match Task::find_by_id(&service.db.pool, task_id).await {
+        Ok(Some(task)) => task,
+        Ok(None) => {
+            bot.send_message(chat_id, "Task not found. It may have been deleted.")
+                .reply_markup(keyboard::home_only_keyboard())
+                .await?;
+            return Ok(());
+        }
+        Err(e) => {
+            bot.send_message(chat_id, format!("Failed to load task: {e}"))
+                .reply_markup(keyboard::home_only_keyboard())
+                .await?;
+            return Ok(());
+        }
+    };
+
+    let daily_project_id = {
+        let config = service.config.read().await;
+        config.daily_mode.project_id.clone()
+    };
+    let Some(daily_project_id) = daily_project_id else {
+        bot.send_message(chat_id, "Daily Mode is not configured.")
+            .reply_markup(keyboard::home_only_keyboard())
+            .await?;
+        return Ok(());
+    };
+
+    let daily_project_id = match Uuid::parse_str(&daily_project_id) {
+        Ok(id) => id,
+        Err(e) => {
+            bot.send_message(
+                chat_id,
+                format!("Daily Mode project id is invalid. Please reconfigure it: {e}"),
+            )
+            .reply_markup(keyboard::home_only_keyboard())
+            .await?;
+            return Ok(());
+        }
+    };
+
+    if task.project_id != daily_project_id {
+        bot.send_message(
+            chat_id,
+            "Done is only available for Daily Project tasks from this card.",
+        )
+        .reply_markup(keyboard::home_only_keyboard())
+        .await?;
+        return Ok(());
+    }
+
+    let mut merge_attempted = 0usize;
+    let mut merge_succeeded = 0usize;
+    let mut merge_failures: Vec<String> = Vec::new();
+
+    // Workspace::fetch_all already returns newest-first, so we take the first as the latest attempt.
+    let latest_workspace = match Workspace::fetch_all(&service.db.pool, Some(task.id)).await {
+        Ok(workspaces) => workspaces.into_iter().next(),
+        Err(e) => {
+            merge_failures.push(format!("Failed to load task attempts: {e}"));
+            None
+        }
+    };
+
+    if let Some(workspace) = latest_workspace {
+        let base_url = match api_base_url().await {
+            Ok(url) => Some(url),
+            Err(e) => {
+                merge_failures.push(format!("Failed to locate API server: {e}"));
+                None
+            }
+        };
+
+        if let Some(base_url) = base_url {
+            let client = reqwest::Client::new();
+            match fetch_mergeable_repo_ids(&client, &base_url, workspace.id).await {
+                Ok(repo_ids) => {
+                    merge_attempted = repo_ids.len();
+                    for repo_id in repo_ids {
+                        match merge_repo_from_workspace(&client, &base_url, workspace.id, repo_id)
+                            .await
+                        {
+                            Ok(()) => {
+                                merge_succeeded = merge_succeeded.saturating_add(1);
+                            }
+                            Err(err) => {
+                                merge_failures
+                                    .push(format!("Merge failed for repo {}: {}", repo_id, err));
+                            }
+                        }
+                    }
+                }
+                Err(err) => {
+                    merge_failures.push(format!("Failed to inspect merge status: {err}"));
+                }
+            }
+        }
+    }
+
+    let marked_done = if task.status == TaskStatus::Done {
+        true
+    } else {
+        match Task::update_status(&service.db.pool, task.id, TaskStatus::Done).await {
+            Ok(_) => true,
+            Err(e) => {
+                merge_failures.push(format!("Failed to mark task Done: {e}"));
+                false
+            }
+        }
+    };
+
+    let summary = if merge_attempted == 0 {
+        "No mergeable commits found.".to_string()
+    } else if merge_succeeded == merge_attempted {
+        format!("Merged {merge_succeeded}/{merge_attempted} repo(s).")
+    } else {
+        format!("Merged {merge_succeeded}/{merge_attempted} repo(s) with warnings.")
+    };
+
+    let status_line = if marked_done {
+        "✅ Task status is now Done."
+    } else {
+        "❌ Failed to set task status to Done."
+    };
+
+    let mut message = format!("{summary}\n{status_line}");
+    if !merge_failures.is_empty() {
+        let details = merge_failures
+            .iter()
+            .map(|item| format!("- {}", truncate_text(item, 220)))
+            .collect::<Vec<_>>()
+            .join("\n");
+        message.push_str("\n\nWarnings:\n");
+        message.push_str(&details);
+    }
+
+    bot.send_message(chat_id, message)
+        .reply_markup(keyboard::home_only_keyboard())
+        .await?;
+    Ok(())
+}
+
+async fn fetch_mergeable_repo_ids(
+    client: &reqwest::Client,
+    base_url: &str,
+    workspace_id: Uuid,
+) -> Result<Vec<Uuid>, String> {
+    let response = client
+        .get(format!(
+            "{base_url}/task-attempts/{workspace_id}/branch-status"
+        ))
+        .send()
+        .await
+        .map_err(|e| format!("Branch status request failed: {e}"))?;
+
+    let status = response.status();
+    let body = response
+        .text()
+        .await
+        .map_err(|e| format!("Failed to read branch status response: {e}"))?;
+    let api_response: ApiResponse<Vec<DoneRepoBranchStatus>> = serde_json::from_str(&body)
+        .map_err(|e| format!("Failed to parse branch status response ({status}): {e}"))?;
+
+    let error_message = api_response.message().map(String::from);
+    let statuses = api_response.into_data().ok_or_else(|| {
+        error_message.unwrap_or_else(|| "Branch status request was unsuccessful.".to_string())
+    })?;
+
+    Ok(statuses
+        .into_iter()
+        .filter(|status| status.commits_ahead.unwrap_or(0) > 0)
+        .map(|status| status.repo_id)
+        .collect())
+}
+
+async fn merge_repo_from_workspace(
+    client: &reqwest::Client,
+    base_url: &str,
+    workspace_id: Uuid,
+    repo_id: Uuid,
+) -> Result<(), String> {
+    let response = client
+        .post(format!("{base_url}/task-attempts/{workspace_id}/merge"))
+        .json(&MergeTaskAttemptBody { repo_id })
+        .send()
+        .await
+        .map_err(|e| format!("Merge request failed: {e}"))?;
+
+    let status = response.status();
+    let body = response
+        .text()
+        .await
+        .map_err(|e| format!("Failed to read merge response: {e}"))?;
+    let api_response: ApiResponse<()> = serde_json::from_str(&body)
+        .map_err(|e| format!("Failed to parse merge response ({status}): {e}"))?;
+
+    let error_message = api_response.message().map(String::from);
+    match api_response.into_data() {
+        Some(_) => Ok(()),
+        None => Err(error_message.unwrap_or_else(|| "Merge request failed.".to_string())),
+    }
 }
 
 async fn handle_edit_start(
