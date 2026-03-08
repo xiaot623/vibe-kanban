@@ -753,40 +753,149 @@ fn read_skill_info(
 }
 
 fn parse_frontmatter_metadata(content: &str) -> Option<HashMap<String, String>> {
-    let mut lines = content.lines();
-    if lines.next()?.trim() != "---" {
+    let lines = content.lines().collect::<Vec<_>>();
+    if lines.first()?.trim() != "---" {
         return None;
     }
 
     let mut metadata = HashMap::new();
-    for line in lines {
+    let mut index = 1;
+    while index < lines.len() {
+        let line = lines[index];
         let trimmed = line.trim();
         if trimmed == "---" {
             return Some(metadata);
         }
 
         if trimmed.is_empty() || trimmed.starts_with('#') {
+            index += 1;
             continue;
         }
 
         // Ignore nested YAML blocks (metadata: or indented values).
         if line.starts_with(' ') || line.starts_with('\t') {
+            index += 1;
             continue;
         }
 
         let Some((key, raw_value)) = trimmed.split_once(':') else {
+            index += 1;
             continue;
         };
 
         let key = key.trim();
         if key.is_empty() {
+            index += 1;
             continue;
         }
 
-        metadata.insert(key.to_string(), strip_wrapping_quotes(raw_value.trim()));
+        let raw_value = raw_value.trim();
+        if let Some(block_style) = parse_block_style(raw_value) {
+            let mut block_lines = Vec::new();
+            let mut block_index = index + 1;
+            while block_index < lines.len() {
+                let block_line = lines[block_index];
+                let block_trimmed = block_line.trim();
+                if block_trimmed == "---" {
+                    break;
+                }
+                if block_trimmed.is_empty()
+                    || block_line.starts_with(' ')
+                    || block_line.starts_with('\t')
+                {
+                    block_lines.push(block_line.to_string());
+                    block_index += 1;
+                    continue;
+                }
+                break;
+            }
+
+            metadata.insert(
+                key.to_string(),
+                parse_block_scalar_value(&block_lines, block_style),
+            );
+            index = block_index;
+            continue;
+        }
+
+        metadata.insert(key.to_string(), strip_wrapping_quotes(raw_value));
+        index += 1;
     }
 
     None
+}
+
+#[derive(Copy, Clone)]
+enum YamlBlockStyle {
+    Literal,
+    Folded,
+}
+
+fn parse_block_style(raw_value: &str) -> Option<YamlBlockStyle> {
+    let mut chars = raw_value.chars();
+    let style = match chars.next()? {
+        '|' => YamlBlockStyle::Literal,
+        '>' => YamlBlockStyle::Folded,
+        _ => return None,
+    };
+
+    for ch in chars {
+        if ch == '+' || ch == '-' || ch.is_ascii_digit() {
+            continue;
+        }
+        if ch.is_whitespace() {
+            break;
+        }
+        return None;
+    }
+
+    Some(style)
+}
+
+fn parse_block_scalar_value(lines: &[String], style: YamlBlockStyle) -> String {
+    let min_indent = lines
+        .iter()
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| {
+            line.chars()
+                .take_while(|ch| *ch == ' ' || *ch == '\t')
+                .count()
+        })
+        .min()
+        .unwrap_or(0);
+
+    let normalized = lines
+        .iter()
+        .map(|line| {
+            if line.trim().is_empty() {
+                String::new()
+            } else {
+                line.chars().skip(min_indent).collect::<String>()
+            }
+        })
+        .collect::<Vec<_>>();
+
+    match style {
+        YamlBlockStyle::Literal => normalized.join("\n"),
+        YamlBlockStyle::Folded => fold_block_lines(&normalized),
+    }
+}
+
+fn fold_block_lines(lines: &[String]) -> String {
+    let mut folded = String::new();
+    for (index, line) in lines.iter().enumerate() {
+        if index > 0 {
+            let previous_is_blank = lines[index - 1].trim().is_empty();
+            let current_is_blank = line.trim().is_empty();
+            if previous_is_blank || current_is_blank {
+                folded.push('\n');
+            } else {
+                folded.push(' ');
+            }
+        }
+        folded.push_str(line);
+    }
+    folded
 }
 
 fn strip_wrapping_quotes(value: &str) -> String {
@@ -1239,6 +1348,34 @@ mod tests {
         assert_eq!(discovered.len(), 1);
         assert_eq!(discovered[0].folder_name, "valid-skill");
         assert_eq!(discovered[0].info.name, "Valid");
+    }
+
+    #[test]
+    fn parse_frontmatter_multiline_description_literal_block() {
+        let content = r#"---
+name: visualization-expert
+description: |
+  Chart selection and data visualization guidance for effective data communication.
+  Use when: creating visualizations and choosing chart types.
+license: MIT
+metadata:
+  author: awesome-llm-apps
+  version: "1.0.0"
+---
+"#;
+
+        let metadata =
+            parse_frontmatter_metadata(content).expect("frontmatter metadata should parse");
+        assert_eq!(
+            metadata
+                .get("description")
+                .expect("description should exist"),
+            "Chart selection and data visualization guidance for effective data communication.\nUse when: creating visualizations and choosing chart types."
+        );
+        assert_eq!(
+            metadata.get("license").expect("license should parse"),
+            "MIT"
+        );
     }
 
     #[test]
