@@ -40,12 +40,20 @@ import { ChevronRight, Info } from 'lucide-react';
 import { skillsApi } from '@/lib/api';
 import type { ImportSkillsBody, ImportSkillsResponse } from 'shared/types';
 import { SkillsAgentSettings } from './SkillsAgentSettings';
+import { folderNameFromPath } from './skillsUtils';
 
 interface ImportFormState {
   source: string;
   git_ref: string;
   subpath: string;
   skill_filter: string;
+}
+
+interface CanonicalSkillRow {
+  name: string;
+  description: string;
+  path: string;
+  folderName: string;
 }
 
 const defaultImportForm: ImportFormState = {
@@ -76,6 +84,11 @@ export function SkillsAllSettings() {
   const [importError, setImportError] = useState<string | null>(null);
   const [lastImportResult, setLastImportResult] =
     useState<ImportSkillsResponse | null>(null);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
+  const [deletingSkill, setDeletingSkill] = useState<string | null>(null);
+  const [skillToDelete, setSkillToDelete] = useState<CanonicalSkillRow | null>(
+    null
+  );
 
   const {
     data: skillsResponse,
@@ -108,12 +121,39 @@ export function SkillsAllSettings() {
   });
 
   const sortedSkills = useMemo(
-    () =>
-      [...(skillsResponse?.skills ?? [])].sort((left, right) =>
-        left.name.localeCompare(right.name)
-      ),
+    (): CanonicalSkillRow[] =>
+      [...(skillsResponse?.skills ?? [])]
+        .sort((left, right) => left.name.localeCompare(right.name))
+        .map((skill) => ({
+          ...skill,
+          folderName: folderNameFromPath(skill.path),
+        })),
     [skillsResponse?.skills]
   );
+
+  const deleteMutation = useMutation({
+    mutationFn: (skillName: string) => skillsApi.deleteCanonical(skillName),
+    onMutate: (skillName: string) => {
+      setDeleteError(null);
+      setDeletingSkill(skillName);
+    },
+    onSuccess: async () => {
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: ['skills', 'all'] }),
+        queryClient.invalidateQueries({ queryKey: ['skills', 'links'] }),
+      ]);
+    },
+    onError: (err) => {
+      setDeleteError(
+        err instanceof Error
+          ? err.message
+          : t('settings.skills.errors.deleteFailed')
+      );
+    },
+    onSettled: () => {
+      setDeletingSkill(null);
+    },
+  });
 
   const handleImportSubmit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
@@ -125,6 +165,16 @@ export function SkillsAllSettings() {
     }
 
     await importMutation.mutateAsync(toImportBody(importForm));
+  };
+
+  const handleDeleteSkill = (skill: CanonicalSkillRow) => {
+    setSkillToDelete(skill);
+  };
+
+  const handleDeleteConfirm = async () => {
+    if (!skillToDelete) return;
+    await deleteMutation.mutateAsync(skillToDelete.folderName);
+    setSkillToDelete(null);
   };
 
   return (
@@ -162,6 +212,11 @@ export function SkillsAllSettings() {
             </AlertDescription>
           </Alert>
         )}
+        {deleteError && (
+          <Alert variant="destructive">
+            <AlertDescription>{deleteError}</AlertDescription>
+          </Alert>
+        )}
 
         {lastImportResult && (
           <Alert>
@@ -194,12 +249,15 @@ export function SkillsAllSettings() {
                 <TableHeaderCell className="w-[140px] whitespace-nowrap pl-2 sm:w-[220px] sm:pl-4">
                   {t('settings.skills.table.path')}
                 </TableHeaderCell>
+                <TableHeaderCell className="w-[96px] whitespace-nowrap pl-2 sm:w-[120px] sm:pl-4">
+                  {t('settings.skills.table.actions')}
+                </TableHeaderCell>
               </TableRow>
             </TableHead>
             <TableBody>
-              {isLoading && <TableLoading colSpan={3} />}
+              {isLoading && <TableLoading colSpan={4} />}
               {!isLoading && sortedSkills.length === 0 && (
-                <TableEmpty colSpan={3}>
+                <TableEmpty colSpan={4}>
                   {t('settings.skills.empty.noSkills')}
                 </TableEmpty>
               )}
@@ -254,6 +312,19 @@ export function SkillsAllSettings() {
                           </Tooltip>
                         </TooltipProvider>
                       </div>
+                    </TableCell>
+                    <TableCell className="w-[96px] pl-2 sm:w-[120px] sm:pl-4">
+                      <Button
+                        variant="ghost"
+                        className="h-8 px-0 text-xs sm:h-9 sm:text-sm"
+                        onClick={() => handleDeleteSkill(skill)}
+                        disabled={importMutation.isPending || deleteMutation.isPending}
+                      >
+                        {deleteMutation.isPending &&
+                        deletingSkill === skill.folderName
+                          ? t('settings.skills.actions.deleting')
+                          : t('settings.skills.actions.delete')}
+                      </Button>
                     </TableCell>
                   </TableRow>
                 ))}
@@ -396,6 +467,47 @@ export function SkillsAllSettings() {
               </Button>
             </DialogFooter>
           </form>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog
+        open={skillToDelete !== null}
+        onOpenChange={(open) => {
+          if (!open) setSkillToDelete(null);
+        }}
+      >
+        <DialogContent className="sm:max-w-[420px]">
+          <DialogHeader>
+            <DialogTitle>
+              {t('settings.skills.deleteDialog.title')}
+            </DialogTitle>
+            <DialogDescription>
+              {skillToDelete &&
+                t('settings.skills.confirm.deleteSkill', {
+                  skill: skillToDelete.folderName,
+                })}
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button
+              type="button"
+              variant="ghost"
+              onClick={() => setSkillToDelete(null)}
+              disabled={deleteMutation.isPending}
+            >
+              {t('settings.skills.actions.cancel')}
+            </Button>
+            <Button
+              type="button"
+              variant="destructive"
+              onClick={handleDeleteConfirm}
+              disabled={deleteMutation.isPending}
+            >
+              {deleteMutation.isPending
+                ? t('settings.skills.actions.deleting')
+                : t('settings.skills.actions.delete')}
+            </Button>
+          </DialogFooter>
         </DialogContent>
       </Dialog>
     </Card>

@@ -448,7 +448,9 @@
         "add": "Add",
         "addSelected": "Add Selected",
         "adding": "Adding...",
-        "unlink": "Unlink"
+        "unlink": "Unlink",
+        "delete": "Delete",
+        "deleting": "Deleting..."
       },
       "empty": {
         "noSkills": "No skills found in the canonical directory.",
@@ -460,7 +462,14 @@
         "importFailed": "Failed to import skills.",
         "linkFailed": "Failed to link skills.",
         "unlinkFailed": "Failed to unlink skill.",
+        "deleteFailed": "Failed to delete skill.",
         "selectAtLeastOne": "Select at least one skill."
+      },
+      "confirm": {
+        "deleteSkill": "Delete skill \"{{skill}}\" from canonical skills? This cannot be undone."
+      },
+      "deleteDialog": {
+        "title": "Delete Skill"
       },
       "importSummary": {
         "imported": "Imported: {{count}}",

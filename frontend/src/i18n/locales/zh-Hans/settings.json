@@ -448,7 +448,9 @@
         "add": "添加",
         "addSelected": "添加所选",
         "adding": "添加中...",
-        "unlink": "取消链接"
+        "unlink": "取消链接",
+        "delete": "删除",
+        "deleting": "删除中..."
       },
       "empty": {
         "noSkills": "全局目录中没有找到技能。",
@@ -460,7 +462,14 @@
         "importFailed": "导入技能失败。",
         "linkFailed": "链接技能失败。",
         "unlinkFailed": "取消链接失败。",
+        "deleteFailed": "删除技能失败。",
         "selectAtLeastOne": "请至少选择一个技能。"
+      },
+      "confirm": {
+        "deleteSkill": "确定要从全局技能中删除 {{skill}} 吗？此操作不可撤销。"
+      },
+      "deleteDialog": {
+        "title": "删除技能"
       },
       "importSummary": {
         "imported": "已导入：{{count}}",

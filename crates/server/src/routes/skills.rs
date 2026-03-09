@@ -23,7 +23,7 @@ const SKILL_MD_FILE: &str = "SKILL.md";
 
 pub fn router() -> Router<DeploymentImpl> {
     Router::new()
-        .route("/skills", get(get_skills))
+        .route("/skills", get(get_skills).delete(delete_canonical_skill))
         .route(
             "/skills/links",
             get(get_skill_links).post(link_skills).delete(unlink_skill),
@@ -98,6 +98,11 @@ struct SkillLinksQuery {
 #[derive(Debug, Clone, Deserialize)]
 struct UnlinkSkillQuery {
     executor: BaseCodingAgent,
+    skill_name: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct DeleteSkillQuery {
     skill_name: String,
 }
 
@@ -189,18 +194,21 @@ async fn link_skills(
     Ok(ResponseJson(ApiResponse::success(response)))
 }
 
+async fn delete_canonical_skill(
+    Query(query): Query<DeleteSkillQuery>,
+) -> Result<ResponseJson<ApiResponse<()>>, ApiError> {
+    let canonical_dir = ensure_canonical_skills_dir()?;
+    delete_canonical_skill_path(&canonical_dir, &query.skill_name)?;
+    Ok(ResponseJson(ApiResponse::success(())))
+}
+
 async fn unlink_skill(
     Query(query): Query<UnlinkSkillQuery>,
 ) -> Result<ResponseJson<ApiResponse<GetSkillLinksResponse>>, ApiError> {
     let skill_name = normalize_skill_name(&query.skill_name)?;
     let agent_dir = ensure_agent_skills_dir(query.executor)?;
     let canonical_dir = ensure_canonical_skills_dir()?;
-    if agent_dir == canonical_dir {
-        return Err(ApiError::BadRequest(format!(
-            "Executor `{}` uses the canonical skills directory directly and does not support unlink",
-            query.executor
-        )));
-    }
+    ensure_unlink_supported(query.executor, &agent_dir, &canonical_dir)?;
     unlink_skill_path(&agent_dir.join(&skill_name))?;
 
     let canonical_skills = discover_skills_in_dir(&canonical_dir)?;
@@ -1120,6 +1128,46 @@ fn resolve_agent_skills_dir(
     }
 }
 
+fn delete_canonical_skill_path(canonical_dir: &Path, skill_name: &str) -> Result<(), ApiError> {
+    let skill_name = normalize_skill_name(skill_name)?;
+    let path = canonical_dir.join(skill_name);
+    // Hard-delete: remove the entire skill entry regardless of whether it is a
+    // real directory or a symlink.  We use remove_dir_all for real directories
+    // (the normal case after an import) and remove_file/remove_dir for symlinks
+    // or plain files.  Not-found is treated as success (idempotent).
+    match std::fs::symlink_metadata(&path) {
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(err) => return Err(err.into()),
+        Ok(meta) => {
+            if meta.file_type().is_symlink() {
+                // Symlink to a directory on some platforms (e.g. Windows) must
+                // be removed with remove_dir; on Unix remove_file works for any
+                // symlink. Try remove_file first and fall back to remove_dir.
+                if let Err(file_err) = std::fs::remove_file(&path) {
+                    std::fs::remove_dir(&path).map_err(|_| file_err)?;
+                }
+            } else {
+                // Real directory or plain file — recursive removal is safe.
+                std::fs::remove_dir_all(&path)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn ensure_unlink_supported(
+    executor: BaseCodingAgent,
+    agent_dir: &Path,
+    canonical_dir: &Path,
+) -> Result<(), ApiError> {
+    if agent_dir == canonical_dir {
+        return Err(ApiError::BadRequest(format!(
+            "Executor `{executor}` uses the canonical skills directory directly and does not support unlink"
+        )));
+    }
+    Ok(())
+}
+
 fn unlink_skill_path(path: &Path) -> Result<(), ApiError> {
     let metadata = match std::fs::symlink_metadata(path) {
         Ok(metadata) => metadata,
@@ -1424,6 +1472,97 @@ metadata:
         unlink_skill_path(&link_path).expect("unlink skill path");
         assert!(!path_entry_exists(&link_path));
         assert!(canonical_skill.exists());
+    }
+
+    #[test]
+    fn delete_canonical_skill_path_removes_skill_directory() {
+        let temp = TestTempDir::new("delete-canonical-skill");
+        let canonical_dir = temp.path().join("canonical");
+        let canonical_skill = canonical_dir.join("skill-a");
+        write_skill(&canonical_skill, "Skill A", "A");
+
+        delete_canonical_skill_path(&canonical_dir, "skill-a")
+            .expect("delete canonical skill path");
+
+        assert!(!path_entry_exists(&canonical_skill));
+    }
+
+    #[test]
+    fn delete_canonical_skill_path_is_idempotent() {
+        let temp = TestTempDir::new("delete-canonical-idempotent");
+        let canonical_dir = temp.path().join("canonical");
+        let canonical_skill = canonical_dir.join("skill-a");
+        write_skill(&canonical_skill, "Skill A", "A");
+
+        delete_canonical_skill_path(&canonical_dir, "skill-a")
+            .expect("first delete canonical skill path");
+        delete_canonical_skill_path(&canonical_dir, "skill-a")
+            .expect("second delete canonical skill path");
+
+        assert!(!path_entry_exists(&canonical_skill));
+    }
+
+    #[test]
+    fn canonical_dir_executor_unlink_is_rejected() {
+        let temp = TestTempDir::new("unlink-canonical-guard");
+        let canonical_dir = temp.path().join("canonical");
+        std::fs::create_dir_all(&canonical_dir).expect("create canonical dir");
+
+        let err = ensure_unlink_supported(BaseCodingAgent::Codex, &canonical_dir, &canonical_dir)
+            .expect_err("canonical-dir executor should reject unlink");
+        assert!(err.to_string().contains("does not support unlink"));
+    }
+
+    #[test]
+    fn non_canonical_executor_passes_ensure_unlink_supported() {
+        let temp = TestTempDir::new("unlink-non-canonical");
+        let canonical_dir = temp.path().join("canonical");
+        let agent_dir = temp.path().join("agent");
+        std::fs::create_dir_all(&canonical_dir).expect("create canonical dir");
+        std::fs::create_dir_all(&agent_dir).expect("create agent dir");
+
+        // ClaudeCode uses a different directory — unlink must be allowed.
+        ensure_unlink_supported(BaseCodingAgent::ClaudeCode, &agent_dir, &canonical_dir)
+            .expect("non-canonical executor should allow unlink");
+    }
+
+    #[test]
+    fn delete_canonical_skill_path_rejects_path_traversal() {
+        let temp = TestTempDir::new("delete-traversal");
+        let canonical_dir = temp.path().join("canonical");
+        std::fs::create_dir_all(&canonical_dir).expect("create canonical dir");
+
+        assert!(
+            delete_canonical_skill_path(&canonical_dir, "../escape").is_err(),
+            "path traversal should be rejected"
+        );
+        assert!(
+            delete_canonical_skill_path(&canonical_dir, "foo/bar").is_err(),
+            "nested path should be rejected"
+        );
+        assert!(
+            delete_canonical_skill_path(&canonical_dir, "").is_err(),
+            "empty name should be rejected"
+        );
+    }
+
+    #[test]
+    fn delete_canonical_skill_path_removes_symlink_skill() {
+        let temp = TestTempDir::new("delete-canonical-symlink");
+        let canonical_dir = temp.path().join("canonical");
+        let external_skill = temp.path().join("external").join("skill-a");
+        write_skill(&external_skill, "Skill A", "A");
+
+        std::fs::create_dir_all(&canonical_dir).expect("create canonical dir");
+        let link_path = canonical_dir.join("skill-a");
+        create_directory_symlink(&external_skill, &link_path).expect("create symlink");
+
+        delete_canonical_skill_path(&canonical_dir, "skill-a")
+            .expect("delete symlink canonical skill");
+
+        // The symlink in canonical dir is gone; the external source survives.
+        assert!(!path_entry_exists(&link_path));
+        assert!(external_skill.exists());
     }
 
     #[test]

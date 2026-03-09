@@ -1057,6 +1057,13 @@ export const skillsApi = {
     const response = await makeRequest('/api/skills');
     return handleApiResponse<GetSkillsResponse>(response);
   },
+  deleteCanonical: async (skillName: string): Promise<void> => {
+    const params = new URLSearchParams({ skill_name: skillName });
+    const response = await makeRequest(`/api/skills?${params.toString()}`, {
+      method: 'DELETE',
+    });
+    return handleApiResponse<void>(response);
+  },
   listLinks: async (
     executor: BaseCodingAgent
   ): Promise<GetSkillLinksResponse> => {

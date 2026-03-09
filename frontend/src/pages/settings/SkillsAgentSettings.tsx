@@ -40,15 +40,10 @@ import { Info, AlertTriangle } from 'lucide-react';
 import { skillsApi } from '@/lib/api';
 import type { SkillInfo, AgentSkillLinkInfo } from 'shared/types';
 import { BaseCodingAgent, SkillLinkState } from 'shared/types';
+import { folderNameFromPath } from './skillsUtils';
 
 interface CanonicalSkillWithFolder extends SkillInfo {
   folderName: string;
-}
-
-function folderNameFromPath(path: string): string {
-  const normalized = path.replace(/\\/g, '/').replace(/\/+$/, '');
-  const segments = normalized.split('/');
-  return segments[segments.length - 1] || normalized;
 }
 
 function isLinkedState(state: SkillLinkState): boolean {
@@ -136,6 +131,14 @@ export function SkillsAgentSettings() {
         }),
     [linksResponse?.links, canonicalSkillsByFolder]
   );
+
+  const isCanonicalDirExecutor = useMemo(() => {
+    if (!linksResponse || !skillsResponse) {
+      return false;
+    }
+    return linksResponse.agent_dir === skillsResponse.canonical_dir;
+  }, [linksResponse, skillsResponse]);
+  const tableColSpan = isCanonicalDirExecutor ? 2 : 3;
 
   const linkMutation = useMutation({
     mutationFn: (skillNames: string[]) =>
@@ -278,15 +281,19 @@ export function SkillsAgentSettings() {
               <TableHeaderCell className="pr-3 sm:pr-4">
                 {t('settings.skills.table.description')}
               </TableHeaderCell>
-              <TableHeaderCell className="w-[96px] whitespace-nowrap pl-2 sm:w-[120px] sm:pl-4">
-                {t('settings.skills.table.actions')}
-              </TableHeaderCell>
+              {!isCanonicalDirExecutor && (
+                <TableHeaderCell className="w-[96px] whitespace-nowrap pl-2 sm:w-[120px] sm:pl-4">
+                  {t('settings.skills.table.actions')}
+                </TableHeaderCell>
+              )}
             </TableRow>
           </TableHead>
           <TableBody>
-            {(loadingSkills || loadingLinks) && <TableLoading colSpan={3} />}
+            {(loadingSkills || loadingLinks) && (
+              <TableLoading colSpan={tableColSpan} />
+            )}
             {!loadingSkills && !loadingLinks && linkedSkills.length === 0 && (
-              <TableEmpty colSpan={3}>
+              <TableEmpty colSpan={tableColSpan}>
                 {t('settings.skills.empty.noLinkedSkills')}
               </TableEmpty>
             )}
@@ -339,18 +346,20 @@ export function SkillsAgentSettings() {
                       );
                     })()}
                   </TableCell>
-                  <TableCell className="w-[96px] pl-2 sm:w-[120px] sm:pl-4">
-                    <Button
-                      variant="ghost"
-                      className="h-8 px-0 text-xs sm:h-9 sm:text-sm"
-                      onClick={() => unlinkMutation.mutate(link.skill_name)}
-                      disabled={
-                        unlinkMutation.isPending || linkMutation.isPending
-                      }
-                    >
-                      {t('settings.skills.actions.unlink')}
-                    </Button>
-                  </TableCell>
+                  {!isCanonicalDirExecutor && (
+                    <TableCell className="w-[96px] pl-2 sm:w-[120px] sm:pl-4">
+                      <Button
+                        variant="ghost"
+                        className="h-8 px-0 text-xs sm:h-9 sm:text-sm"
+                        onClick={() => unlinkMutation.mutate(link.skill_name)}
+                        disabled={
+                          unlinkMutation.isPending || linkMutation.isPending
+                        }
+                      >
+                        {t('settings.skills.actions.unlink')}
+                      </Button>
+                    </TableCell>
+                  )}
                 </TableRow>
               ))}
           </TableBody>
