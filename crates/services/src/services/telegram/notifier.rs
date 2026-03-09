@@ -31,7 +31,7 @@ use executors::logs::{
     NormalizedEntry, NormalizedEntryType, TokenUsageInfo, ToolStatus,
     utils::patch::extract_normalized_entry_from_patch,
 };
-use teloxide::prelude::*;
+use teloxide::{prelude::*, types::MessageId};
 use tokio::sync::{OnceCell, RwLock};
 use tokio_util::sync::CancellationToken;
 use utils::{log_msg::LogMsg, msg_store::MsgStore};
@@ -58,6 +58,33 @@ static TELEGRAM_CONTEXT: OnceLock<Arc<RwLock<Option<TelegramContext>>>> = OnceLo
 static TELEGRAM_HANDLER_REGISTRATION: OnceCell<()> = OnceCell::const_new();
 static RUN_FEED_WATCHERS: OnceLock<Arc<RwLock<HashMap<Uuid, RunFeedWatcherHandle>>>> =
     OnceLock::new();
+static PLAN_REVIEW_MESSAGE_IDS: OnceLock<Arc<RwLock<PlanReviewMessageRegistry>>> = OnceLock::new();
+
+#[derive(Debug, Default)]
+struct PlanReviewMessageRegistry {
+    by_task: HashMap<Uuid, Vec<i32>>,
+}
+
+impl PlanReviewMessageRegistry {
+    /// Store a non-empty set of message IDs for a task.
+    /// To remove an entry use [`Self::clear`] or [`Self::take`].
+    fn record(&mut self, task_id: Uuid, message_ids: Vec<i32>) {
+        debug_assert!(!message_ids.is_empty(), "record() called with empty ids; use clear() instead");
+        if !message_ids.is_empty() {
+            self.by_task.insert(task_id, message_ids);
+        }
+    }
+
+    /// Remove and return any recorded message IDs for a task (one-shot).
+    fn take(&mut self, task_id: Uuid) -> Vec<i32> {
+        self.by_task.remove(&task_id).unwrap_or_default()
+    }
+
+    /// Discard any recorded message IDs for a task without returning them.
+    fn clear(&mut self, task_id: Uuid) {
+        self.by_task.remove(&task_id);
+    }
+}
 
 pub fn set_telegram_context(ctx: TelegramContext) {
     let lock = TELEGRAM_CONTEXT.get_or_init(|| Arc::new(RwLock::new(None)));
@@ -74,6 +101,7 @@ pub fn clear_telegram_context() {
         }
     }
     cancel_all_run_feed_watchers();
+    clear_plan_review_message_registry();
 }
 
 async fn get_context() -> Option<TelegramContext> {
@@ -91,6 +119,11 @@ fn run_feed_watchers() -> &'static Arc<RwLock<HashMap<Uuid, RunFeedWatcherHandle
     RUN_FEED_WATCHERS.get_or_init(|| Arc::new(RwLock::new(HashMap::new())))
 }
 
+fn plan_review_message_registry() -> &'static Arc<RwLock<PlanReviewMessageRegistry>> {
+    PLAN_REVIEW_MESSAGE_IDS
+        .get_or_init(|| Arc::new(RwLock::new(PlanReviewMessageRegistry::default())))
+}
+
 fn cancel_all_run_feed_watchers() {
     let Some(lock) = RUN_FEED_WATCHERS.get() else {
         return;
@@ -102,6 +135,43 @@ fn cancel_all_run_feed_watchers() {
             handle.cancel.cancel();
         }
     }
+}
+
+fn clear_plan_review_message_registry() {
+    let Some(lock) = PLAN_REVIEW_MESSAGE_IDS.get() else {
+        return;
+    };
+
+    if let Ok(mut guard) = lock.try_write() {
+        guard.by_task.clear();
+    }
+}
+
+async fn record_plan_review_message_ids(task_id: Uuid, message_ids: Vec<MessageId>) {
+    let ids: Vec<i32> = message_ids.into_iter().map(|id| id.0).collect();
+    plan_review_message_registry()
+        .write()
+        .await
+        .record(task_id, ids);
+}
+
+/// Discard tracked plan-review message IDs for a task (no Telegram delete).
+/// Used when no plan-review cards were sent for this transition.
+async fn clear_plan_review_message_ids(task_id: Uuid) {
+    plan_review_message_registry()
+        .write()
+        .await
+        .clear(task_id);
+}
+
+pub(super) async fn take_plan_review_message_ids(task_id: Uuid) -> Vec<MessageId> {
+    plan_review_message_registry()
+        .write()
+        .await
+        .take(task_id)
+        .into_iter()
+        .map(MessageId)
+        .collect()
 }
 
 /// Register Telegram handlers with the task state dispatcher
@@ -329,6 +399,7 @@ impl TelegramHandler for TaskInReviewHandler {
         if let Some(plan) = find_exit_plan_approval(tg, task.id).await {
             let chunks = split_plan(&plan.plan);
             let total = chunks.len();
+            let mut sent_message_ids = Vec::new();
             for (i, chunk) in chunks.into_iter().enumerate() {
                 // Attach approve/reject buttons to the last chunk in interactive mode
                 let result = if tg.interactive_bot && i == total - 1 {
@@ -339,12 +410,21 @@ impl TelegramHandler for TaskInReviewHandler {
                 } else {
                     tg.bot.send_message(tg.chat_id, chunk).await
                 };
-                if let Err(err) = result {
-                    tracing::warn!("Failed to send telegram plan notification: {}", err);
+                match result {
+                    Ok(message) => sent_message_ids.push(message.id),
+                    Err(err) => {
+                        tracing::warn!("Failed to send telegram plan notification: {}", err);
+                    }
                 }
             }
+            record_plan_review_message_ids(task.id, sent_message_ids).await;
             return;
         }
+
+        // No split review cards for this task in the current transition.
+        // Explicitly clear any IDs that might have been recorded from a prior InReview
+        // cycle so they are not stale-deleted on a future approve/reject.
+        clear_plan_review_message_ids(task.id).await;
 
         // Interactive mode uses the plan notification flow above.
         // Skip the legacy fallback text to avoid duplicated old/new content.
@@ -1385,6 +1465,39 @@ mod tests {
     #[test]
     fn split_plan_empty() {
         assert!(split_plan("").is_empty());
+    }
+
+    #[test]
+    fn plan_review_message_registry_records_replaces_and_takes() {
+        let task_id = Uuid::new_v4();
+        let mut registry = PlanReviewMessageRegistry::default();
+
+        registry.record(task_id, vec![11, 22]);
+        assert_eq!(registry.by_task.get(&task_id), Some(&vec![11, 22]));
+
+        registry.record(task_id, vec![33]);
+        assert_eq!(registry.by_task.get(&task_id), Some(&vec![33]));
+
+        assert_eq!(registry.take(task_id), vec![33]);
+        assert!(registry.take(task_id).is_empty());
+    }
+
+    #[test]
+    fn plan_review_message_registry_clear_does_not_erase_subsequent_record() {
+        let task_id = Uuid::new_v4();
+        let mut registry = PlanReviewMessageRegistry::default();
+
+        // Simulate first InReview: plan found, IDs recorded.
+        registry.record(task_id, vec![1, 2, 3]);
+        assert_eq!(registry.by_task.get(&task_id), Some(&vec![1, 2, 3]));
+
+        // Simulate second InReview: no plan, clear is called (not record with empty vec).
+        registry.clear(task_id);
+        assert!(registry.by_task.get(&task_id).is_none());
+
+        // A subsequent record (third InReview with plan) is unaffected.
+        registry.record(task_id, vec![4, 5]);
+        assert_eq!(registry.take(task_id), vec![4, 5]);
     }
 
     #[test]

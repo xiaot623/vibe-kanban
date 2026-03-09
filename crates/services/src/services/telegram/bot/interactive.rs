@@ -14,7 +14,7 @@ use teloxide::{
     dptree,
     error_handlers::LoggingErrorHandler,
     prelude::*,
-    types::{InlineKeyboardMarkup, ParseMode},
+    types::{InlineKeyboardMarkup, MessageId, ParseMode},
     update_listeners::Polling,
     utils::command::BotCommands,
 };
@@ -31,12 +31,28 @@ use super::{
 };
 use crate::services::{
     approvals::{ApprovalError, PendingApprovalInfo},
-    telegram::{EXIT_PLAN_MODE_NAME, callback::CallbackAction, keyboard, state::DialogueState},
+    telegram::{
+        EXIT_PLAN_MODE_NAME, callback::CallbackAction, keyboard, notifier, state::DialogueState,
+    },
 };
 
 /// Type alias for the dialogue handle used in handlers.
 type BotDialogue =
     teloxide::dispatching::dialogue::Dialogue<DialogueState, InMemStorage<DialogueState>>;
+
+#[derive(Debug, Clone, Copy)]
+struct CardRenderContext {
+    source_message_id: MessageId,
+}
+
+impl CardRenderContext {
+    fn from_callback(query: &CallbackQuery) -> Option<Self> {
+        let message = query.message.as_ref()?;
+        Some(Self {
+            source_message_id: message.id(),
+        })
+    }
+}
 
 #[derive(Debug, Deserialize)]
 struct DoneRepoBranchStatus {
@@ -161,15 +177,20 @@ async fn handle_command(
                 .await?;
         }
         Command::Tasks => {
-            show_projects_for_browsing(&bot, msg.chat.id, &service).await?;
+            show_projects_for_browsing(&bot, msg.chat.id, &service, None).await?;
         }
         Command::New => {
-            show_projects_for_new_task(&bot, msg.chat.id, &service).await?;
+            show_projects_for_new_task(&bot, msg.chat.id, &service, None).await?;
         }
         Command::Pending => {
-            show_pending_approvals(&bot, msg.chat.id, &service).await?;
+            show_pending_approvals(&bot, msg.chat.id, &service, None).await?;
         }
         Command::Cancel => {
+            if let Ok(Some(state)) = dialogue.get().await
+                && let Some(prompt_message_id) = state.prompt_message_id()
+            {
+                delete_message_best_effort(&bot, msg.chat.id, MessageId(prompt_message_id)).await;
+            }
             dialogue.reset().await.ok();
             bot.send_message(msg.chat.id, "Cancelled.")
                 .reply_markup(keyboard::home_keyboard())
@@ -210,6 +231,7 @@ async fn handle_callback(
         }
         None => return Ok(()),
     };
+    let card_context = CardRenderContext::from_callback(&q);
 
     let data = match q.data.as_deref() {
         Some(d) => d,
@@ -219,12 +241,13 @@ async fn handle_callback(
     let action = match CallbackAction::decode(data) {
         Some(a) => a,
         None => {
-            send_or_edit(
+            render_or_send_card(
                 &bot,
-                &q,
                 chat_id,
+                card_context,
                 "Invalid action. Please try again.",
                 Some(keyboard::home_only_keyboard()),
+                None,
             )
             .await?;
             return Ok(());
@@ -234,15 +257,35 @@ async fn handle_callback(
     // Handle actions that complete immediately.
     match &action {
         CallbackAction::Cancel => {
+            let prompt_message_id = dialogue
+                .get()
+                .await
+                .ok()
+                .flatten()
+                .and_then(|state| state.prompt_message_id());
             dialogue.reset().await.ok();
-            send_or_edit(
-                &bot,
-                &q,
-                chat_id,
-                "Cancelled.",
-                Some(keyboard::home_keyboard()),
-            )
-            .await?;
+            if let Some(prompt_message_id) = prompt_message_id {
+                delete_message_best_effort(&bot, chat_id, MessageId(prompt_message_id)).await;
+                render_or_send_card(
+                    &bot,
+                    chat_id,
+                    None,
+                    "Cancelled.",
+                    Some(keyboard::home_keyboard()),
+                    None,
+                )
+                .await?;
+            } else {
+                render_or_send_card(
+                    &bot,
+                    chat_id,
+                    card_context,
+                    "Cancelled.",
+                    Some(keyboard::home_keyboard()),
+                    None,
+                )
+                .await?;
+            }
             return Ok(());
         }
         CallbackAction::Skip => {
@@ -256,26 +299,47 @@ async fn handle_callback(
                     project_id,
                     project_name: _,
                     title,
+                    prompt_message_id,
                 } => {
-                    dialogue.reset().await.ok();
-                    handle_create_task_finish(&bot, chat_id, &service, project_id, &title, None)
-                        .await?;
+                    let success = handle_create_task_finish(
+                        &bot,
+                        chat_id,
+                        &service,
+                        project_id,
+                        &title,
+                        None,
+                        card_context,
+                    )
+                    .await?;
+                    if success {
+                        dialogue.reset().await.ok();
+                        delete_message_best_effort(&bot, chat_id, MessageId(prompt_message_id))
+                            .await;
+                    }
+                    // On failure leave dialogue state intact so the user can retry or /cancel.
                 }
                 DialogueState::EditingTaskDescription {
                     task_id,
                     title,
                     current_description,
+                    prompt_message_id,
                 } => {
-                    dialogue.reset().await.ok();
-                    handle_edit_task_finish(
+                    let success = handle_edit_task_finish(
                         &bot,
                         chat_id,
                         &service,
                         task_id,
                         &title,
                         current_description.as_deref(),
+                        card_context,
                     )
                     .await?;
+                    if success {
+                        dialogue.reset().await.ok();
+                        delete_message_best_effort(&bot, chat_id, MessageId(prompt_message_id))
+                            .await;
+                    }
+                    // On failure leave dialogue state intact so the user can retry or /cancel.
                 }
                 _ => {}
             }
@@ -292,91 +356,153 @@ async fn handle_callback(
     match action {
         CallbackAction::Home => {
             dialogue.reset().await.ok();
-            send_or_edit(
+            render_or_send_card(
                 &bot,
-                &q,
                 chat_id,
+                card_context,
                 "Choose an action:",
                 Some(keyboard::home_keyboard()),
+                None,
             )
             .await?;
         }
         CallbackAction::Projects => {
-            show_projects_for_browsing(&bot, chat_id, &service).await?;
+            show_projects_for_browsing(&bot, chat_id, &service, card_context).await?;
         }
         CallbackAction::NewTask => {
-            show_projects_for_new_task(&bot, chat_id, &service).await?;
+            show_projects_for_new_task(&bot, chat_id, &service, card_context).await?;
         }
         CallbackAction::Pending => {
-            show_pending_approvals(&bot, chat_id, &service).await?;
+            show_pending_approvals(&bot, chat_id, &service, card_context).await?;
         }
         CallbackAction::Tasks { project_id, status } => {
-            show_task_list(&bot, chat_id, &service, project_id, status.as_deref(), 0).await?;
+            show_task_list(
+                &bot,
+                chat_id,
+                &service,
+                project_id,
+                status.as_deref(),
+                0,
+                card_context,
+            )
+            .await?;
         }
         CallbackAction::TaskPage { project_id, page } => {
-            show_task_list(&bot, chat_id, &service, project_id, None, page).await?;
+            show_task_list(
+                &bot,
+                chat_id,
+                &service,
+                project_id,
+                None,
+                page,
+                card_context,
+            )
+            .await?;
         }
         CallbackAction::TaskDetail { task_id } => {
-            show_task_detail(&bot, chat_id, &service, task_id).await?;
+            show_task_detail(&bot, chat_id, &service, task_id, card_context).await?;
         }
         CallbackAction::RunDefault { task_id } => {
-            handle_run_default(&bot, chat_id, &service, task_id).await?;
+            handle_run_default(&bot, chat_id, &service, task_id, card_context).await?;
         }
         CallbackAction::RunPick { task_id } => {
-            bot.send_message(chat_id, "Select an executor:")
-                .reply_markup(keyboard::executor_pick_keyboard(task_id))
-                .await?;
+            render_or_send_card(
+                &bot,
+                chat_id,
+                card_context,
+                "Select an executor:",
+                Some(keyboard::executor_pick_keyboard(task_id)),
+                None,
+            )
+            .await?;
         }
         CallbackAction::RunWith { task_id, executor } => {
             let run_modes = available_run_modes_for_executor(&executor);
-            bot.send_message(chat_id, format!("Select run mode for {executor}:"))
-                .reply_markup(keyboard::run_mode_pick_keyboard(
+            render_or_send_card(
+                &bot,
+                chat_id,
+                card_context,
+                format!("Select run mode for {executor}:"),
+                Some(keyboard::run_mode_pick_keyboard(
                     task_id, &executor, &run_modes,
-                ))
-                .await?;
+                )),
+                None,
+            )
+            .await?;
         }
         CallbackAction::RunWithMode {
             task_id,
             executor,
             mode_index,
         } => {
-            handle_run_with_executor_mode(&bot, chat_id, &service, task_id, &executor, mode_index)
-                .await?;
+            handle_run_with_executor_mode(
+                &bot,
+                chat_id,
+                &service,
+                task_id,
+                &executor,
+                mode_index,
+                card_context,
+            )
+            .await?;
         }
         CallbackAction::EditTask { task_id } => {
-            handle_edit_start(&bot, chat_id, &service, task_id, &dialogue).await?;
+            handle_edit_start(&bot, chat_id, &service, task_id, &dialogue, card_context).await?;
         }
         CallbackAction::ApproveConfirm { task_id } => {
-            bot.send_message(chat_id, "⚠️ Confirm plan approval?")
-                .reply_markup(keyboard::approve_confirm_keyboard(task_id))
-                .await?;
+            render_or_send_card(
+                &bot,
+                chat_id,
+                card_context,
+                "⚠️ Confirm plan approval?",
+                Some(keyboard::approve_confirm_keyboard(task_id)),
+                None,
+            )
+            .await?;
         }
         CallbackAction::ApproveYes { task_id } => {
-            handle_approve(&bot, chat_id, &service, task_id).await?;
+            handle_approve(&bot, chat_id, &service, task_id, card_context).await?;
         }
         CallbackAction::RejectInput { task_id } => {
-            handle_reject_start(&bot, chat_id, task_id, &dialogue).await?;
+            handle_reject_start(&bot, chat_id, task_id, &dialogue, card_context).await?;
         }
         CallbackAction::FollowUpReply { task_id } => {
-            handle_follow_up_reply_start(&bot, chat_id, task_id, &dialogue).await?;
+            handle_follow_up_reply_start(&bot, chat_id, task_id, &dialogue, card_context).await?;
         }
         CallbackAction::CreateReviewTask { task_id } => {
-            handle_create_review_task(&bot, &q, chat_id, &service, task_id).await?;
+            handle_create_review_task(&bot, chat_id, &service, task_id, card_context).await?;
         }
         CallbackAction::DoneTask { task_id } => {
-            handle_done_task(&bot, chat_id, &service, task_id).await?;
+            handle_done_task(&bot, chat_id, &service, task_id, card_context).await?;
         }
         CallbackAction::ToolApprove { approval_id } => {
-            handle_tool_approval_callback(&bot, &q, chat_id, &service, &approval_id, true).await?;
+            handle_tool_approval_callback(
+                &bot,
+                chat_id,
+                &service,
+                &approval_id,
+                true,
+                card_context,
+            )
+            .await?;
         }
         CallbackAction::ToolReject { approval_id } => {
-            handle_tool_approval_callback(&bot, &q, chat_id, &service, &approval_id, false).await?;
+            handle_tool_approval_callback(
+                &bot,
+                chat_id,
+                &service,
+                &approval_id,
+                false,
+                card_context,
+            )
+            .await?;
         }
         CallbackAction::Refresh { task_id } => {
-            show_task_detail(&bot, chat_id, &service, task_id).await?;
+            show_task_detail(&bot, chat_id, &service, task_id, card_context).await?;
         }
         CallbackAction::NewTaskProject { project_id } => {
-            handle_new_task_project(&bot, chat_id, &service, project_id, &dialogue).await?;
+            handle_new_task_project(&bot, chat_id, &service, project_id, &dialogue, card_context)
+                .await?;
         }
         CallbackAction::Cancel | CallbackAction::Skip | CallbackAction::Noop => {
             // Already handled above
@@ -388,31 +514,33 @@ async fn handle_callback(
 
 async fn handle_tool_approval_callback(
     bot: &Bot,
-    q: &CallbackQuery,
     chat_id: ChatId,
     service: &TelegramBotService,
     approval_id: &str,
     approve: bool,
+    card_context: Option<CardRenderContext>,
 ) -> ResponseResult<()> {
     let Some(pending_approval) = service.approvals.pending_by_id(approval_id) else {
-        send_or_edit(
+        render_or_send_card(
             bot,
-            q,
             chat_id,
+            card_context,
             "This approval is no longer pending.",
             Some(empty_inline_keyboard()),
+            None,
         )
         .await?;
         return Ok(());
     };
 
     if approval_requires_structured_input(&pending_approval) {
-        send_or_edit(
+        render_or_send_card(
             bot,
-            q,
             chat_id,
+            card_context,
             "This approval requires structured input. Please continue in the Web UI.",
             Some(empty_inline_keyboard()),
+            None,
         )
         .await?;
         return Ok(());
@@ -444,25 +572,35 @@ async fn handle_tool_approval_callback(
             } else {
                 "🛑 Tool request rejected."
             };
-            send_or_edit(bot, q, chat_id, message, Some(empty_inline_keyboard())).await?;
+            render_or_send_card(
+                bot,
+                chat_id,
+                card_context,
+                message,
+                Some(empty_inline_keyboard()),
+                None,
+            )
+            .await?;
         }
         Err(ApprovalError::NotFound | ApprovalError::AlreadyCompleted) => {
-            send_or_edit(
+            render_or_send_card(
                 bot,
-                q,
                 chat_id,
+                card_context,
                 "This approval has already been handled.",
                 Some(empty_inline_keyboard()),
+                None,
             )
             .await?;
         }
         Err(e) => {
-            send_or_edit(
+            render_or_send_card(
                 bot,
-                q,
                 chat_id,
+                card_context,
                 &format!("Failed to process approval: {e}"),
                 Some(keyboard::home_only_keyboard()),
+                None,
             )
             .await?;
         }
@@ -517,63 +655,109 @@ async fn handle_dialogue_text(
         DialogueState::CreatingTaskTitle {
             project_id,
             project_name,
+            prompt_message_id,
         } => {
             if text.is_empty() {
-                bot.send_message(msg.chat.id, "Title cannot be empty. Please enter a title:")
-                    .reply_markup(keyboard::cancel_keyboard())
-                    .await?;
+                let updated_prompt_id = render_or_send_card(
+                    &bot,
+                    msg.chat.id,
+                    Some(CardRenderContext {
+                        source_message_id: MessageId(prompt_message_id),
+                    }),
+                    "Title cannot be empty. Please enter a title:",
+                    Some(keyboard::cancel_keyboard()),
+                    None,
+                )
+                .await?;
+                dialogue
+                    .update(DialogueState::CreatingTaskTitle {
+                        project_id,
+                        project_name,
+                        prompt_message_id: updated_prompt_id.0,
+                    })
+                    .await
+                    .ok();
                 return Ok(());
             }
+            let updated_prompt_id = render_or_send_card(
+                &bot,
+                msg.chat.id,
+                Some(CardRenderContext {
+                    source_message_id: MessageId(prompt_message_id),
+                }),
+                format!(
+                    "Title: {}\n\nNow enter a description (or press Skip):",
+                    text
+                ),
+                Some(keyboard::skip_cancel_keyboard()),
+                None,
+            )
+            .await?;
             dialogue
                 .update(DialogueState::CreatingTaskDescription {
                     project_id,
                     project_name: project_name.clone(),
                     title: text.to_string(),
+                    prompt_message_id: updated_prompt_id.0,
                 })
                 .await
                 .ok();
-            bot.send_message(
-                msg.chat.id,
-                format!(
-                    "Title: {}\n\nNow enter a description (or press Skip):",
-                    text
-                ),
-            )
-            .reply_markup(keyboard::skip_cancel_keyboard())
-            .await?;
         }
         DialogueState::CreatingTaskDescription {
             project_id,
             project_name: _,
             title,
+            prompt_message_id,
         } => {
             let description = if text.is_empty() {
                 None
             } else {
                 Some(text.to_string())
             };
-            dialogue.reset().await.ok();
-            handle_create_task_finish(
+            let success = handle_create_task_finish(
                 &bot,
                 msg.chat.id,
                 &service,
                 project_id,
                 &title,
                 description.as_deref(),
+                Some(CardRenderContext {
+                    source_message_id: MessageId(prompt_message_id),
+                }),
             )
             .await?;
+            if success {
+                dialogue.reset().await.ok();
+                delete_message_best_effort(&bot, msg.chat.id, MessageId(prompt_message_id)).await;
+            } else {
+                dialogue.reset().await.ok();
+            }
         }
         DialogueState::EditingTaskTitle {
             task_id,
-            current_title: _,
+            current_title,
+            prompt_message_id,
         } => {
             if text.is_empty() {
-                bot.send_message(
+                let updated_prompt_id = render_or_send_card(
+                    &bot,
                     msg.chat.id,
+                    Some(CardRenderContext {
+                        source_message_id: MessageId(prompt_message_id),
+                    }),
                     "Title cannot be empty. Please enter a new title:",
+                    Some(keyboard::cancel_keyboard()),
+                    None,
                 )
-                .reply_markup(keyboard::cancel_keyboard())
                 .await?;
+                dialogue
+                    .update(DialogueState::EditingTaskTitle {
+                        task_id,
+                        current_title,
+                        prompt_message_id: updated_prompt_id.0,
+                    })
+                    .await
+                    .ok();
                 return Ok(());
             }
             // Load current description for next step
@@ -581,67 +765,130 @@ async fn handle_dialogue_text(
                 Ok(Some(task)) => task.description,
                 _ => None,
             };
+            let updated_prompt_id = render_or_send_card(
+                &bot,
+                msg.chat.id,
+                Some(CardRenderContext {
+                    source_message_id: MessageId(prompt_message_id),
+                }),
+                format!(
+                    "New title: {}\n\nNow enter a new description (or press Skip to keep current):",
+                    text
+                ),
+                Some(keyboard::skip_cancel_keyboard()),
+                None,
+            )
+            .await?;
             dialogue
                 .update(DialogueState::EditingTaskDescription {
                     task_id,
                     title: text.to_string(),
                     current_description,
+                    prompt_message_id: updated_prompt_id.0,
                 })
                 .await
                 .ok();
-            bot.send_message(
-                msg.chat.id,
-                format!(
-                    "New title: {}\n\nNow enter a new description (or press Skip to keep current):",
-                    text
-                ),
-            )
-            .reply_markup(keyboard::skip_cancel_keyboard())
-            .await?;
         }
         DialogueState::EditingTaskDescription {
             task_id,
             title,
             current_description,
+            prompt_message_id,
         } => {
             let description = if text.is_empty() {
                 current_description
             } else {
                 Some(text.to_string())
             };
-            dialogue.reset().await.ok();
-            handle_edit_task_finish(
+            let success = handle_edit_task_finish(
                 &bot,
                 msg.chat.id,
                 &service,
                 task_id,
                 &title,
                 description.as_deref(),
+                Some(CardRenderContext {
+                    source_message_id: MessageId(prompt_message_id),
+                }),
             )
             .await?;
+            if success {
+                dialogue.reset().await.ok();
+                delete_message_best_effort(&bot, msg.chat.id, MessageId(prompt_message_id)).await;
+            } else {
+                dialogue.reset().await.ok();
+            }
         }
-        DialogueState::RejectingPlan { task_id } => {
+        DialogueState::RejectingPlan {
+            task_id,
+            prompt_message_id,
+        } => {
             let reason = if text.is_empty() {
                 None
             } else {
                 Some(text.to_string())
             };
-            dialogue.reset().await.ok();
-            handle_reject_finish(&bot, msg.chat.id, &service, task_id, reason.as_deref()).await?;
+            let success = handle_reject_finish(
+                &bot,
+                msg.chat.id,
+                &service,
+                task_id,
+                reason.as_deref(),
+                Some(CardRenderContext {
+                    source_message_id: MessageId(prompt_message_id),
+                }),
+            )
+            .await?;
+            if success {
+                dialogue.reset().await.ok();
+                delete_message_best_effort(&bot, msg.chat.id, MessageId(prompt_message_id)).await;
+            } else {
+                dialogue.reset().await.ok();
+            }
         }
-        DialogueState::ReplyingFollowUp { task_id } => {
+        DialogueState::ReplyingFollowUp {
+            task_id,
+            prompt_message_id,
+        } => {
             if text.is_empty() {
-                bot.send_message(
+                let updated_prompt_id = render_or_send_card(
+                    &bot,
                     msg.chat.id,
+                    Some(CardRenderContext {
+                        source_message_id: MessageId(prompt_message_id),
+                    }),
                     "Reply cannot be empty. Please enter follow-up text:",
+                    Some(keyboard::cancel_keyboard()),
+                    None,
                 )
-                .reply_markup(keyboard::cancel_keyboard())
                 .await?;
+                dialogue
+                    .update(DialogueState::ReplyingFollowUp {
+                        task_id,
+                        prompt_message_id: updated_prompt_id.0,
+                    })
+                    .await
+                    .ok();
                 return Ok(());
             }
 
-            dialogue.reset().await.ok();
-            handle_follow_up_reply_finish(&bot, msg.chat.id, &service, task_id, text).await?;
+            let success = handle_follow_up_reply_finish(
+                &bot,
+                msg.chat.id,
+                &service,
+                task_id,
+                text,
+                Some(CardRenderContext {
+                    source_message_id: MessageId(prompt_message_id),
+                }),
+            )
+            .await?;
+            if success {
+                dialogue.reset().await.ok();
+                delete_message_best_effort(&bot, msg.chat.id, MessageId(prompt_message_id)).await;
+            } else {
+                dialogue.reset().await.ok();
+            }
         }
     }
 
@@ -654,22 +901,41 @@ async fn show_projects_for_browsing(
     bot: &Bot,
     chat_id: ChatId,
     service: &TelegramBotService,
+    card_context: Option<CardRenderContext>,
 ) -> ResponseResult<()> {
     match Project::find_all(&service.db.pool).await {
         Ok(projects) if projects.is_empty() => {
-            bot.send_message(chat_id, "No projects found.")
-                .reply_markup(keyboard::home_only_keyboard())
-                .await?;
+            render_or_send_card(
+                bot,
+                chat_id,
+                card_context,
+                "No projects found.",
+                Some(keyboard::home_only_keyboard()),
+                None,
+            )
+            .await?;
         }
         Ok(projects) => {
-            bot.send_message(chat_id, "Select a project:")
-                .reply_markup(keyboard::project_list_keyboard(&projects, false))
-                .await?;
+            render_or_send_card(
+                bot,
+                chat_id,
+                card_context,
+                "Select a project:",
+                Some(keyboard::project_list_keyboard(&projects, false)),
+                None,
+            )
+            .await?;
         }
         Err(e) => {
-            bot.send_message(chat_id, format!("Failed to load projects: {e}"))
-                .reply_markup(keyboard::home_only_keyboard())
-                .await?;
+            render_or_send_card(
+                bot,
+                chat_id,
+                card_context,
+                format!("Failed to load projects: {e}"),
+                Some(keyboard::home_only_keyboard()),
+                None,
+            )
+            .await?;
         }
     }
     Ok(())
@@ -679,22 +945,41 @@ async fn show_projects_for_new_task(
     bot: &Bot,
     chat_id: ChatId,
     service: &TelegramBotService,
+    card_context: Option<CardRenderContext>,
 ) -> ResponseResult<()> {
     match Project::find_all(&service.db.pool).await {
         Ok(projects) if projects.is_empty() => {
-            bot.send_message(chat_id, "No projects found. Create a project first.")
-                .reply_markup(keyboard::home_only_keyboard())
-                .await?;
+            render_or_send_card(
+                bot,
+                chat_id,
+                card_context,
+                "No projects found. Create a project first.",
+                Some(keyboard::home_only_keyboard()),
+                None,
+            )
+            .await?;
         }
         Ok(projects) => {
-            bot.send_message(chat_id, "➕ Select a project for the new task:")
-                .reply_markup(keyboard::project_list_keyboard(&projects, true))
-                .await?;
+            render_or_send_card(
+                bot,
+                chat_id,
+                card_context,
+                "➕ Select a project for the new task:",
+                Some(keyboard::project_list_keyboard(&projects, true)),
+                None,
+            )
+            .await?;
         }
         Err(e) => {
-            bot.send_message(chat_id, format!("Failed to load projects: {e}"))
-                .reply_markup(keyboard::home_only_keyboard())
-                .await?;
+            render_or_send_card(
+                bot,
+                chat_id,
+                card_context,
+                format!("Failed to load projects: {e}"),
+                Some(keyboard::home_only_keyboard()),
+                None,
+            )
+            .await?;
         }
     }
     Ok(())
@@ -704,6 +989,7 @@ async fn show_pending_approvals(
     bot: &Bot,
     chat_id: ChatId,
     service: &TelegramBotService,
+    card_context: Option<CardRenderContext>,
 ) -> ResponseResult<()> {
     let pending = service.approvals.list_pending();
     let plan_approvals: Vec<_> = pending
@@ -712,9 +998,15 @@ async fn show_pending_approvals(
         .collect();
 
     if plan_approvals.is_empty() {
-        bot.send_message(chat_id, "No pending approvals.")
-            .reply_markup(keyboard::home_only_keyboard())
-            .await?;
+        render_or_send_card(
+            bot,
+            chat_id,
+            card_context,
+            "No pending approvals.",
+            Some(keyboard::home_only_keyboard()),
+            None,
+        )
+        .await?;
         return Ok(());
     }
 
@@ -757,9 +1049,15 @@ async fn show_pending_approvals(
         CallbackAction::Home.encode(),
     )]);
 
-    bot.send_message(chat_id, text)
-        .reply_markup(InlineKeyboardMarkup::new(rows))
-        .await?;
+    render_or_send_card(
+        bot,
+        chat_id,
+        card_context,
+        text,
+        Some(InlineKeyboardMarkup::new(rows)),
+        None,
+    )
+    .await?;
     Ok(())
 }
 
@@ -772,28 +1070,47 @@ async fn show_task_list(
     project_id: Uuid,
     status_filter: Option<&str>,
     page: u16,
+    card_context: Option<CardRenderContext>,
 ) -> ResponseResult<()> {
     let project = match Project::find_by_id(&service.db.pool, project_id).await {
         Ok(Some(p)) => p,
         Ok(None) => {
-            bot.send_message(chat_id, "Project not found.")
-                .reply_markup(keyboard::home_only_keyboard())
-                .await?;
+            render_or_send_card(
+                bot,
+                chat_id,
+                card_context,
+                "Project not found.",
+                Some(keyboard::home_only_keyboard()),
+                None,
+            )
+            .await?;
             return Ok(());
         }
         Err(e) => {
-            bot.send_message(chat_id, format!("Failed to load project: {e}"))
-                .reply_markup(keyboard::home_only_keyboard())
-                .await?;
+            render_or_send_card(
+                bot,
+                chat_id,
+                card_context,
+                format!("Failed to load project: {e}"),
+                Some(keyboard::home_only_keyboard()),
+                None,
+            )
+            .await?;
             return Ok(());
         }
     };
 
     // If no status filter, show filter buttons first
     if status_filter.is_none() && page == 0 {
-        bot.send_message(chat_id, format!("📋 {} — filter by status:", project.name))
-            .reply_markup(keyboard::status_filter_keyboard(project_id))
-            .await?;
+        render_or_send_card(
+            bot,
+            chat_id,
+            card_context,
+            format!("📋 {} — filter by status:", project.name),
+            Some(keyboard::status_filter_keyboard(project_id)),
+            None,
+        )
+        .await?;
         return Ok(());
     }
 
@@ -801,9 +1118,15 @@ async fn show_task_list(
         match Task::find_by_project_id_with_attempt_status(&service.db.pool, project.id).await {
             Ok(tasks) => tasks,
             Err(e) => {
-                bot.send_message(chat_id, format!("Failed to load tasks: {e}"))
-                    .reply_markup(keyboard::home_only_keyboard())
-                    .await?;
+                render_or_send_card(
+                    bot,
+                    chat_id,
+                    card_context,
+                    format!("Failed to load tasks: {e}"),
+                    Some(keyboard::home_only_keyboard()),
+                    None,
+                )
+                .await?;
                 return Ok(());
             }
         };
@@ -819,11 +1142,14 @@ async fn show_task_list(
 
     if filtered.is_empty() {
         let status_label = status_filter.unwrap_or("all");
-        bot.send_message(
+        render_or_send_card(
+            bot,
             chat_id,
+            card_context,
             format!("No {} tasks in {}.", status_label, project.name),
+            Some(keyboard::home_only_keyboard()),
+            None,
         )
-        .reply_markup(keyboard::home_only_keyboard())
         .await?;
         return Ok(());
     }
@@ -849,14 +1175,20 @@ async fn show_task_list(
         filtered.len()
     );
 
-    bot.send_message(chat_id, header)
-        .reply_markup(keyboard::task_list_keyboard(
+    render_or_send_card(
+        bot,
+        chat_id,
+        card_context,
+        header,
+        Some(keyboard::task_list_keyboard(
             &task_buttons,
             project_id,
             page,
             has_more,
-        ))
-        .await?;
+        )),
+        None,
+    )
+    .await?;
     Ok(())
 }
 
@@ -865,19 +1197,32 @@ async fn show_task_detail(
     chat_id: ChatId,
     service: &TelegramBotService,
     task_id: Uuid,
+    card_context: Option<CardRenderContext>,
 ) -> ResponseResult<()> {
     let task = match Task::find_by_id(&service.db.pool, task_id).await {
         Ok(Some(task)) => task,
         Ok(None) => {
-            bot.send_message(chat_id, "Task not found. It may have been deleted.")
-                .reply_markup(keyboard::home_only_keyboard())
-                .await?;
+            render_or_send_card(
+                bot,
+                chat_id,
+                card_context,
+                "Task not found. It may have been deleted.",
+                Some(keyboard::home_only_keyboard()),
+                None,
+            )
+            .await?;
             return Ok(());
         }
         Err(e) => {
-            bot.send_message(chat_id, format!("Failed to load task: {e}"))
-                .reply_markup(keyboard::home_only_keyboard())
-                .await?;
+            render_or_send_card(
+                bot,
+                chat_id,
+                card_context,
+                format!("Failed to load task: {e}"),
+                Some(keyboard::home_only_keyboard()),
+                None,
+            )
+            .await?;
             return Ok(());
         }
     };
@@ -914,9 +1259,15 @@ async fn show_task_detail(
         }
     }
 
-    bot.send_message(chat_id, message)
-        .reply_markup(keyboard::task_detail_keyboard(task.id, &task.status))
-        .await?;
+    render_or_send_card(
+        bot,
+        chat_id,
+        card_context,
+        message,
+        Some(keyboard::task_detail_keyboard(task.id, &task.status)),
+        None,
+    )
+    .await?;
     Ok(())
 }
 
@@ -927,6 +1278,7 @@ async fn handle_run_default(
     chat_id: ChatId,
     service: &TelegramBotService,
     task_id: Uuid,
+    card_context: Option<CardRenderContext>,
 ) -> ResponseResult<()> {
     let config = service.config.read().await.telegram.clone();
     let result = service
@@ -934,12 +1286,21 @@ async fn handle_run_default(
         .await;
     match result {
         Ok(()) => {
-            // Notification will arrive via TaskInProgressHandler
+            if let Some(context) = card_context {
+                // Keep run notifications, but remove the source interaction card.
+                delete_message_best_effort(bot, chat_id, context.source_message_id).await;
+            }
         }
         Err(msg) => {
-            bot.send_message(chat_id, msg)
-                .reply_markup(keyboard::home_only_keyboard())
-                .await?;
+            render_or_send_card(
+                bot,
+                chat_id,
+                card_context,
+                format!("Failed to start run: {msg}"),
+                Some(run_failure_keyboard(service, task_id).await),
+                None,
+            )
+            .await?;
         }
     }
     Ok(())
@@ -977,12 +1338,19 @@ async fn handle_run_with_executor_mode(
     task_id: Uuid,
     executor: &str,
     mode_index: u16,
+    card_context: Option<CardRenderContext>,
 ) -> ResponseResult<()> {
     let run_modes = available_run_modes_for_executor(executor);
     let Some(selected_mode) = run_modes.get(mode_index as usize) else {
-        bot.send_message(chat_id, "Invalid run mode selection. Please try again.")
-            .reply_markup(keyboard::executor_pick_keyboard(task_id))
-            .await?;
+        render_or_send_card(
+            bot,
+            chat_id,
+            card_context,
+            "Invalid run mode selection. Please try again.",
+            Some(keyboard::executor_pick_keyboard(task_id)),
+            None,
+        )
+        .await?;
         return Ok(());
     };
 
@@ -990,14 +1358,31 @@ async fn handle_run_with_executor_mode(
         .run_task_impl(task_id, executor, Some(selected_mode.as_str()), None)
         .await;
     match result {
-        Ok(()) => {}
+        Ok(()) => {
+            if let Some(context) = card_context {
+                delete_message_best_effort(bot, chat_id, context.source_message_id).await;
+            }
+        }
         Err(msg) => {
-            bot.send_message(chat_id, msg)
-                .reply_markup(keyboard::home_only_keyboard())
-                .await?;
+            render_or_send_card(
+                bot,
+                chat_id,
+                card_context,
+                format!("Failed to start run with {executor}/{selected_mode}: {msg}"),
+                Some(run_failure_keyboard(service, task_id).await),
+                None,
+            )
+            .await?;
         }
     }
     Ok(())
+}
+
+async fn run_failure_keyboard(service: &TelegramBotService, task_id: Uuid) -> InlineKeyboardMarkup {
+    match Task::find_by_id(&service.db.pool, task_id).await {
+        Ok(Some(task)) => keyboard::task_detail_keyboard(task_id, &task.status),
+        _ => keyboard::home_only_keyboard(),
+    }
 }
 
 async fn handle_approve(
@@ -1005,13 +1390,17 @@ async fn handle_approve(
     chat_id: ChatId,
     service: &TelegramBotService,
     task_id: Uuid,
+    card_context: Option<CardRenderContext>,
 ) -> ResponseResult<()> {
     let Some(plan_approval) = service.find_exit_plan_approval(task_id).await else {
-        bot.send_message(
+        render_or_send_card(
+            bot,
             chat_id,
+            card_context,
             "No pending plan approval found. It may have expired.",
+            Some(keyboard::home_only_keyboard()),
+            None,
         )
-        .reply_markup(keyboard::home_only_keyboard())
         .await?;
         return Ok(());
     };
@@ -1029,14 +1418,33 @@ async fn handle_approve(
         .await
     {
         Ok(_) => {
-            bot.send_message(chat_id, "✅ Plan approved!")
-                .reply_markup(keyboard::home_only_keyboard())
-                .await?;
+            let removed = cleanup_plan_review_cards(bot, chat_id, task_id).await;
+            let target_context =
+                if card_context.is_some_and(|ctx| removed.contains(&ctx.source_message_id)) {
+                    None
+                } else {
+                    card_context
+                };
+            render_or_send_card(
+                bot,
+                chat_id,
+                target_context,
+                "✅ Plan approved!",
+                Some(keyboard::home_only_keyboard()),
+                None,
+            )
+            .await?;
         }
         Err(e) => {
-            bot.send_message(chat_id, format!("Failed to approve plan: {e}"))
-                .reply_markup(keyboard::home_only_keyboard())
-                .await?;
+            render_or_send_card(
+                bot,
+                chat_id,
+                card_context,
+                format!("Failed to approve plan: {e}"),
+                Some(keyboard::home_only_keyboard()),
+                None,
+            )
+            .await?;
         }
     }
     Ok(())
@@ -1047,17 +1455,24 @@ async fn handle_reject_start(
     chat_id: ChatId,
     task_id: Uuid,
     dialogue: &BotDialogue,
+    card_context: Option<CardRenderContext>,
 ) -> ResponseResult<()> {
+    let prompt_message_id = render_or_send_card(
+        bot,
+        chat_id,
+        card_context,
+        "Enter a rejection reason (or send any text to reject without reason):",
+        Some(keyboard::cancel_keyboard()),
+        None,
+    )
+    .await?;
     dialogue
-        .update(DialogueState::RejectingPlan { task_id })
+        .update(DialogueState::RejectingPlan {
+            task_id,
+            prompt_message_id: prompt_message_id.0,
+        })
         .await
         .ok();
-    bot.send_message(
-        chat_id,
-        "Enter a rejection reason (or send any text to reject without reason):",
-    )
-    .reply_markup(keyboard::cancel_keyboard())
-    .await?;
     Ok(())
 }
 
@@ -1067,15 +1482,19 @@ async fn handle_reject_finish(
     service: &TelegramBotService,
     task_id: Uuid,
     reason: Option<&str>,
-) -> ResponseResult<()> {
+    card_context: Option<CardRenderContext>,
+) -> ResponseResult<bool> {
     let Some(plan_approval) = service.find_exit_plan_approval(task_id).await else {
-        bot.send_message(
+        render_or_send_card(
+            bot,
             chat_id,
+            card_context,
             "No pending plan approval found. It may have expired.",
+            Some(keyboard::home_only_keyboard()),
+            None,
         )
-        .reply_markup(keyboard::home_only_keyboard())
         .await?;
-        return Ok(());
+        return Ok(false);
     };
 
     match service
@@ -1093,17 +1512,37 @@ async fn handle_reject_finish(
         .await
     {
         Ok(_) => {
-            bot.send_message(chat_id, "📝 Plan rejected.")
-                .reply_markup(keyboard::home_only_keyboard())
-                .await?;
+            let removed = cleanup_plan_review_cards(bot, chat_id, task_id).await;
+            let target_context =
+                if card_context.is_some_and(|ctx| removed.contains(&ctx.source_message_id)) {
+                    None
+                } else {
+                    card_context
+                };
+            render_or_send_card(
+                bot,
+                chat_id,
+                target_context,
+                "📝 Plan rejected.",
+                Some(keyboard::home_only_keyboard()),
+                None,
+            )
+            .await?;
+            return Ok(true);
         }
         Err(e) => {
-            bot.send_message(chat_id, format!("Failed to reject plan: {e}"))
-                .reply_markup(keyboard::home_only_keyboard())
-                .await?;
+            render_or_send_card(
+                bot,
+                chat_id,
+                card_context,
+                format!("Failed to reject plan: {e}"),
+                Some(keyboard::home_only_keyboard()),
+                None,
+            )
+            .await?;
         }
     }
-    Ok(())
+    Ok(false)
 }
 
 async fn handle_follow_up_reply_start(
@@ -1111,14 +1550,24 @@ async fn handle_follow_up_reply_start(
     chat_id: ChatId,
     task_id: Uuid,
     dialogue: &BotDialogue,
+    card_context: Option<CardRenderContext>,
 ) -> ResponseResult<()> {
+    let prompt_message_id = render_or_send_card(
+        bot,
+        chat_id,
+        card_context,
+        "Type your reply here:",
+        Some(keyboard::cancel_keyboard()),
+        None,
+    )
+    .await?;
     dialogue
-        .update(DialogueState::ReplyingFollowUp { task_id })
+        .update(DialogueState::ReplyingFollowUp {
+            task_id,
+            prompt_message_id: prompt_message_id.0,
+        })
         .await
         .ok();
-    bot.send_message(chat_id, "Type your reply here:")
-        .reply_markup(keyboard::cancel_keyboard())
-        .await?;
     Ok(())
 }
 
@@ -1128,20 +1577,34 @@ async fn handle_follow_up_reply_finish(
     service: &TelegramBotService,
     task_id: Uuid,
     prompt: &str,
-) -> ResponseResult<()> {
+    card_context: Option<CardRenderContext>,
+) -> ResponseResult<bool> {
     match service.send_follow_up_reply(task_id, prompt).await {
         Ok(()) => {
-            bot.send_message(chat_id, "✅ Reply sent. The task is running again.")
-                .reply_markup(keyboard::home_only_keyboard())
-                .await?;
+            render_or_send_card(
+                bot,
+                chat_id,
+                None,
+                "✅ Reply sent. The task is running again.",
+                Some(keyboard::home_only_keyboard()),
+                None,
+            )
+            .await?;
+            return Ok(true);
         }
         Err(err) => {
-            bot.send_message(chat_id, format!("Failed to send reply: {err}"))
-                .reply_markup(keyboard::home_only_keyboard())
-                .await?;
+            render_or_send_card(
+                bot,
+                chat_id,
+                card_context,
+                format!("Failed to send reply: {err}"),
+                Some(keyboard::home_only_keyboard()),
+                None,
+            )
+            .await?;
         }
     }
-    Ok(())
+    Ok(false)
 }
 
 async fn handle_done_task(
@@ -1149,19 +1612,32 @@ async fn handle_done_task(
     chat_id: ChatId,
     service: &TelegramBotService,
     task_id: Uuid,
+    card_context: Option<CardRenderContext>,
 ) -> ResponseResult<()> {
     let task = match Task::find_by_id(&service.db.pool, task_id).await {
         Ok(Some(task)) => task,
         Ok(None) => {
-            bot.send_message(chat_id, "Task not found. It may have been deleted.")
-                .reply_markup(keyboard::home_only_keyboard())
-                .await?;
+            render_or_send_card(
+                bot,
+                chat_id,
+                card_context,
+                "Task not found. It may have been deleted.",
+                Some(keyboard::home_only_keyboard()),
+                None,
+            )
+            .await?;
             return Ok(());
         }
         Err(e) => {
-            bot.send_message(chat_id, format!("Failed to load task: {e}"))
-                .reply_markup(keyboard::home_only_keyboard())
-                .await?;
+            render_or_send_card(
+                bot,
+                chat_id,
+                card_context,
+                format!("Failed to load task: {e}"),
+                Some(keyboard::home_only_keyboard()),
+                None,
+            )
+            .await?;
             return Ok(());
         }
     };
@@ -1171,31 +1647,43 @@ async fn handle_done_task(
         config.daily_mode.project_id.clone()
     };
     let Some(daily_project_id) = daily_project_id else {
-        bot.send_message(chat_id, "Daily Mode is not configured.")
-            .reply_markup(keyboard::home_only_keyboard())
-            .await?;
+        render_or_send_card(
+            bot,
+            chat_id,
+            card_context,
+            "Daily Mode is not configured.",
+            Some(keyboard::home_only_keyboard()),
+            None,
+        )
+        .await?;
         return Ok(());
     };
 
     let daily_project_id = match Uuid::parse_str(&daily_project_id) {
         Ok(id) => id,
         Err(e) => {
-            bot.send_message(
+            render_or_send_card(
+                bot,
                 chat_id,
+                card_context,
                 format!("Daily Mode project id is invalid. Please reconfigure it: {e}"),
+                Some(keyboard::home_only_keyboard()),
+                None,
             )
-            .reply_markup(keyboard::home_only_keyboard())
             .await?;
             return Ok(());
         }
     };
 
     if task.project_id != daily_project_id {
-        bot.send_message(
+        render_or_send_card(
+            bot,
             chat_id,
+            card_context,
             "Done is only available for Daily Project tasks from this card.",
+            Some(keyboard::home_only_keyboard()),
+            None,
         )
-        .reply_markup(keyboard::home_only_keyboard())
         .await?;
         return Ok(());
     }
@@ -1285,18 +1773,24 @@ async fn handle_done_task(
         message.push_str(&details);
     }
 
-    bot.send_message(chat_id, message)
-        .reply_markup(keyboard::home_only_keyboard())
-        .await?;
+    render_or_send_card(
+        bot,
+        chat_id,
+        card_context,
+        message,
+        Some(keyboard::home_only_keyboard()),
+        None,
+    )
+    .await?;
     Ok(())
 }
 
 async fn handle_create_review_task(
     bot: &Bot,
-    q: &CallbackQuery,
     chat_id: ChatId,
     service: &TelegramBotService,
     task_id: Uuid,
+    card_context: Option<CardRenderContext>,
 ) -> ResponseResult<()> {
     match service.create_review_task(task_id).await {
         Ok(result) => {
@@ -1309,25 +1803,27 @@ async fn handle_create_review_task(
             let message =
                 format_review_task_created_message(&short_id, result.task.has_in_progress_attempt);
 
-            send_or_edit(
+            render_or_send_card(
                 bot,
-                q,
                 chat_id,
-                &message,
+                card_context,
+                message,
                 Some(keyboard::task_detail_keyboard(
                     result.task.id,
                     &result.task.status,
                 )),
+                None,
             )
             .await?;
         }
         Err(err) => {
-            send_or_edit(
+            render_or_send_card(
                 bot,
-                q,
                 chat_id,
-                &format!("Failed to create review task: {err}"),
+                card_context,
+                format!("Failed to create review task: {err}"),
                 Some(keyboard::home_only_keyboard()),
+                None,
             )
             .await?;
         }
@@ -1403,47 +1899,68 @@ async fn handle_edit_start(
     service: &TelegramBotService,
     task_id: Uuid,
     dialogue: &BotDialogue,
+    card_context: Option<CardRenderContext>,
 ) -> ResponseResult<()> {
     let task = match Task::find_by_id(&service.db.pool, task_id).await {
         Ok(Some(task)) => task,
         Ok(None) => {
-            bot.send_message(chat_id, "Task not found.")
-                .reply_markup(keyboard::home_only_keyboard())
-                .await?;
+            render_or_send_card(
+                bot,
+                chat_id,
+                card_context,
+                "Task not found.",
+                Some(keyboard::home_only_keyboard()),
+                None,
+            )
+            .await?;
             return Ok(());
         }
         Err(e) => {
-            bot.send_message(chat_id, format!("Failed to load task: {e}"))
-                .reply_markup(keyboard::home_only_keyboard())
-                .await?;
+            render_or_send_card(
+                bot,
+                chat_id,
+                card_context,
+                format!("Failed to load task: {e}"),
+                Some(keyboard::home_only_keyboard()),
+                None,
+            )
+            .await?;
             return Ok(());
         }
     };
 
     if task.status != TaskStatus::Todo {
-        bot.send_message(
+        render_or_send_card(
+            bot,
             chat_id,
+            card_context,
             format!("Task is {:?}. Only Todo tasks can be edited.", task.status),
+            Some(keyboard::home_only_keyboard()),
+            None,
         )
-        .reply_markup(keyboard::home_only_keyboard())
         .await?;
         return Ok(());
     }
+
+    let prompt_message_id = render_or_send_card(
+        bot,
+        chat_id,
+        card_context,
+        format!("Current title: {}\n\nEnter a new title:", task.title),
+        Some(keyboard::cancel_keyboard()),
+        None,
+    )
+    .await?;
 
     dialogue
         .update(DialogueState::EditingTaskTitle {
             task_id,
             current_title: task.title.clone(),
+            prompt_message_id: prompt_message_id.0,
         })
         .await
         .ok();
 
-    bot.send_message(
-        chat_id,
-        format!("Current title: {}\n\nEnter a new title:", task.title),
-    )
-    .reply_markup(keyboard::cancel_keyboard())
-    .await?;
     Ok(())
 }
 
@@ -1454,10 +1971,11 @@ async fn handle_edit_task_finish(
     task_id: Uuid,
     title: &str,
     description: Option<&str>,
-) -> ResponseResult<()> {
+    card_context: Option<CardRenderContext>,
+) -> ResponseResult<bool> {
     let payload = UpdateTask {
         title: Some(title.to_string()),
-        description: Some(description.unwrap_or("").to_string()),
+        description: description.map(str::to_string),
         status: None,
         parent_workspace_id: None,
         image_ids: None,
@@ -1466,10 +1984,16 @@ async fn handle_edit_task_finish(
     let base_url = match api_base_url().await {
         Ok(url) => url,
         Err(e) => {
-            bot.send_message(chat_id, format!("Failed to locate API server: {e}"))
-                .reply_markup(keyboard::home_only_keyboard())
-                .await?;
-            return Ok(());
+            render_or_send_card(
+                bot,
+                chat_id,
+                card_context,
+                format!("Failed to locate API server: {e}"),
+                Some(keyboard::home_only_keyboard()),
+                None,
+            )
+            .await?;
+            return Ok(false);
         }
     };
 
@@ -1482,20 +2006,32 @@ async fn handle_edit_task_finish(
     {
         Ok(r) => r,
         Err(e) => {
-            bot.send_message(chat_id, format!("Failed to edit task: {e}"))
-                .reply_markup(keyboard::home_only_keyboard())
-                .await?;
-            return Ok(());
+            render_or_send_card(
+                bot,
+                chat_id,
+                card_context,
+                format!("Failed to edit task: {e}"),
+                Some(keyboard::home_only_keyboard()),
+                None,
+            )
+            .await?;
+            return Ok(false);
         }
     };
 
     let api_response: ApiResponse<Task> = match response.json().await {
         Ok(r) => r,
         Err(e) => {
-            bot.send_message(chat_id, format!("Failed to parse response: {e}"))
-                .reply_markup(keyboard::home_only_keyboard())
-                .await?;
-            return Ok(());
+            render_or_send_card(
+                bot,
+                chat_id,
+                card_context,
+                format!("Failed to parse response: {e}"),
+                Some(keyboard::home_only_keyboard()),
+                None,
+            )
+            .await?;
+            return Ok(false);
         }
     };
 
@@ -1505,24 +2041,34 @@ async fn handle_edit_task_finish(
             let short_id = ShortIdMapping::get_or_create(&service.db.pool, updated_task.id)
                 .await
                 .unwrap_or_else(|_| "????".to_string());
-            bot.send_message(
+            render_or_send_card(
+                bot,
                 chat_id,
+                None,
                 format!("✏️ Updated [{}]\nTitle: {}", short_id, updated_task.title),
+                Some(keyboard::task_detail_keyboard(
+                    updated_task.id,
+                    &updated_task.status,
+                )),
+                None,
             )
-            .reply_markup(keyboard::task_detail_keyboard(
-                updated_task.id,
-                &updated_task.status,
-            ))
             .await?;
+            return Ok(true);
         }
         None => {
             let msg = error_message.unwrap_or_else(|| "Failed to edit task.".to_string());
-            bot.send_message(chat_id, msg)
-                .reply_markup(keyboard::home_only_keyboard())
-                .await?;
+            render_or_send_card(
+                bot,
+                chat_id,
+                card_context,
+                msg,
+                Some(keyboard::home_only_keyboard()),
+                None,
+            )
+            .await?;
         }
     }
-    Ok(())
+    Ok(false)
 }
 
 async fn handle_new_task_project(
@@ -1531,41 +2077,57 @@ async fn handle_new_task_project(
     service: &TelegramBotService,
     project_id: Uuid,
     dialogue: &BotDialogue,
+    card_context: Option<CardRenderContext>,
 ) -> ResponseResult<()> {
     let project = match Project::find_by_id(&service.db.pool, project_id).await {
         Ok(Some(p)) => p,
         Ok(None) => {
-            bot.send_message(chat_id, "Project not found.")
-                .reply_markup(keyboard::home_only_keyboard())
-                .await?;
+            render_or_send_card(
+                bot,
+                chat_id,
+                card_context,
+                "Project not found.",
+                Some(keyboard::home_only_keyboard()),
+                None,
+            )
+            .await?;
             return Ok(());
         }
         Err(e) => {
-            bot.send_message(chat_id, format!("Failed to load project: {e}"))
-                .reply_markup(keyboard::home_only_keyboard())
-                .await?;
+            render_or_send_card(
+                bot,
+                chat_id,
+                card_context,
+                format!("Failed to load project: {e}"),
+                Some(keyboard::home_only_keyboard()),
+                None,
+            )
+            .await?;
             return Ok(());
         }
     };
+
+    let prompt_message_id = render_or_send_card(
+        bot,
+        chat_id,
+        card_context,
+        format!(
+            "➕ New task in *{}*\n\nEnter the task title:",
+            escape_markdown_v2(&project.name)
+        ),
+        Some(keyboard::cancel_keyboard()),
+        Some(ParseMode::MarkdownV2),
+    )
+    .await?;
 
     dialogue
         .update(DialogueState::CreatingTaskTitle {
             project_id,
             project_name: project.name.clone(),
+            prompt_message_id: prompt_message_id.0,
         })
         .await
         .ok();
-
-    bot.send_message(
-        chat_id,
-        format!(
-            "➕ New task in *{}*\n\nEnter the task title:",
-            escape_markdown_v2(&project.name)
-        ),
-    )
-    .parse_mode(ParseMode::MarkdownV2)
-    .reply_markup(keyboard::cancel_keyboard())
-    .await?;
     Ok(())
 }
 
@@ -1576,7 +2138,8 @@ async fn handle_create_task_finish(
     project_id: Uuid,
     title: &str,
     description: Option<&str>,
-) -> ResponseResult<()> {
+    card_context: Option<CardRenderContext>,
+) -> ResponseResult<bool> {
     let task_id = Uuid::new_v4();
     match Task::create(
         &service.db.pool,
@@ -1591,45 +2154,97 @@ async fn handle_create_task_finish(
     {
         Ok(_task) => {
             // TaskCreatedHandler sends the create confirmation with action buttons.
+            return Ok(true);
         }
         Err(e) => {
-            bot.send_message(chat_id, format!("Failed to create task: {e}"))
-                .reply_markup(keyboard::home_only_keyboard())
-                .await?;
+            render_or_send_card(
+                bot,
+                chat_id,
+                card_context,
+                format!("Failed to create task: {e}"),
+                Some(keyboard::home_only_keyboard()),
+                None,
+            )
+            .await?;
         }
     }
-    Ok(())
+    Ok(false)
 }
 
 // ─── Helper: edit or send ────────────────────────────────────────────
 
-/// Try to edit the callback message; fall back to sending a new one.
-async fn send_or_edit(
+async fn render_or_send_card(
     bot: &Bot,
-    q: &CallbackQuery,
     chat_id: ChatId,
-    text: &str,
+    card_context: Option<CardRenderContext>,
+    text: impl Into<String>,
     markup: Option<InlineKeyboardMarkup>,
-) -> ResponseResult<()> {
-    if let Some(msg) = q.message.as_ref() {
-        let mut req = bot.edit_message_text(chat_id, msg.id(), text);
-        if let Some(ref kb) = markup {
-            req = req.reply_markup(kb.clone());
+    parse_mode: Option<ParseMode>,
+) -> ResponseResult<MessageId> {
+    let text = text.into();
+
+    if let Some(context) = card_context {
+        let mut request = bot.edit_message_text(chat_id, context.source_message_id, text.clone());
+        if let Some(markup) = markup.clone() {
+            request = request.reply_markup(markup);
         }
-        match req.await {
-            Ok(_) => return Ok(()),
-            Err(e) => {
-                tracing::trace!("Failed to edit message, sending new one: {e}");
+        if let Some(ref parse_mode) = parse_mode {
+            request = request.parse_mode(parse_mode.clone());
+        }
+
+        match request.await {
+            Ok(message) => return Ok(message.id),
+            Err(err) => {
+                tracing::trace!(
+                    "Failed to edit Telegram card {}, sending a new card: {}",
+                    context.source_message_id.0,
+                    err
+                );
             }
         }
+
+        let mut send_request = bot.send_message(chat_id, text);
+        if let Some(markup) = markup {
+            send_request = send_request.reply_markup(markup);
+        }
+        if let Some(ref parse_mode) = parse_mode {
+            send_request = send_request.parse_mode(parse_mode.clone());
+        }
+        let sent = send_request.await?;
+        if sent.id != context.source_message_id {
+            delete_message_best_effort(bot, chat_id, context.source_message_id).await;
+        }
+        return Ok(sent.id);
     }
 
-    let mut req = bot.send_message(chat_id, text);
-    if let Some(kb) = markup {
-        req = req.reply_markup(kb);
+    let mut request = bot.send_message(chat_id, text);
+    if let Some(markup) = markup {
+        request = request.reply_markup(markup);
     }
-    req.await?;
-    Ok(())
+    if let Some(parse_mode) = parse_mode {
+        request = request.parse_mode(parse_mode);
+    }
+
+    Ok(request.await?.id)
+}
+
+async fn delete_message_best_effort(bot: &Bot, chat_id: ChatId, message_id: MessageId) {
+    if let Err(err) = bot.delete_message(chat_id, message_id).await {
+        tracing::debug!(
+            "Failed to delete Telegram message {} in chat {}: {}",
+            message_id.0,
+            chat_id.0,
+            err
+        );
+    }
+}
+
+async fn cleanup_plan_review_cards(bot: &Bot, chat_id: ChatId, task_id: Uuid) -> Vec<MessageId> {
+    let message_ids = notifier::take_plan_review_message_ids(task_id).await;
+    for message_id in &message_ids {
+        delete_message_best_effort(bot, chat_id, *message_id).await;
+    }
+    message_ids
 }
 
 fn escape_markdown_v2(text: &str) -> String {
