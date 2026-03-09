@@ -55,6 +55,8 @@ pub enum CallbackAction {
     Refresh { task_id: Uuid },
     /// Send a follow-up reply for a task (opens text input dialogue)
     FollowUpReply { task_id: Uuid },
+    /// Create a review subtask for this task
+    CreateReviewTask { task_id: Uuid },
     /// Mark a Daily task as Done (attempt merge first when needed)
     DoneTask { task_id: Uuid },
     /// Pagination for task lists
@@ -90,6 +92,7 @@ impl CallbackAction {
             Self::NewTaskProject { .. } => "np",
             Self::Refresh { .. } => "rf",
             Self::FollowUpReply { .. } => "fr",
+            Self::CreateReviewTask { .. } => "rv",
             Self::DoneTask { .. } => "fd",
             Self::TaskPage { .. } => "tp",
             Self::Cancel => "ca",
@@ -126,6 +129,7 @@ impl CallbackAction {
             | Self::RejectInput { task_id }
             | Self::Refresh { task_id }
             | Self::FollowUpReply { task_id }
+            | Self::CreateReviewTask { task_id }
             | Self::DoneTask { task_id } => {
                 format!("v1|{}|{}", self.tag(), short_uuid(task_id))
             }
@@ -233,6 +237,9 @@ impl CallbackAction {
             "fr" => Some(Self::FollowUpReply {
                 task_id: parse_short_uuid(parts.get(2)?)?,
             }),
+            "rv" => Some(Self::CreateReviewTask {
+                task_id: parse_short_uuid(parts.get(2)?)?,
+            }),
             "fd" => Some(Self::DoneTask {
                 task_id: parse_short_uuid(parts.get(2)?)?,
             }),
@@ -327,6 +334,7 @@ mod tests {
             },
             CallbackAction::Refresh { task_id: id },
             CallbackAction::FollowUpReply { task_id: id },
+            CallbackAction::CreateReviewTask { task_id: id },
             CallbackAction::DoneTask { task_id: id },
             CallbackAction::NewTaskProject { project_id: id },
         ];
@@ -400,6 +408,15 @@ mod tests {
     }
 
     #[test]
+    fn roundtrip_create_review_task() {
+        let id = Uuid::new_v4();
+        let action = CallbackAction::CreateReviewTask { task_id: id };
+        let encoded = action.encode();
+        assert!(encoded.len() <= 64);
+        assert_eq!(CallbackAction::decode(&encoded).unwrap(), action);
+    }
+
+    #[test]
     fn decode_invalid_returns_none() {
         assert!(CallbackAction::decode("").is_none());
         assert!(CallbackAction::decode("v2|h").is_none());
@@ -447,6 +464,7 @@ mod tests {
             },
             CallbackAction::Refresh { task_id: id },
             CallbackAction::FollowUpReply { task_id: id },
+            CallbackAction::CreateReviewTask { task_id: id },
             CallbackAction::DoneTask { task_id: id },
             CallbackAction::NewTaskProject { project_id: id },
             CallbackAction::TaskPage {

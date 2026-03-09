@@ -1410,10 +1410,49 @@ mod tests {
     }
 
     #[test]
-    fn stage_summary_keyboard_uses_reply_done_for_daily_task() {
+    fn stage_summary_keyboard_uses_reply_review_done_for_daily_task() {
         let task_id = Uuid::new_v4();
         let markup = stage_summary_keyboard(SummaryTrigger::ExecutionFinished, Some(task_id), true)
             .expect("keyboard should be present");
+        let value = serde_json::to_value(markup).expect("keyboard should serialize");
+        let row = value["inline_keyboard"]
+            .get(0)
+            .and_then(Value::as_array)
+            .expect("first row should be present");
+
+        assert_eq!(row.len(), 3);
+        assert_eq!(
+            CallbackAction::decode(
+                row[0]["callback_data"]
+                    .as_str()
+                    .expect("reply callback should exist")
+            ),
+            Some(CallbackAction::FollowUpReply { task_id })
+        );
+        assert_eq!(
+            CallbackAction::decode(
+                row[1]["callback_data"]
+                    .as_str()
+                    .expect("review callback should exist")
+            ),
+            Some(CallbackAction::CreateReviewTask { task_id })
+        );
+        assert_eq!(
+            CallbackAction::decode(
+                row[2]["callback_data"]
+                    .as_str()
+                    .expect("done callback should exist")
+            ),
+            Some(CallbackAction::DoneTask { task_id })
+        );
+    }
+
+    #[test]
+    fn stage_summary_keyboard_uses_reply_review_for_non_daily_task() {
+        let task_id = Uuid::new_v4();
+        let markup =
+            stage_summary_keyboard(SummaryTrigger::TaskLeftInProgress, Some(task_id), false)
+                .expect("keyboard should be present");
         let value = serde_json::to_value(markup).expect("keyboard should serialize");
         let row = value["inline_keyboard"]
             .get(0)
@@ -1433,32 +1472,9 @@ mod tests {
             CallbackAction::decode(
                 row[1]["callback_data"]
                     .as_str()
-                    .expect("done callback should exist")
+                    .expect("review callback should exist")
             ),
-            Some(CallbackAction::DoneTask { task_id })
-        );
-    }
-
-    #[test]
-    fn stage_summary_keyboard_uses_reply_only_for_non_daily_task() {
-        let task_id = Uuid::new_v4();
-        let markup =
-            stage_summary_keyboard(SummaryTrigger::TaskLeftInProgress, Some(task_id), false)
-                .expect("keyboard should be present");
-        let value = serde_json::to_value(markup).expect("keyboard should serialize");
-        let row = value["inline_keyboard"]
-            .get(0)
-            .and_then(Value::as_array)
-            .expect("first row should be present");
-
-        assert_eq!(row.len(), 1);
-        assert_eq!(
-            CallbackAction::decode(
-                row[0]["callback_data"]
-                    .as_str()
-                    .expect("reply callback should exist")
-            ),
-            Some(CallbackAction::FollowUpReply { task_id })
+            Some(CallbackAction::CreateReviewTask { task_id })
         );
     }
 

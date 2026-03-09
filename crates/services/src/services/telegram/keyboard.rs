@@ -224,18 +224,19 @@ pub fn tool_approval_keyboard(approval_id: &str) -> InlineKeyboardMarkup {
     ]])
 }
 
-/// Build a follow-up reply button shown after stage summaries.
+/// Build follow-up reply + review buttons shown after stage summaries.
 pub fn stage_summary_reply_keyboard(task_id: Uuid) -> InlineKeyboardMarkup {
-    InlineKeyboardMarkup::new(vec![vec![btn(
-        "💬 Reply",
-        CallbackAction::FollowUpReply { task_id },
-    )]])
+    InlineKeyboardMarkup::new(vec![vec![
+        btn("💬 Reply", CallbackAction::FollowUpReply { task_id }),
+        btn("🔍 Review", CallbackAction::CreateReviewTask { task_id }),
+    ]])
 }
 
-/// Build follow-up + done buttons shown after Daily task stage summaries.
+/// Build follow-up + review + done buttons shown after Daily task stage summaries.
 pub fn stage_summary_reply_done_keyboard(task_id: Uuid) -> InlineKeyboardMarkup {
     InlineKeyboardMarkup::new(vec![vec![
         btn("💬 Reply", CallbackAction::FollowUpReply { task_id }),
+        btn("🔍 Review", CallbackAction::CreateReviewTask { task_id }),
         btn("✅ Done", CallbackAction::DoneTask { task_id }),
     ]])
 }
@@ -333,9 +334,9 @@ mod tests {
     }
 
     #[test]
-    fn stage_summary_reply_done_keyboard_contains_reply_and_done_buttons() {
+    fn stage_summary_reply_keyboard_contains_reply_and_review_buttons() {
         let task_id = Uuid::new_v4();
-        let keyboard = stage_summary_reply_done_keyboard(task_id);
+        let keyboard = stage_summary_reply_keyboard(task_id);
         let value = serde_json::to_value(keyboard).expect("keyboard should serialize");
         let row = value["inline_keyboard"]
             .get(0)
@@ -348,15 +349,15 @@ mod tests {
             CallbackAction::decode(callback_data(&row[0])),
             Some(CallbackAction::FollowUpReply { task_id })
         );
-        assert_eq!(row[1]["text"], "✅ Done");
+        assert_eq!(row[1]["text"], "🔍 Review");
         assert_eq!(
             CallbackAction::decode(callback_data(&row[1])),
-            Some(CallbackAction::DoneTask { task_id })
+            Some(CallbackAction::CreateReviewTask { task_id })
         );
     }
 
     #[test]
-    fn stage_summary_reply_done_keyboard_callback_data_stays_within_limit() {
+    fn stage_summary_reply_done_keyboard_contains_reply_review_and_done_buttons() {
         let task_id = Uuid::new_v4();
         let keyboard = stage_summary_reply_done_keyboard(task_id);
         let value = serde_json::to_value(keyboard).expect("keyboard should serialize");
@@ -365,12 +366,44 @@ mod tests {
             .and_then(Value::as_array)
             .expect("first row should exist");
 
-        for button in row {
-            assert!(
-                callback_data(button).len() <= 64,
-                "callback_data exceeds Telegram limit: {}",
-                callback_data(button)
-            );
+        assert_eq!(row.len(), 3);
+        assert_eq!(row[0]["text"], "💬 Reply");
+        assert_eq!(
+            CallbackAction::decode(callback_data(&row[0])),
+            Some(CallbackAction::FollowUpReply { task_id })
+        );
+        assert_eq!(row[1]["text"], "🔍 Review");
+        assert_eq!(
+            CallbackAction::decode(callback_data(&row[1])),
+            Some(CallbackAction::CreateReviewTask { task_id })
+        );
+        assert_eq!(row[2]["text"], "✅ Done");
+        assert_eq!(
+            CallbackAction::decode(callback_data(&row[2])),
+            Some(CallbackAction::DoneTask { task_id })
+        );
+    }
+
+    #[test]
+    fn stage_summary_keyboards_callback_data_stays_within_limit() {
+        let task_id = Uuid::new_v4();
+        for keyboard in [
+            stage_summary_reply_keyboard(task_id),
+            stage_summary_reply_done_keyboard(task_id),
+        ] {
+            let value = serde_json::to_value(keyboard).expect("keyboard should serialize");
+            let row = value["inline_keyboard"]
+                .get(0)
+                .and_then(Value::as_array)
+                .expect("first row should exist");
+
+            for button in row {
+                assert!(
+                    callback_data(button).len() <= 64,
+                    "callback_data exceeds Telegram limit: {}",
+                    callback_data(button)
+                );
+            }
         }
     }
 }

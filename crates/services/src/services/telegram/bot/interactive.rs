@@ -27,7 +27,7 @@ use uuid::Uuid;
 use super::{
     TelegramBotService,
     legacy::{self, LegacyCommand},
-    shared::{api_base_url, parse_task_status, truncate_text},
+    shared::{api_base_url, format_review_task_created_message, parse_task_status, truncate_text},
 };
 use crate::services::{
     approvals::{ApprovalError, PendingApprovalInfo},
@@ -359,6 +359,9 @@ async fn handle_callback(
         }
         CallbackAction::FollowUpReply { task_id } => {
             handle_follow_up_reply_start(&bot, chat_id, task_id, &dialogue).await?;
+        }
+        CallbackAction::CreateReviewTask { task_id } => {
+            handle_create_review_task(&bot, &q, chat_id, &service, task_id).await?;
         }
         CallbackAction::DoneTask { task_id } => {
             handle_done_task(&bot, chat_id, &service, task_id).await?;
@@ -1285,6 +1288,51 @@ async fn handle_done_task(
     bot.send_message(chat_id, message)
         .reply_markup(keyboard::home_only_keyboard())
         .await?;
+    Ok(())
+}
+
+async fn handle_create_review_task(
+    bot: &Bot,
+    q: &CallbackQuery,
+    chat_id: ChatId,
+    service: &TelegramBotService,
+    task_id: Uuid,
+) -> ResponseResult<()> {
+    match service.create_review_task(task_id).await {
+        Ok(result) => {
+            tracing::info!("Created review task {}", result.task.id);
+
+            let short_id = ShortIdMapping::get_or_create(&service.db.pool, result.task.id)
+                .await
+                .unwrap_or_else(|_| "????".to_string());
+
+            let message =
+                format_review_task_created_message(&short_id, result.task.has_in_progress_attempt);
+
+            send_or_edit(
+                bot,
+                q,
+                chat_id,
+                &message,
+                Some(keyboard::task_detail_keyboard(
+                    result.task.id,
+                    &result.task.status,
+                )),
+            )
+            .await?;
+        }
+        Err(err) => {
+            send_or_edit(
+                bot,
+                q,
+                chat_id,
+                &format!("Failed to create review task: {err}"),
+                Some(keyboard::home_only_keyboard()),
+            )
+            .await?;
+        }
+    }
+
     Ok(())
 }
 
