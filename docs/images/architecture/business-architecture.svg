@@ -1,0 +1,45 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="1420" height="980" viewBox="0 0 1420 980" role="img" aria-labelledby="business-architecture-title business-architecture-desc">
+  <title id="business-architecture-title">Vibe Kanban business architecture</title>
+  <desc id="business-architecture-desc">Workflow view of how repo-backed tasks move from inputs to isolated execution, review, and pull requests.</desc>
+  <defs>
+    <marker id="arrowhead" markerWidth="12" markerHeight="12" refX="10" refY="6" orient="auto" markerUnits="strokeWidth">
+      <path d="M 0 0 L 12 6 L 0 12 z" fill="context-stroke" />
+    </marker>
+  </defs>
+  <rect x="0" y="0" width="1420" height="980" fill="#ffffff" />
+  <text x="70" y="60" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="34" font-weight="700" fill="#1e1e1e"><tspan x="70" dy="0">Vibe Kanban business architecture</tspan></text>
+  <text x="70" y="104" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="18" font-weight="500" fill="#495057"><tspan x="70" dy="0">Workflow view of how repo-backed tasks move from inputs to isolated execution, review, and pull requests.</tspan></text>
+  <rect x="80" y="180" width="290" height="180" rx="22" ry="22" fill="#e7f5ff" stroke="#1971c2" stroke-width="2" />
+  <text x="225" y="214" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="24" font-weight="600" fill="#1e1e1e"><tspan x="225" dy="0">Developer or team inputs</tspan></text>
+  <text x="225" y="262" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="17" font-weight="500" fill="#343a40"><tspan x="225" dy="0">Backlog, bugs, specs,</tspan><tspan x="225" dy="21.76">acceptance criteria,</tspan><tspan x="225" dy="21.76">review feedback</tspan></text>
+  <rect x="80" y="410" width="290" height="170" rx="22" ry="22" fill="#f3f0ff" stroke="#9c36b5" stroke-width="2" />
+  <text x="225" y="444" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="24" font-weight="600" fill="#1e1e1e"><tspan x="225" dy="0">Optional entry points</tspan></text>
+  <text x="225" y="492" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="17" font-weight="500" fill="#343a40"><tspan x="225" dy="0">MCP clients,</tspan><tspan x="225" dy="21.76">Telegram,</tspan><tspan x="225" dy="21.76">mobile or LAN access</tspan></text>
+  <rect x="480" y="250" width="360" height="280" rx="22" ry="22" fill="#ebfbee" stroke="#2f9e44" stroke-width="2" />
+  <text x="660" y="284" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="28" font-weight="600" fill="#1e1e1e"><tspan x="660" dy="0">Vibe Kanban</tspan></text>
+  <text x="660" y="337" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="17" font-weight="500" fill="#343a40"><tspan x="660" dy="0">Local-first orchestration hub</tspan><tspan x="660" dy="21.76">Projects, repositories,</tspan><tspan x="660" dy="21.76">tasks, attempts,</tspan><tspan x="660" dy="21.76">sessions, review state</tspan></text>
+  <rect x="950" y="140" width="320" height="220" rx="22" ry="22" fill="#f3f0ff" stroke="#9c36b5" stroke-width="2" />
+  <text x="1110" y="174" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="24" font-weight="600" fill="#1e1e1e"><tspan x="1110" dy="0">Supported coding agents</tspan></text>
+  <text x="1110" y="222" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="17" font-weight="500" fill="#343a40"><tspan x="1110" dy="0">Claude Code,</tspan><tspan x="1110" dy="21.76">OpenAI Codex,</tspan><tspan x="1110" dy="21.76">Gemini CLI,</tspan><tspan x="1110" dy="21.76">OpenCode, Droid</tspan></text>
+  <rect x="950" y="400" width="320" height="220" rx="22" ry="22" fill="#e7f5ff" stroke="#1971c2" stroke-width="2" />
+  <text x="1110" y="434" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="24" font-weight="600" fill="#1e1e1e"><tspan x="1110" dy="0">Local repositories and</tspan><tspan x="1110" dy="27.599999999999998">isolated git worktrees</tspan></text>
+  <text x="1110" y="512" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="17" font-weight="500" fill="#343a40"><tspan x="1110" dy="0">Branch-per-attempt</tspan><tspan x="1110" dy="21.76">setup and cleanup</tspan><tspan x="1110" dy="21.76">scripts</tspan><tspan x="1110" dy="21.76">local repo context</tspan></text>
+  <rect x="480" y="650" width="360" height="180" rx="22" ry="22" fill="#e7f5ff" stroke="#1971c2" stroke-width="2" />
+  <text x="660" y="684" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="24" font-weight="600" fill="#1e1e1e"><tspan x="660" dy="0">Review and preview loop</tspan></text>
+  <text x="660" y="732" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="17" font-weight="500" fill="#343a40"><tspan x="660" dy="0">Diffs, comments,</tspan><tspan x="660" dy="21.76">preview servers,</tspan><tspan x="660" dy="21.76">follow-up turns</tspan></text>
+  <rect x="950" y="690" width="320" height="180" rx="22" ry="22" fill="#ebfbee" stroke="#2f9e44" stroke-width="2" />
+  <text x="1110" y="724" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="24" font-weight="600" fill="#1e1e1e"><tspan x="1110" dy="0">Editor and PR flow</tspan></text>
+  <text x="1110" y="772" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="17" font-weight="500" fill="#343a40"><tspan x="1110" dy="0">Open worktree in editor</tspan><tspan x="1110" dy="21.76">push or create PR with gh</tspan><tspan x="1110" dy="21.76">merge and update task state</tspan></text>
+  <polyline points="370,270 425,270 425,350 480,350" fill="none" stroke="#1971c2" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrowhead)" />
+  <polyline points="370,495 425,495 425,450 480,450" fill="none" stroke="#9c36b5" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrowhead)" />
+  <polyline points="840,340 895,340 895,250 950,250" fill="none" stroke="#2f9e44" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrowhead)" />
+  <polyline points="840,450 895,450 895,510 950,510" fill="none" stroke="#2f9e44" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrowhead)" />
+  <polyline points="1110,360 1110,400" fill="none" stroke="#9c36b5" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrowhead)" />
+  <polyline points="660,530 660,650" fill="none" stroke="#1971c2" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrowhead)" />
+  <polyline points="590,650 590,530" fill="none" stroke="#1971c2" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrowhead)" />
+  <polyline points="950,540 900,540 900,740 840,740" fill="none" stroke="#1971c2" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrowhead)" />
+  <polyline points="840,740 900,740 900,780 950,780" fill="none" stroke="#2f9e44" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrowhead)" />
+  <text x="500" y="608" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="16" font-weight="500" fill="#495057"><tspan x="500" dy="0">feedback and follow-ups</tspan></text>
+  <text x="1010" y="380" text-anchor="start" font-family="Helvetica, Arial, sans-serif" font-size="16" font-weight="500" fill="#495057"><tspan x="1010" dy="0">agent execution inside worktrees</tspan></text>
+</svg>
