@@ -14,8 +14,6 @@ use db::{
     DBService,
     models::{
         execution_process::{ExecutionProcess, ExecutionProcessRunReason, ExecutionProcessStatus},
-        project::Project,
-        session::Session,
         short_id_mapping::ShortIdMapping,
         task::{Task, TaskStatus},
         workspace::Workspace,
@@ -46,7 +44,6 @@ pub struct TelegramContext {
     pub db: DBService,
     pub bot: Bot,
     pub chat_id: ChatId,
-    pub interactive_bot: bool,
     pub config: Arc<RwLock<Config>>,
     pub approvals: Approvals,
     pub git: GitService,
@@ -244,38 +241,15 @@ impl TelegramHandler for TaskCreatedHandler {
 
     async fn handle_with_context(&self, tg: &TelegramContext, transition: &TaskStateTransition) {
         let task = &transition.task;
+        let result = format::send_rich_then_plain(
+            &tg.bot,
+            tg.chat_id,
+            &format!("✅ Task created: {}\n\nRun it now?", task.title),
+            Some(keyboard::task_detail_keyboard(task.id, &task.status)),
+        )
+        .await;
 
-        if tg.interactive_bot {
-            let result = format::send_rich_then_plain(
-                &tg.bot,
-                tg.chat_id,
-                &format!("✅ Task created: {}\n\nRun it now?", task.title),
-                Some(keyboard::task_detail_keyboard(task.id, &task.status)),
-            )
-            .await;
-
-            if let Err(err) = result {
-                tracing::warn!("Failed to send telegram notification: {}", err);
-            }
-            return;
-        }
-
-        let short_id = ShortIdMapping::get_or_create(&tg.db.pool, task.id)
-            .await
-            .unwrap_or_else(|_| "????".to_string());
-
-        let project_name = match Project::find_by_id(&tg.db.pool, task.project_id).await {
-            Ok(Some(project)) => project.name,
-            _ => "Unknown".to_string(),
-        };
-
-        let message = format!(
-            "[{}]Task Created\nProject: {}; Task: {}\n\nRun now? /run {}",
-            short_id, project_name, task.title, short_id
-        );
-        tracing::info!("Sending telegram notification: {}", message);
-
-        if let Err(err) = format::send_rich_then_plain(&tg.bot, tg.chat_id, &message, None).await {
+        if let Err(err) = result {
             tracing::warn!("Failed to send telegram notification: {}", err);
         }
     }
@@ -297,52 +271,7 @@ impl TelegramHandler for TaskInProgressHandler {
 
     async fn handle_with_context(&self, tg: &TelegramContext, transition: &TaskStateTransition) {
         let task = &transition.task;
-
-        if tg.interactive_bot {
-            start_run_feed_watcher(tg.clone(), task.id).await;
-        }
-
-        // Keep legacy task-running notification behavior for initial runs.
-        if transition.from_status() != Some(&TaskStatus::Todo) {
-            return;
-        }
-
-        let short_id = ShortIdMapping::get_or_create(&tg.db.pool, task.id)
-            .await
-            .unwrap_or_else(|_| "????".to_string());
-
-        let workspace = match Workspace::fetch_all(&tg.db.pool, Some(task.id)).await {
-            Ok(workspaces) => match workspaces.into_iter().next() {
-                Some(workspace) => workspace,
-                None => {
-                    tracing::warn!("No workspace found for task {}", task.id);
-                    return;
-                }
-            },
-            Err(_) => {
-                tracing::warn!("Failed to find workspace for task {}", task.id);
-                return;
-            }
-        };
-
-        let executor = match Session::find_latest_by_workspace_id(&tg.db.pool, workspace.id).await {
-            Ok(Some(session)) => session.executor.unwrap_or_else(|| "Unknown".to_string()),
-            _ => "Unknown".to_string(),
-        };
-
-        let project_name = match Project::find_by_id(&tg.db.pool, task.project_id).await {
-            Ok(Some(project)) => project.name,
-            _ => "Unknown".to_string(),
-        };
-
-        let message = format!(
-            "[{}]Task Running on {} {}\nProject: {}; Task: {}",
-            short_id, executor, workspace.branch, project_name, task.title
-        );
-
-        if let Err(err) = format::send_rich_then_plain(&tg.bot, tg.chat_id, &message, None).await {
-            tracing::warn!("Failed to send telegram notification: {}", err);
-        }
+        start_run_feed_watcher(tg.clone(), task.id).await;
     }
 }
 
@@ -367,11 +296,7 @@ impl TelegramHandler for TaskOutOfInProgressHandler {
         "on_task_out_of_in_progress"
     }
 
-    async fn handle_with_context(&self, tg: &TelegramContext, transition: &TaskStateTransition) {
-        if !tg.interactive_bot {
-            return;
-        }
-
+    async fn handle_with_context(&self, _tg: &TelegramContext, transition: &TaskStateTransition) {
         stop_run_feed_watcher(transition.task.id).await;
     }
 }
@@ -400,8 +325,8 @@ impl TelegramHandler for TaskInReviewHandler {
             let total = chunks.len();
             let mut sent_message_ids = Vec::new();
             for (i, chunk) in chunks.into_iter().enumerate() {
-                // Attach approve/reject buttons to the last chunk in interactive mode
-                let markup = if tg.interactive_bot && i == total - 1 {
+                // Attach approve/reject buttons to the last chunk.
+                let markup = if i == total - 1 {
                     Some(keyboard::review_notification_keyboard(task.id))
                 } else {
                     None
@@ -418,23 +343,6 @@ impl TelegramHandler for TaskInReviewHandler {
         // Explicitly clear any IDs that might have been recorded from a prior InReview
         // cycle so they are not stale-deleted on a future approve/reject.
         clear_plan_review_message_ids(task.id).await;
-
-        // Interactive mode uses the plan notification flow above.
-        // Skip the legacy fallback text to avoid duplicated old/new content.
-        if tg.interactive_bot {
-            return;
-        }
-
-        let short_id = ShortIdMapping::get_or_create(&tg.db.pool, task.id)
-            .await
-            .unwrap_or_else(|_| "????".to_string());
-
-        let message = format!("[{}] {} InReview", short_id, task.title);
-        let result = format::send_rich_then_plain(&tg.bot, tg.chat_id, &message, None).await;
-
-        if let Err(err) = result {
-            tracing::warn!("Failed to send telegram notification: {}", err);
-        }
     }
 }
 
@@ -747,7 +655,7 @@ async fn run_feed_watcher_loop(
 
         let Some(store) = wait_for_msg_store(&tg, process.id, &cancel).await else {
             tracing::warn!(
-                "run-feed watcher {watcher_id}: no MsgStore for execution_process_id={}, fallback to legacy task notifications",
+                "run-feed watcher {watcher_id}: no MsgStore for execution_process_id={}, skipping realtime feed notifications",
                 process.id
             );
             return;

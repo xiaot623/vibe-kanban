@@ -1,7 +1,6 @@
 //! Telegram bot service entrypoint.
 //!
-//! Interactive/legacy runtimes and shared command logic are split
-//! into dedicated submodules.
+//! Interactive runtime and shared command logic.
 
 use std::sync::Arc;
 
@@ -15,7 +14,6 @@ use crate::services::{
 };
 
 mod interactive;
-mod legacy;
 mod shared;
 
 /// Telegram bot service for handling commands and notifications.
@@ -50,8 +48,6 @@ impl TelegramBotService {
             tracing::warn!("Telegram bot enabled but chat_id is missing");
             return None;
         };
-        let interactive_bot = telegram_config.interactive_bot;
-
         let task_state = TaskStateService::new(db.pool.clone());
         let service = Self {
             db,
@@ -62,25 +58,21 @@ impl TelegramBotService {
         };
 
         Some(tokio::spawn(async move {
-            service.start(bot_token, chat_id, interactive_bot).await;
+            service.start(bot_token, chat_id).await;
         }))
     }
 
-    async fn start(self, bot_token: String, chat_id: i64, interactive_bot: bool) {
+    async fn start(self, bot_token: String, chat_id: i64) {
         let bot = Bot::new(bot_token);
         let chat_id = ChatId(chat_id);
 
-        tracing::info!(
-            "Starting Telegram bot service (interactive_bot={})",
-            interactive_bot
-        );
+        tracing::info!("Starting Telegram bot service");
 
         // Register telegram context for event handlers
         let tg_context = TelegramContext {
             db: self.db.clone(),
             bot: bot.clone(),
             chat_id,
-            interactive_bot,
             config: self.config.clone(),
             approvals: self.approvals.clone(),
             git: self.git.clone(),
@@ -88,11 +80,7 @@ impl TelegramBotService {
         super::notifier::set_telegram_context(tg_context);
         super::notifier::register_handlers(self.task_state.dispatcher()).await;
 
-        if interactive_bot {
-            interactive::run_dispatcher(self, bot, chat_id).await;
-        } else {
-            legacy::run_dispatcher(self, bot, chat_id).await;
-        }
+        interactive::run_dispatcher(self, bot, chat_id).await;
 
         super::notifier::clear_telegram_context();
     }

@@ -197,10 +197,6 @@
           "label": "Enable Telegram bot",
           "helper": "Send task updates and accept commands in Telegram."
         },
-        "interactiveBot": {
-          "label": "Enable interactive bot mode",
-          "helper": "Use button-based menus and approval actions instead of legacy command-only mode."
-        },
         "botToken": {
           "label": "Bot Token",
           "placeholder": "123456:ABCDEF...",
@@ -214,13 +210,13 @@
         "defaultExecutor": {
           "label": "Default Executor",
           "placeholder": "Select executor",
-          "helper": "Executor used when /run doesn't specify one."
+          "helper": "Executor used when running tasks from Telegram."
         },
         "defaultMode": {
           "label": "Default Mode",
           "defaultLabel": "Default",
           "placeholder": "Select mode",
-          "helper": "Mode used when /run doesn't specify one."
+          "helper": "Mode used when running tasks from Telegram."
         }
       },
       "mcpServer": {

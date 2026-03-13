@@ -5,8 +5,7 @@ use db::models::{
     project::Project,
     project_repo::ProjectRepo,
     session::Session,
-    short_id_mapping::ShortIdMapping,
-    task::{CreateTask, Task, TaskStatus, TaskWithAttemptStatus, UpdateTask},
+    task::{CreateTask, Task, TaskStatus, TaskWithAttemptStatus},
     workspace::Workspace,
     workspace_repo::WorkspaceRepo,
 };
@@ -15,16 +14,13 @@ use executors::{
     profile::{ExecutorProfileId, canonical_variant_key},
 };
 use serde::Serialize;
-use utils::{
-    approvals::{ApprovalResponse, ApprovalStatus},
-    response::ApiResponse,
-};
+use utils::response::ApiResponse;
 use uuid::Uuid;
 
 use super::TelegramBotService;
 use crate::services::{git::GitBranch, telegram::EXIT_PLAN_MODE_NAME};
 
-// ─── Shared command logic (used by both modes) ───────────────────────
+// ─── Shared command logic (interactive Telegram bot) ─────────────────
 
 impl TelegramBotService {
     pub(super) async fn create_daily_task_from_message(
@@ -70,149 +66,6 @@ impl TelegramBotService {
         )
         .await
         .map_err(|e| format!("Failed to create Daily task: {e}"))
-    }
-
-    pub(super) async fn list_projects(&self) -> String {
-        match Project::find_all(&self.db.pool).await {
-            Ok(projects) if projects.is_empty() => "No projects found.".to_string(),
-            Ok(projects) => {
-                let mut message = format!("Projects ({}):", projects.len());
-                for project in projects {
-                    message.push_str(&format!("\n- {} (project{})", project.name, project.id));
-                }
-                message
-            }
-            Err(e) => format!("Failed to load projects: {e}"),
-        }
-    }
-
-    pub(super) async fn list_tasks_for_project(&self, args: String) -> String {
-        let args = args.trim();
-        let parts: Vec<&str> = if args.is_empty() {
-            Vec::new()
-        } else {
-            args.split_whitespace().collect()
-        };
-
-        if parts.is_empty() {
-            return "Usage: /list <project> [status]".to_string();
-        }
-
-        let project_name = parts[0];
-        let status_filter = if parts.len() > 1 {
-            match parse_task_status(parts[1]) {
-                Some(status) => Some(status),
-                None => {
-                    return format!(
-                        "Invalid status: {} (expected todo/inprogress/inreview/done/cancelled)",
-                        parts[1]
-                    );
-                }
-            }
-        } else {
-            None
-        };
-
-        let (project, warning) = match Project::find_by_name(&self.db.pool, project_name).await {
-            Ok(projects) if projects.is_empty() => {
-                match Uuid::parse_str(project_name.trim_start_matches("project")) {
-                    Ok(id) => match Project::find_by_id(&self.db.pool, id).await {
-                        Ok(Some(p)) => (p, None),
-                        Ok(None) => return format!("Project not found: {project_name}"),
-                        Err(e) => return format!("Failed to load project: {e}"),
-                    },
-                    Err(_) => return format!("Project not found: {project_name}"),
-                }
-            }
-            Ok(projects) if projects.len() > 1 => {
-                let mut msg = format!(
-                    "Warning: Multiple projects match '{project_name}', using first match:"
-                );
-                for p in &projects {
-                    msg.push_str(&format!("\n- {} (project{})", p.name, p.id));
-                }
-                (projects.into_iter().next().unwrap(), Some(msg))
-            }
-            Ok(mut projects) => (projects.remove(0), None),
-            Err(e) => return format!("Failed to load project: {e}"),
-        };
-
-        let tasks =
-            match Task::find_by_project_id_with_attempt_status(&self.db.pool, project.id).await {
-                Ok(tasks) => tasks,
-                Err(e) => return format!("Failed to load tasks: {e}"),
-            };
-
-        let tasks: Vec<_> = tasks
-            .into_iter()
-            .filter(|task| {
-                if let Some(ref s) = status_filter {
-                    &task.status == s
-                } else {
-                    matches!(task.status, TaskStatus::InReview | TaskStatus::Done)
-                }
-            })
-            .collect();
-
-        let mut result = format_task_list(&self.db.pool, &tasks, Some(&project.name)).await;
-        if let Some(warn) = warning {
-            result = format!("{warn}\n\n{result}");
-        }
-        result
-    }
-
-    pub(super) async fn describe_task(&self, raw_id: &str) -> String {
-        let Some(task_id) = self.resolve_task_id(raw_id).await else {
-            return "Invalid task id. Expected short code, task<uuid>, or uuid.".to_string();
-        };
-
-        let task = match Task::find_by_id(&self.db.pool, task_id).await {
-            Ok(Some(task)) => task,
-            Ok(None) => return format!("Task not found: task{task_id}"),
-            Err(e) => return format!("Failed to load task: {e}"),
-        };
-
-        if !matches!(task.status, TaskStatus::InReview | TaskStatus::Done) {
-            return format!(
-                "Task is not available for review (status: {:?}). Only InReview and Done tasks can be viewed.",
-                task.status
-            );
-        }
-
-        let project_name = match Project::find_by_id(&self.db.pool, task.project_id).await {
-            Ok(Some(project)) => project.name,
-            _ => "Unknown project".to_string(),
-        };
-
-        let description = task
-            .description
-            .clone()
-            .unwrap_or_else(|| "No description.".to_string());
-
-        let short_id = ShortIdMapping::get_or_create(&self.db.pool, task.id)
-            .await
-            .unwrap_or_else(|_| "????".to_string());
-
-        let mut message = format!(
-            "[{}] task{}\nProject: {}\nStatus: {:?}\nTitle: {}\nDescription: {}",
-            short_id,
-            task.id,
-            project_name,
-            task.status,
-            task.title,
-            truncate_text(&description, 500)
-        );
-
-        if let Some(attempts_info) = self.fetch_attempts_info(task_id).await {
-            if !attempts_info.is_empty() {
-                message.push_str(&format!("\n\nAttempts ({}):", attempts_info.len()));
-                for attempt in attempts_info {
-                    message.push_str(&format!("\n  • {}", attempt));
-                }
-            }
-        }
-
-        message
     }
 
     pub(super) async fn fetch_attempts_info(&self, task_id: Uuid) -> Option<Vec<String>> {
@@ -304,82 +157,7 @@ impl TelegramBotService {
         Some((total_added, total_removed))
     }
 
-    pub(super) async fn create_task_from_command(&self, payload: &str) -> Option<String> {
-        let lines: Vec<&str> = payload.lines().collect();
-        if lines.len() < 2 {
-            return Some("Usage: /add [project_name]\\n[title]\\n[description]".to_string());
-        }
-
-        let project_name = lines[0].trim();
-        let title = lines[1].trim();
-
-        if project_name.is_empty() || title.is_empty() {
-            return Some("Project name and title are required.".to_string());
-        }
-
-        let description = if lines.len() > 2 {
-            let rest = lines[2..].join("\n");
-            let trimmed = rest.trim();
-            if trimmed.is_empty() {
-                None
-            } else {
-                Some(trimmed.to_string())
-            }
-        } else {
-            None
-        };
-
-        let (project, warning) = match Project::find_by_name(&self.db.pool, project_name).await {
-            Ok(projects) if projects.is_empty() => {
-                match Uuid::parse_str(project_name.trim_start_matches("project")) {
-                    Ok(id) => match Project::find_by_id(&self.db.pool, id).await {
-                        Ok(Some(p)) => (p, None),
-                        Ok(None) => {
-                            return Some(format!("Project not found: {project_name}"));
-                        }
-                        Err(e) => {
-                            return Some(format!("Failed to load project: {e}"));
-                        }
-                    },
-                    Err(_) => {
-                        return Some(format!("Project not found: {project_name}"));
-                    }
-                }
-            }
-            Ok(projects) if projects.len() > 1 => {
-                let mut msg = format!(
-                    "Warning: Multiple projects match '{project_name}', using first match:"
-                );
-                for p in &projects {
-                    msg.push_str(&format!("\n- {} (project{})", p.name, p.id));
-                }
-                (projects.into_iter().next().unwrap(), Some(msg))
-            }
-            Ok(mut projects) => (projects.remove(0), None),
-            Err(e) => return Some(format!("Failed to load project: {e}")),
-        };
-
-        let task_id = Uuid::new_v4();
-        match Task::create(
-            &self.db.pool,
-            &CreateTask::from_title_description(project.id, title.to_string(), description),
-            task_id,
-        )
-        .await
-        {
-            Ok(_task) => {
-                if let Some(warn) = warning {
-                    tracing::warn!("{warn}");
-                }
-                return None;
-            }
-            Err(e) => {
-                return Some(format!("Failed to create task: {e}"));
-            }
-        }
-    }
-
-    /// Shared run logic used by both button and legacy command paths.
+    /// Shared run logic used by interactive command and callback flows.
     pub(super) async fn run_task_impl(
         &self,
         task_id: Uuid,
@@ -452,7 +230,7 @@ impl TelegramBotService {
                         Some(branch) => branch,
                         None => {
                             return Err(format!(
-                                "No branches found for {}. Provide a branch with /run.",
+                                "No branches found for {}. Configure a target branch and try again.",
                                 repo.display_name
                             ));
                         }
@@ -501,30 +279,6 @@ impl TelegramBotService {
             None => {
                 Err(error_message.unwrap_or_else(|| "Failed to start task attempt.".to_string()))
             }
-        }
-    }
-
-    pub(super) async fn run_task_from_command(&self, payload: &str) -> Option<String> {
-        let parts: Vec<&str> = payload.split_whitespace().collect();
-        if parts.is_empty() {
-            return Some("Usage: /run task<uuid> [executor] [mode] [branch]".to_string());
-        }
-
-        let Some(task_id) = self.resolve_task_id(parts[0]).await else {
-            return Some("Invalid task id. Expected short code, task<uuid>, or uuid.".to_string());
-        };
-
-        let config = self.config.read().await.telegram.clone();
-        let executor_raw = parts.get(1).copied().unwrap_or(&config.default_executor);
-        let mode_raw = parts.get(2).copied();
-        let branch_override = parts.get(3).map(|v| v.to_string());
-
-        match self
-            .run_task_impl(task_id, executor_raw, mode_raw, branch_override)
-            .await
-        {
-            Ok(()) => None,
-            Err(msg) => Some(msg),
         }
     }
 
@@ -634,156 +388,6 @@ impl TelegramBotService {
         }
     }
 
-    pub(super) async fn edit_task_from_command(&self, payload: &str) -> String {
-        let lines: Vec<&str> = payload.lines().collect();
-        if lines.len() < 3 {
-            return "Usage: /edit [task_id]\\n[title]\\n[description]".to_string();
-        }
-
-        let raw_task_id = lines[0].trim();
-        let title = lines[1].trim();
-        let description = lines[2..].join("\n").trim().to_string();
-
-        if raw_task_id.is_empty() || title.is_empty() {
-            return "Task id and title are required.".to_string();
-        }
-
-        let Some(task_id) = self.resolve_task_id(raw_task_id).await else {
-            return "Invalid task id. Expected short code, task<uuid>, or uuid.".to_string();
-        };
-
-        let task = match Task::find_by_id(&self.db.pool, task_id).await {
-            Ok(Some(task)) => task,
-            Ok(None) => return format!("Task not found: task{task_id}"),
-            Err(e) => return format!("Failed to load task: {e}"),
-        };
-
-        if task.status != TaskStatus::Todo {
-            return format!(
-                "Task task{} is {:?}. Only Todo tasks can be edited with /edit.",
-                task.id, task.status
-            );
-        }
-
-        let payload = UpdateTask {
-            title: Some(title.to_string()),
-            description: Some(description),
-            status: None,
-            parent_workspace_id: None,
-            image_ids: None,
-        };
-
-        let base_url = match api_base_url().await {
-            Ok(base_url) => base_url,
-            Err(e) => return format!("Failed to locate API server: {e}"),
-        };
-
-        let client = reqwest::Client::new();
-        let response = match client
-            .put(format!("{base_url}/tasks/{task_id}"))
-            .json(&payload)
-            .send()
-            .await
-        {
-            Ok(response) => response,
-            Err(e) => return format!("Failed to edit task: {e}"),
-        };
-
-        let api_response: ApiResponse<Task> = match response.json().await {
-            Ok(response) => response,
-            Err(e) => return format!("Failed to parse task update response: {e}"),
-        };
-
-        let error_message = api_response.message().map(String::from);
-        match api_response.into_data() {
-            Some(updated_task) => {
-                let short_id = ShortIdMapping::get_or_create(&self.db.pool, updated_task.id)
-                    .await
-                    .unwrap_or_else(|_| "????".to_string());
-                format!(
-                    "Updated task [{}] task{}\\nTitle: {}",
-                    short_id, updated_task.id, updated_task.title
-                )
-            }
-            None => error_message.unwrap_or_else(|| "Failed to edit task.".to_string()),
-        }
-    }
-
-    pub(super) async fn approve_plan_from_command(&self, payload: &str) -> Option<String> {
-        let parts: Vec<&str> = payload.split_whitespace().collect();
-        if parts.is_empty() {
-            return Some("Usage: /approve <task_id>".to_string());
-        }
-
-        let Some(task_id) = self.resolve_task_id(parts[0]).await else {
-            return Some("Invalid task id. Expected short code, task<uuid>, or uuid.".to_string());
-        };
-
-        let Some(plan_approval) = self.find_exit_plan_approval(task_id).await else {
-            return Some(format!("No pending plan approval found for task{task_id}."));
-        };
-
-        let response = self
-            .approvals
-            .respond(
-                &self.db.pool,
-                &plan_approval.approval_id,
-                ApprovalResponse {
-                    execution_process_id: plan_approval.execution_process_id,
-                    status: ApprovalStatus::Approved,
-                },
-            )
-            .await;
-
-        match response {
-            Ok(_) => None,
-            Err(e) => Some(format!("Failed to approve plan: {e}")),
-        }
-    }
-
-    pub(super) async fn reject_plan_from_command(&self, payload: &str) -> Option<String> {
-        let parts: Vec<&str> = payload.split_whitespace().collect();
-        if parts.is_empty() {
-            return Some("Usage: /reject <task_id> [reason]".to_string());
-        }
-
-        let Some(task_id) = self.resolve_task_id(parts[0]).await else {
-            return Some("Invalid task id. Expected short code, task<uuid>, or uuid.".to_string());
-        };
-
-        let Some(plan_approval) = self.find_exit_plan_approval(task_id).await else {
-            return Some(format!("No pending plan approval found for task{task_id}."));
-        };
-
-        let reason = parts.get(1..).map(|rest| rest.join(" ")).and_then(|text| {
-            let trimmed = text.trim();
-            if trimmed.is_empty() {
-                None
-            } else {
-                Some(trimmed.to_string())
-            }
-        });
-
-        let response = self
-            .approvals
-            .respond(
-                &self.db.pool,
-                &plan_approval.approval_id,
-                ApprovalResponse {
-                    execution_process_id: plan_approval.execution_process_id,
-                    status: ApprovalStatus::Denied {
-                        reason: reason.clone(),
-                    },
-                },
-            )
-            .await;
-
-        match response {
-            Ok(_) => None,
-            Err(e) => Some(format!("Failed to reject plan: {e}")),
-        }
-    }
-
     pub(super) async fn find_exit_plan_approval(&self, task_id: Uuid) -> Option<PlanApproval> {
         for approval in self.approvals.list_pending() {
             if approval.tool_name != EXIT_PLAN_MODE_NAME {
@@ -803,14 +407,6 @@ impl TelegramBotService {
         }
 
         None
-    }
-
-    async fn resolve_task_id(&self, raw: &str) -> Option<Uuid> {
-        let trimmed = raw.trim();
-        if let Some(uuid) = parse_task_id(trimmed) {
-            return Some(uuid);
-        }
-        ShortIdMapping::resolve(&self.db.pool, trimmed).await
     }
 
     async fn find_review_source_workspace_id(&self, task_id: Uuid) -> Result<Uuid, String> {
@@ -943,51 +539,9 @@ struct WorkspaceRepoInput {
 
 // ─── Free functions ──────────────────────────────────────────────────
 
-async fn format_task_list(
-    pool: &sqlx::Pool<sqlx::Sqlite>,
-    tasks: &[TaskWithAttemptStatus],
-    project_name: Option<&str>,
-) -> String {
-    if tasks.is_empty() {
-        return match project_name {
-            Some(name) => format!("No tasks found for project {name}."),
-            None => "No tasks found.".to_string(),
-        };
-    }
-
-    let mut message = match project_name {
-        Some(name) => format!("Tasks for {name} ({}):", tasks.len()),
-        None => format!("Tasks ({}):", tasks.len()),
-    };
-
-    for task in tasks.iter().take(50) {
-        let short_id = ShortIdMapping::get_or_create(pool, task.id)
-            .await
-            .unwrap_or_else(|_| "????".to_string());
-        message.push_str(&format!(
-            "\n- [{}] [{}] {}",
-            short_id,
-            format!("{:?}", &task.status),
-            &task.title
-        ));
-    }
-
-    if tasks.len() > 50 {
-        message.push_str(&format!("\n... and {} more", tasks.len() - 50));
-    }
-
-    message
-}
-
 pub(super) fn parse_task_status(raw: &str) -> Option<TaskStatus> {
     let normalized = raw.trim().to_lowercase();
     TaskStatus::from_str(&normalized).ok()
-}
-
-fn parse_task_id(raw: &str) -> Option<Uuid> {
-    let trimmed = raw.trim();
-    let trimmed = trimmed.strip_prefix("task").unwrap_or(trimmed);
-    Uuid::parse_str(trimmed).ok()
 }
 
 fn parse_executor(raw: &str) -> Result<BaseCodingAgent, String> {
@@ -1100,12 +654,13 @@ fn select_review_source(
 }
 
 /// Format the user-facing success message for a newly-created review task.
-pub(super) fn format_review_task_created_message(short_id: &str, has_in_progress_attempt: bool) -> String {
+pub(super) fn format_review_task_created_message(
+    short_id: &str,
+    has_in_progress_attempt: bool,
+) -> String {
     let mut message = format!("✅ Review task created: [{short_id}]");
     if !has_in_progress_attempt {
-        message.push_str(
-            "\n⚠️ Created but not auto-started. Open the task and run it manually.",
-        );
+        message.push_str("\n⚠️ Created but not auto-started. Open the task and run it manually.");
     }
     message
 }
@@ -1195,7 +750,10 @@ mod tests {
         let failed_id = Uuid::new_v4();
         let fallback_id = Uuid::new_v4();
 
-        for status in [ExecutionProcessStatus::Failed, ExecutionProcessStatus::Killed] {
+        for status in [
+            ExecutionProcessStatus::Failed,
+            ExecutionProcessStatus::Killed,
+        ] {
             let result =
                 select_review_source(fallback_id, vec![(failed_id, status, Utc::now())]).unwrap();
             assert_eq!(result, failed_id);

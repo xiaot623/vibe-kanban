@@ -197,10 +197,6 @@
           "label": "启用 Telegram 机器人",
           "helper": "在 Telegram 中发送任务更新并接收命令。"
         },
-        "interactiveBot": {
-          "label": "启用交互式机器人模式",
-          "helper": "使用按钮菜单和审批操作，而不是仅命令的旧模式。"
-        },
         "botToken": {
           "label": "机器人 Token",
           "placeholder": "123456:ABCDEF...",
@@ -214,13 +210,13 @@
         "defaultExecutor": {
           "label": "默认执行器",
           "placeholder": "选择执行器",
-          "helper": "/run 未指定时使用的执行器。"
+          "helper": "从 Telegram 运行任务时使用的执行器。"
         },
         "defaultMode": {
           "label": "默认模式",
           "defaultLabel": "DEFAULT",
           "placeholder": "选择模式",
-          "helper": "telegram bot 执行 executor 使用的默认模式。"
+          "helper": "从 Telegram 运行任务时使用的模式。"
         }
       },
       "mcpServer": {

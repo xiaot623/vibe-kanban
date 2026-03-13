@@ -26,7 +26,6 @@ use uuid::Uuid;
 
 use super::{
     TelegramBotService,
-    legacy::{self, LegacyCommand},
     shared::{api_base_url, format_review_task_created_message, parse_task_status, truncate_text},
 };
 use crate::services::{
@@ -100,13 +99,7 @@ pub(super) async fn run_dispatcher(service: TelegramBotService, bot: Bot, chat_i
                 .filter_command::<Command>()
                 .endpoint(handle_command),
         )
-        // Branch 3: legacy slash commands remain available in interactive mode.
-        .branch(
-            Update::filter_message()
-                .filter_command::<LegacyCommand>()
-                .endpoint(handle_legacy_command),
-        )
-        // Branch 4: plain text messages (dialogue input)
+        // Branch 3: plain text messages (dialogue input)
         .branch(Update::filter_message().endpoint(handle_dialogue_text));
 
     let service = Arc::new(service);
@@ -168,9 +161,8 @@ async fn handle_command(
         }
         Command::Help => {
             let help = format!(
-                "🏠 **Quick actions** — use the buttons from /start\n\n\
-                 **Legacy commands:**\n{}",
-                LegacyCommand::descriptions()
+                "🏠 **Quick actions** — use the buttons from /start\n\n{}",
+                Command::descriptions()
             );
             format::send_rich_then_plain(&bot, msg.chat.id, &help, None).await?;
         }
@@ -201,16 +193,6 @@ async fn handle_command(
     }
 
     Ok(())
-}
-
-async fn handle_legacy_command(
-    bot: Bot,
-    msg: Message,
-    cmd: LegacyCommand,
-    service: Arc<TelegramBotService>,
-    allowed_chat_id: ChatId,
-) -> ResponseResult<()> {
-    legacy::handle_command(bot, msg, cmd, service, allowed_chat_id).await
 }
 
 // ─── Callback handler ────────────────────────────────────────────────
@@ -2149,10 +2131,58 @@ fn empty_inline_keyboard() -> InlineKeyboardMarkup {
 #[cfg(test)]
 mod tests {
     use executors::logs::{ActionType, NormalizedEntry, NormalizedEntryType, ToolStatus};
+    use teloxide::utils::command::BotCommands;
     use uuid::Uuid;
 
-    use super::approval_requires_structured_input;
+    use super::{Command, approval_requires_structured_input};
     use crate::services::approvals::PendingApprovalInfo;
+
+    #[test]
+    fn interactive_commands_parse_supported_slash_commands() {
+        let bot_name = "vibe_kanban_bot";
+
+        assert!(matches!(
+            Command::parse("/start", bot_name),
+            Ok(Command::Start)
+        ));
+        assert!(matches!(
+            Command::parse("/help", bot_name),
+            Ok(Command::Help)
+        ));
+        assert!(matches!(
+            Command::parse("/tasks", bot_name),
+            Ok(Command::Tasks)
+        ));
+        assert!(matches!(Command::parse("/new", bot_name), Ok(Command::New)));
+        assert!(matches!(
+            Command::parse("/pending", bot_name),
+            Ok(Command::Pending)
+        ));
+        assert!(matches!(
+            Command::parse("/cancel", bot_name),
+            Ok(Command::Cancel)
+        ));
+    }
+
+    #[test]
+    fn interactive_commands_reject_legacy_slash_commands() {
+        let bot_name = "vibe_kanban_bot";
+        for legacy in [
+            "/project",
+            "/list demo",
+            "/task 1234",
+            "/add demo",
+            "/edit task1234",
+            "/run task1234",
+            "/approve task1234",
+            "/reject task1234",
+        ] {
+            assert!(
+                Command::parse(legacy, bot_name).is_err(),
+                "{legacy} should fail"
+            );
+        }
+    }
 
     #[test]
     fn request_user_input_requires_structured_handling() {

@@ -26,8 +26,6 @@ pub struct DailyModeConfig {
 #[derive(Clone, Debug, Serialize, Deserialize, TS)]
 pub struct TelegramConfig {
     pub enabled: bool,
-    #[serde(default = "default_telegram_interactive_bot")]
-    pub interactive_bot: bool,
     pub bot_token: Option<String>,
     pub chat_id: Option<i64>,
     #[serde(default = "default_telegram_executor")]
@@ -40,10 +38,6 @@ fn default_telegram_executor() -> String {
     "CLAUDE_CODE".to_string()
 }
 
-fn default_telegram_interactive_bot() -> bool {
-    true
-}
-
 fn default_telegram_mode() -> String {
     "DEFAULT".to_string()
 }
@@ -52,7 +46,6 @@ impl Default for TelegramConfig {
     fn default() -> Self {
         Self {
             enabled: false,
-            interactive_bot: default_telegram_interactive_bot(),
             bot_token: None,
             chat_id: None,
             default_executor: default_telegram_executor(),
