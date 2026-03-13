@@ -37,7 +37,7 @@ use tokio_util::sync::CancellationToken;
 use utils::{log_msg::LogMsg, msg_store::MsgStore};
 use uuid::Uuid;
 
-use super::{EXIT_PLAN_MODE_NAME, keyboard};
+use super::{EXIT_PLAN_MODE_NAME, format, keyboard};
 use crate::services::{approvals::Approvals, config::Config, git::GitService};
 
 /// Telegram context for event handlers.
@@ -69,7 +69,10 @@ impl PlanReviewMessageRegistry {
     /// Store a non-empty set of message IDs for a task.
     /// To remove an entry use [`Self::clear`] or [`Self::take`].
     fn record(&mut self, task_id: Uuid, message_ids: Vec<i32>) {
-        debug_assert!(!message_ids.is_empty(), "record() called with empty ids; use clear() instead");
+        debug_assert!(
+            !message_ids.is_empty(),
+            "record() called with empty ids; use clear() instead"
+        );
         if !message_ids.is_empty() {
             self.by_task.insert(task_id, message_ids);
         }
@@ -158,10 +161,7 @@ async fn record_plan_review_message_ids(task_id: Uuid, message_ids: Vec<MessageI
 /// Discard tracked plan-review message IDs for a task (no Telegram delete).
 /// Used when no plan-review cards were sent for this transition.
 async fn clear_plan_review_message_ids(task_id: Uuid) {
-    plan_review_message_registry()
-        .write()
-        .await
-        .clear(task_id);
+    plan_review_message_registry().write().await.clear(task_id);
 }
 
 pub(super) async fn take_plan_review_message_ids(task_id: Uuid) -> Vec<MessageId> {
@@ -246,14 +246,13 @@ impl TelegramHandler for TaskCreatedHandler {
         let task = &transition.task;
 
         if tg.interactive_bot {
-            let result = tg
-                .bot
-                .send_message(
-                    tg.chat_id,
-                    format!("✅ Task created: {}\n\nRun it now?", task.title),
-                )
-                .reply_markup(keyboard::task_detail_keyboard(task.id, &task.status))
-                .await;
+            let result = format::send_rich_then_plain(
+                &tg.bot,
+                tg.chat_id,
+                &format!("✅ Task created: {}\n\nRun it now?", task.title),
+                Some(keyboard::task_detail_keyboard(task.id, &task.status)),
+            )
+            .await;
 
             if let Err(err) = result {
                 tracing::warn!("Failed to send telegram notification: {}", err);
@@ -276,7 +275,7 @@ impl TelegramHandler for TaskCreatedHandler {
         );
         tracing::info!("Sending telegram notification: {}", message);
 
-        if let Err(err) = tg.bot.send_message(tg.chat_id, message).await {
+        if let Err(err) = format::send_rich_then_plain(&tg.bot, tg.chat_id, &message, None).await {
             tracing::warn!("Failed to send telegram notification: {}", err);
         }
     }
@@ -341,7 +340,7 @@ impl TelegramHandler for TaskInProgressHandler {
             short_id, executor, workspace.branch, project_name, task.title
         );
 
-        if let Err(err) = tg.bot.send_message(tg.chat_id, message).await {
+        if let Err(err) = format::send_rich_then_plain(&tg.bot, tg.chat_id, &message, None).await {
             tracing::warn!("Failed to send telegram notification: {}", err);
         }
     }
@@ -402,19 +401,13 @@ impl TelegramHandler for TaskInReviewHandler {
             let mut sent_message_ids = Vec::new();
             for (i, chunk) in chunks.into_iter().enumerate() {
                 // Attach approve/reject buttons to the last chunk in interactive mode
-                let result = if tg.interactive_bot && i == total - 1 {
-                    tg.bot
-                        .send_message(tg.chat_id, chunk)
-                        .reply_markup(keyboard::review_notification_keyboard(task.id))
-                        .await
+                let markup = if tg.interactive_bot && i == total - 1 {
+                    Some(keyboard::review_notification_keyboard(task.id))
                 } else {
-                    tg.bot.send_message(tg.chat_id, chunk).await
+                    None
                 };
-                match result {
-                    Ok(message) => sent_message_ids.push(message.id),
-                    Err(err) => {
-                        tracing::warn!("Failed to send telegram plan notification: {}", err);
-                    }
+                if let Some(message_id) = send_telegram_card(tg, chunk, markup).await {
+                    sent_message_ids.push(message_id);
                 }
             }
             record_plan_review_message_ids(task.id, sent_message_ids).await;
@@ -437,7 +430,7 @@ impl TelegramHandler for TaskInReviewHandler {
             .unwrap_or_else(|_| "????".to_string());
 
         let message = format!("[{}] {} InReview", short_id, task.title);
-        let result = tg.bot.send_message(tg.chat_id, message).await;
+        let result = format::send_rich_then_plain(&tg.bot, tg.chat_id, &message, None).await;
 
         if let Err(err) = result {
             tracing::warn!("Failed to send telegram notification: {}", err);
@@ -482,7 +475,7 @@ impl TelegramHandler for TaskFinishedHandler {
             }
         );
 
-        if let Err(err) = tg.bot.send_message(tg.chat_id, message).await {
+        if let Err(err) = format::send_rich_then_plain(&tg.bot, tg.chat_id, &message, None).await {
             tracing::warn!("Failed to send telegram notification: {}", err);
         }
     }
@@ -952,7 +945,7 @@ async fn emit_realtime_card_for_entry(
                 denied_tool,
                 truncate_for_telegram(&update.current.content, 220)
             );
-            send_telegram_card(tg, message, None).await;
+            let _ = send_telegram_card(tg, message, None).await;
         }
         NormalizedEntryType::ToolUse {
             tool_name, status, ..
@@ -984,7 +977,7 @@ async fn emit_realtime_card_for_entry(
                         truncate_for_telegram(reason, 140),
                         truncate_for_telegram(&update.current.content, 180)
                     );
-                    send_telegram_card(tg, message, None).await;
+                    let _ = send_telegram_card(tg, message, None).await;
                 }
             }
             ToolStatus::TimedOut => {
@@ -997,7 +990,7 @@ async fn emit_realtime_card_for_entry(
                         "⏱️ Tool approval timed out: {tool_name}\n{}",
                         truncate_for_telegram(&update.current.content, 200)
                     );
-                    send_telegram_card(tg, message, None).await;
+                    let _ = send_telegram_card(tg, message, None).await;
                 }
             }
             ToolStatus::Created | ToolStatus::Success | ToolStatus::Failed => {}
@@ -1011,7 +1004,7 @@ async fn emit_realtime_card_for_entry(
                 "🔁 Stage changed\nfailed: {}\nexecution_processes: {}\nneeds_setup: {}",
                 failed, execution_processes, needs_setup
             );
-            send_telegram_card(tg, message, None).await;
+            let _ = send_telegram_card(tg, message, None).await;
         }
         _ => {}
     }
@@ -1080,12 +1073,12 @@ async fn send_tool_pending_approval_card(
             "🛑 Need approval for {tool_name}\n{}\nThis request needs structured input. Please handle it in Web UI.",
             request_preview
         );
-        send_telegram_card(tg, message, None).await;
+        let _ = send_telegram_card(tg, message, None).await;
         return;
     }
 
     let message = format!("🛑 Need approval for {tool_name}\n{request_preview}");
-    send_telegram_card(
+    let _ = send_telegram_card(
         tg,
         message,
         Some(keyboard::tool_approval_keyboard(approval_id)),
@@ -1150,7 +1143,7 @@ async fn emit_stage_summary(
 
     let is_daily_task = is_daily_project_task(tg, accumulator.task_project_id).await;
     let summary_markup = stage_summary_keyboard(trigger, accumulator.task_id, is_daily_task);
-    send_split_telegram_card(tg, lines.join("\n"), summary_markup).await;
+    let _ = send_split_telegram_card(tg, lines.join("\n"), summary_markup).await;
     accumulator.finalize_stage();
 }
 
@@ -1205,16 +1198,13 @@ async fn send_telegram_card(
     tg: &TelegramContext,
     message: String,
     markup: Option<teloxide::types::InlineKeyboardMarkup>,
-) {
-    let mut request = tg
-        .bot
-        .send_message(tg.chat_id, clamp_telegram_message(message));
-    if let Some(markup) = markup {
-        request = request.reply_markup(markup);
-    }
-
-    if let Err(err) = request.await {
-        tracing::warn!("Failed to send telegram run-feed card: {err}");
+) -> Option<MessageId> {
+    match format::send_rich_then_plain(&tg.bot, tg.chat_id, &message, markup).await {
+        Ok(message) => Some(message.id),
+        Err(err) => {
+            tracing::warn!("Failed to send telegram run-feed card: {err}");
+            None
+        }
     }
 }
 
@@ -1222,16 +1212,21 @@ async fn send_split_telegram_card(
     tg: &TelegramContext,
     message: String,
     markup_last: Option<teloxide::types::InlineKeyboardMarkup>,
-) {
-    let chunk_body_limit =
-        TELEGRAM_MESSAGE_LIMIT.saturating_sub(TELEGRAM_CHUNK_INDEX_PREFIX_RESERVE);
-    let chunks = split_telegram_message(&message, chunk_body_limit.max(1));
+) -> Vec<MessageId> {
+    let chunks = format::split_telegram_chunks(
+        &message,
+        TELEGRAM_MESSAGE_LIMIT,
+        TELEGRAM_CHUNK_INDEX_PREFIX_RESERVE,
+    );
 
     if chunks.len() <= 1 {
-        send_telegram_card(tg, message, markup_last).await;
-        return;
+        return send_telegram_card(tg, message, markup_last)
+            .await
+            .into_iter()
+            .collect();
     }
 
+    let mut ids = Vec::new();
     let total = chunks.len();
     for (index, chunk) in chunks.into_iter().enumerate() {
         let markup = if index + 1 == total {
@@ -1239,8 +1234,14 @@ async fn send_split_telegram_card(
         } else {
             None
         };
-        send_telegram_card(tg, format!("[{}/{}]\n{}", index + 1, total, chunk), markup).await;
+        if let Some(message_id) =
+            send_telegram_card(tg, format!("[{}/{}]\n{}", index + 1, total, chunk), markup).await
+        {
+            ids.push(message_id);
+        }
     }
+
+    ids
 }
 
 fn truncate_for_telegram(input: &str, max_chars: usize) -> String {
@@ -1250,43 +1251,6 @@ fn truncate_for_telegram(input: &str, max_chars: usize) -> String {
 
     let truncated: String = input.chars().take(max_chars).collect();
     format!("{truncated}…")
-}
-
-fn clamp_telegram_message(message: String) -> String {
-    if message.chars().count() <= TELEGRAM_MESSAGE_LIMIT {
-        return message;
-    }
-    truncate_for_telegram(&message, TELEGRAM_MESSAGE_LIMIT.saturating_sub(1))
-}
-
-fn split_telegram_message(message: &str, max_chars: usize) -> Vec<String> {
-    if message.is_empty() {
-        return vec![];
-    }
-
-    if max_chars == 0 {
-        return vec![message.to_string()];
-    }
-
-    let mut chunks = Vec::new();
-    let mut current = String::new();
-    let mut current_len = 0usize;
-
-    for ch in message.chars() {
-        if current_len >= max_chars {
-            chunks.push(current);
-            current = String::new();
-            current_len = 0;
-        }
-        current.push(ch);
-        current_len += 1;
-    }
-
-    if !current.is_empty() {
-        chunks.push(current);
-    }
-
-    chunks
 }
 
 fn extract_model_related_info(system_message: &str) -> Option<String> {
@@ -1361,7 +1325,7 @@ struct PlanApproval {
     plan: String,
 }
 
-const TELEGRAM_MESSAGE_LIMIT: usize = 3072;
+const TELEGRAM_MESSAGE_LIMIT: usize = format::TELEGRAM_MESSAGE_LIMIT;
 const TELEGRAM_CHUNK_INDEX_PREFIX_RESERVE: usize = 20;
 const STAGE_SUMMARY_TASK_TITLE_MAX_CHARS: usize = 180;
 const STAGE_SUMMARY_MODEL_MAX_CHARS: usize = 280;
@@ -1391,7 +1355,8 @@ fn split_plan(plan: &str) -> Vec<String> {
         sections.push(current);
     }
 
-    let prefix_reserve = 10;
+    // "Plan Review: [99/99] " is 21 chars; reserve 25 to be safe for any count.
+    let prefix_reserve = 25;
     let limit = TELEGRAM_MESSAGE_LIMIT.saturating_sub(prefix_reserve);
 
     let mut chunks: Vec<String> = Vec::new();
@@ -1399,9 +1364,9 @@ fn split_plan(plan: &str) -> Vec<String> {
 
     for section in &sections {
         let needed = if buf.is_empty() {
-            section.len()
+            section.chars().count()
         } else {
-            buf.len() + 1 /* newline */ + section.len()
+            buf.chars().count() + 1 /* newline */ + section.chars().count()
         };
 
         if !buf.is_empty() && needed > limit {
@@ -1417,6 +1382,14 @@ fn split_plan(plan: &str) -> Vec<String> {
     if !buf.is_empty() {
         chunks.push(buf);
     }
+
+    // Keep heading-aware grouping, then enforce hard message limits safely.
+    let chunks: Vec<String> = chunks
+        .into_iter()
+        .flat_map(|chunk| {
+            format::split_telegram_chunks(&chunk, TELEGRAM_MESSAGE_LIMIT, prefix_reserve)
+        })
+        .collect();
 
     if chunks.len() <= 1 {
         return chunks;
@@ -1517,8 +1490,8 @@ mod tests {
     }
 
     #[test]
-    fn split_telegram_message_splits_when_over_limit() {
-        let chunks = split_telegram_message("abcdefghij", 4);
+    fn split_telegram_chunks_splits_when_over_limit() {
+        let chunks = format::split_telegram_chunks("abcdefghij", 4, 0);
         assert_eq!(chunks, vec!["abcd", "efgh", "ij"]);
     }
 

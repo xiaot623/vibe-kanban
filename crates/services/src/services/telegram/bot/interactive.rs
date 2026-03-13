@@ -14,7 +14,7 @@ use teloxide::{
     dptree,
     error_handlers::LoggingErrorHandler,
     prelude::*,
-    types::{InlineKeyboardMarkup, MessageId, ParseMode},
+    types::{InlineKeyboardMarkup, MessageId},
     update_listeners::Polling,
     utils::command::BotCommands,
 };
@@ -32,7 +32,8 @@ use super::{
 use crate::services::{
     approvals::{ApprovalError, PendingApprovalInfo},
     telegram::{
-        EXIT_PLAN_MODE_NAME, callback::CallbackAction, keyboard, notifier, state::DialogueState,
+        EXIT_PLAN_MODE_NAME, callback::CallbackAction, format, keyboard, notifier,
+        state::DialogueState,
     },
 };
 
@@ -162,19 +163,16 @@ async fn handle_command(
     match cmd {
         Command::Start => {
             let text = "Welcome to Vibe Kanban! Choose an action:";
-            bot.send_message(msg.chat.id, text)
-                .reply_markup(keyboard::home_keyboard())
+            format::send_rich_then_plain(&bot, msg.chat.id, text, Some(keyboard::home_keyboard()))
                 .await?;
         }
         Command::Help => {
             let help = format!(
-                "🏠 *Quick actions* — use the buttons from /start\n\n\
-                 *Legacy commands:*\n{}",
+                "🏠 **Quick actions** — use the buttons from /start\n\n\
+                 **Legacy commands:**\n{}",
                 LegacyCommand::descriptions()
             );
-            bot.send_message(msg.chat.id, help)
-                .parse_mode(ParseMode::MarkdownV2)
-                .await?;
+            format::send_rich_then_plain(&bot, msg.chat.id, &help, None).await?;
         }
         Command::Tasks => {
             show_projects_for_browsing(&bot, msg.chat.id, &service, None).await?;
@@ -192,9 +190,13 @@ async fn handle_command(
                 delete_message_best_effort(&bot, msg.chat.id, MessageId(prompt_message_id)).await;
             }
             dialogue.reset().await.ok();
-            bot.send_message(msg.chat.id, "Cancelled.")
-                .reply_markup(keyboard::home_keyboard())
-                .await?;
+            format::send_rich_then_plain(
+                &bot,
+                msg.chat.id,
+                "Cancelled.",
+                Some(keyboard::home_keyboard()),
+            )
+            .await?;
         }
     }
 
@@ -247,7 +249,6 @@ async fn handle_callback(
                 card_context,
                 "Invalid action. Please try again.",
                 Some(keyboard::home_only_keyboard()),
-                None,
             )
             .await?;
             return Ok(());
@@ -272,7 +273,6 @@ async fn handle_callback(
                     None,
                     "Cancelled.",
                     Some(keyboard::home_keyboard()),
-                    None,
                 )
                 .await?;
             } else {
@@ -282,7 +282,6 @@ async fn handle_callback(
                     card_context,
                     "Cancelled.",
                     Some(keyboard::home_keyboard()),
-                    None,
                 )
                 .await?;
             }
@@ -362,7 +361,6 @@ async fn handle_callback(
                 card_context,
                 "Choose an action:",
                 Some(keyboard::home_keyboard()),
-                None,
             )
             .await?;
         }
@@ -412,7 +410,6 @@ async fn handle_callback(
                 card_context,
                 "Select an executor:",
                 Some(keyboard::executor_pick_keyboard(task_id)),
-                None,
             )
             .await?;
         }
@@ -426,7 +423,6 @@ async fn handle_callback(
                 Some(keyboard::run_mode_pick_keyboard(
                     task_id, &executor, &run_modes,
                 )),
-                None,
             )
             .await?;
         }
@@ -456,7 +452,6 @@ async fn handle_callback(
                 card_context,
                 "⚠️ Confirm plan approval?",
                 Some(keyboard::approve_confirm_keyboard(task_id)),
-                None,
             )
             .await?;
         }
@@ -527,7 +522,6 @@ async fn handle_tool_approval_callback(
             card_context,
             "This approval is no longer pending.",
             Some(empty_inline_keyboard()),
-            None,
         )
         .await?;
         return Ok(());
@@ -540,7 +534,6 @@ async fn handle_tool_approval_callback(
             card_context,
             "This approval requires structured input. Please continue in the Web UI.",
             Some(empty_inline_keyboard()),
-            None,
         )
         .await?;
         return Ok(());
@@ -578,7 +571,6 @@ async fn handle_tool_approval_callback(
                 card_context,
                 message,
                 Some(empty_inline_keyboard()),
-                None,
             )
             .await?;
         }
@@ -589,7 +581,6 @@ async fn handle_tool_approval_callback(
                 card_context,
                 "This approval has already been handled.",
                 Some(empty_inline_keyboard()),
-                None,
             )
             .await?;
         }
@@ -600,7 +591,6 @@ async fn handle_tool_approval_callback(
                 card_context,
                 &format!("Failed to process approval: {e}"),
                 Some(keyboard::home_only_keyboard()),
-                None,
             )
             .await?;
         }
@@ -647,9 +637,13 @@ async fn handle_dialogue_text(
         DialogueState::Idle => {
             // No active dialogue: treat plain text as a Daily task.
             if let Err(err) = service.create_daily_task_from_message(text).await {
-                bot.send_message(msg.chat.id, err)
-                    .reply_markup(keyboard::home_only_keyboard())
-                    .await?;
+                format::send_rich_then_plain(
+                    &bot,
+                    msg.chat.id,
+                    &err,
+                    Some(keyboard::home_only_keyboard()),
+                )
+                .await?;
             }
         }
         DialogueState::CreatingTaskTitle {
@@ -666,7 +660,6 @@ async fn handle_dialogue_text(
                     }),
                     "Title cannot be empty. Please enter a title:",
                     Some(keyboard::cancel_keyboard()),
-                    None,
                 )
                 .await?;
                 dialogue
@@ -690,7 +683,6 @@ async fn handle_dialogue_text(
                     text
                 ),
                 Some(keyboard::skip_cancel_keyboard()),
-                None,
             )
             .await?;
             dialogue
@@ -747,7 +739,6 @@ async fn handle_dialogue_text(
                     }),
                     "Title cannot be empty. Please enter a new title:",
                     Some(keyboard::cancel_keyboard()),
-                    None,
                 )
                 .await?;
                 dialogue
@@ -776,7 +767,6 @@ async fn handle_dialogue_text(
                     text
                 ),
                 Some(keyboard::skip_cancel_keyboard()),
-                None,
             )
             .await?;
             dialogue
@@ -859,7 +849,6 @@ async fn handle_dialogue_text(
                     }),
                     "Reply cannot be empty. Please enter follow-up text:",
                     Some(keyboard::cancel_keyboard()),
-                    None,
                 )
                 .await?;
                 dialogue
@@ -911,7 +900,6 @@ async fn show_projects_for_browsing(
                 card_context,
                 "No projects found.",
                 Some(keyboard::home_only_keyboard()),
-                None,
             )
             .await?;
         }
@@ -922,7 +910,6 @@ async fn show_projects_for_browsing(
                 card_context,
                 "Select a project:",
                 Some(keyboard::project_list_keyboard(&projects, false)),
-                None,
             )
             .await?;
         }
@@ -933,7 +920,6 @@ async fn show_projects_for_browsing(
                 card_context,
                 format!("Failed to load projects: {e}"),
                 Some(keyboard::home_only_keyboard()),
-                None,
             )
             .await?;
         }
@@ -955,7 +941,6 @@ async fn show_projects_for_new_task(
                 card_context,
                 "No projects found. Create a project first.",
                 Some(keyboard::home_only_keyboard()),
-                None,
             )
             .await?;
         }
@@ -966,7 +951,6 @@ async fn show_projects_for_new_task(
                 card_context,
                 "➕ Select a project for the new task:",
                 Some(keyboard::project_list_keyboard(&projects, true)),
-                None,
             )
             .await?;
         }
@@ -977,7 +961,6 @@ async fn show_projects_for_new_task(
                 card_context,
                 format!("Failed to load projects: {e}"),
                 Some(keyboard::home_only_keyboard()),
-                None,
             )
             .await?;
         }
@@ -1004,7 +987,6 @@ async fn show_pending_approvals(
             card_context,
             "No pending approvals.",
             Some(keyboard::home_only_keyboard()),
-            None,
         )
         .await?;
         return Ok(());
@@ -1055,7 +1037,6 @@ async fn show_pending_approvals(
         card_context,
         text,
         Some(InlineKeyboardMarkup::new(rows)),
-        None,
     )
     .await?;
     Ok(())
@@ -1081,7 +1062,6 @@ async fn show_task_list(
                 card_context,
                 "Project not found.",
                 Some(keyboard::home_only_keyboard()),
-                None,
             )
             .await?;
             return Ok(());
@@ -1093,7 +1073,6 @@ async fn show_task_list(
                 card_context,
                 format!("Failed to load project: {e}"),
                 Some(keyboard::home_only_keyboard()),
-                None,
             )
             .await?;
             return Ok(());
@@ -1108,7 +1087,6 @@ async fn show_task_list(
             card_context,
             format!("📋 {} — filter by status:", project.name),
             Some(keyboard::status_filter_keyboard(project_id)),
-            None,
         )
         .await?;
         return Ok(());
@@ -1124,7 +1102,6 @@ async fn show_task_list(
                     card_context,
                     format!("Failed to load tasks: {e}"),
                     Some(keyboard::home_only_keyboard()),
-                    None,
                 )
                 .await?;
                 return Ok(());
@@ -1148,7 +1125,6 @@ async fn show_task_list(
             card_context,
             format!("No {} tasks in {}.", status_label, project.name),
             Some(keyboard::home_only_keyboard()),
-            None,
         )
         .await?;
         return Ok(());
@@ -1186,7 +1162,6 @@ async fn show_task_list(
             page,
             has_more,
         )),
-        None,
     )
     .await?;
     Ok(())
@@ -1208,7 +1183,6 @@ async fn show_task_detail(
                 card_context,
                 "Task not found. It may have been deleted.",
                 Some(keyboard::home_only_keyboard()),
-                None,
             )
             .await?;
             return Ok(());
@@ -1220,7 +1194,6 @@ async fn show_task_detail(
                 card_context,
                 format!("Failed to load task: {e}"),
                 Some(keyboard::home_only_keyboard()),
-                None,
             )
             .await?;
             return Ok(());
@@ -1265,7 +1238,6 @@ async fn show_task_detail(
         card_context,
         message,
         Some(keyboard::task_detail_keyboard(task.id, &task.status)),
-        None,
     )
     .await?;
     Ok(())
@@ -1298,7 +1270,6 @@ async fn handle_run_default(
                 card_context,
                 format!("Failed to start run: {msg}"),
                 Some(run_failure_keyboard(service, task_id).await),
-                None,
             )
             .await?;
         }
@@ -1348,7 +1319,6 @@ async fn handle_run_with_executor_mode(
             card_context,
             "Invalid run mode selection. Please try again.",
             Some(keyboard::executor_pick_keyboard(task_id)),
-            None,
         )
         .await?;
         return Ok(());
@@ -1370,7 +1340,6 @@ async fn handle_run_with_executor_mode(
                 card_context,
                 format!("Failed to start run with {executor}/{selected_mode}: {msg}"),
                 Some(run_failure_keyboard(service, task_id).await),
-                None,
             )
             .await?;
         }
@@ -1399,7 +1368,6 @@ async fn handle_approve(
             card_context,
             "No pending plan approval found. It may have expired.",
             Some(keyboard::home_only_keyboard()),
-            None,
         )
         .await?;
         return Ok(());
@@ -1431,7 +1399,6 @@ async fn handle_approve(
                 target_context,
                 "✅ Plan approved!",
                 Some(keyboard::home_only_keyboard()),
-                None,
             )
             .await?;
         }
@@ -1442,7 +1409,6 @@ async fn handle_approve(
                 card_context,
                 format!("Failed to approve plan: {e}"),
                 Some(keyboard::home_only_keyboard()),
-                None,
             )
             .await?;
         }
@@ -1463,7 +1429,6 @@ async fn handle_reject_start(
         card_context,
         "Enter a rejection reason (or send any text to reject without reason):",
         Some(keyboard::cancel_keyboard()),
-        None,
     )
     .await?;
     dialogue
@@ -1491,7 +1456,6 @@ async fn handle_reject_finish(
             card_context,
             "No pending plan approval found. It may have expired.",
             Some(keyboard::home_only_keyboard()),
-            None,
         )
         .await?;
         return Ok(false);
@@ -1525,7 +1489,6 @@ async fn handle_reject_finish(
                 target_context,
                 "📝 Plan rejected.",
                 Some(keyboard::home_only_keyboard()),
-                None,
             )
             .await?;
             return Ok(true);
@@ -1537,7 +1500,6 @@ async fn handle_reject_finish(
                 card_context,
                 format!("Failed to reject plan: {e}"),
                 Some(keyboard::home_only_keyboard()),
-                None,
             )
             .await?;
         }
@@ -1558,7 +1520,6 @@ async fn handle_follow_up_reply_start(
         card_context,
         "Type your reply here:",
         Some(keyboard::cancel_keyboard()),
-        None,
     )
     .await?;
     dialogue
@@ -1587,7 +1548,6 @@ async fn handle_follow_up_reply_finish(
                 None,
                 "✅ Reply sent. The task is running again.",
                 Some(keyboard::home_only_keyboard()),
-                None,
             )
             .await?;
             return Ok(true);
@@ -1599,7 +1559,6 @@ async fn handle_follow_up_reply_finish(
                 card_context,
                 format!("Failed to send reply: {err}"),
                 Some(keyboard::home_only_keyboard()),
-                None,
             )
             .await?;
         }
@@ -1623,7 +1582,6 @@ async fn handle_done_task(
                 card_context,
                 "Task not found. It may have been deleted.",
                 Some(keyboard::home_only_keyboard()),
-                None,
             )
             .await?;
             return Ok(());
@@ -1635,7 +1593,6 @@ async fn handle_done_task(
                 card_context,
                 format!("Failed to load task: {e}"),
                 Some(keyboard::home_only_keyboard()),
-                None,
             )
             .await?;
             return Ok(());
@@ -1653,7 +1610,6 @@ async fn handle_done_task(
             card_context,
             "Daily Mode is not configured.",
             Some(keyboard::home_only_keyboard()),
-            None,
         )
         .await?;
         return Ok(());
@@ -1668,7 +1624,6 @@ async fn handle_done_task(
                 card_context,
                 format!("Daily Mode project id is invalid. Please reconfigure it: {e}"),
                 Some(keyboard::home_only_keyboard()),
-                None,
             )
             .await?;
             return Ok(());
@@ -1682,7 +1637,6 @@ async fn handle_done_task(
             card_context,
             "Done is only available for Daily Project tasks from this card.",
             Some(keyboard::home_only_keyboard()),
-            None,
         )
         .await?;
         return Ok(());
@@ -1779,7 +1733,6 @@ async fn handle_done_task(
         card_context,
         message,
         Some(keyboard::home_only_keyboard()),
-        None,
     )
     .await?;
     Ok(())
@@ -1812,7 +1765,6 @@ async fn handle_create_review_task(
                     result.task.id,
                     &result.task.status,
                 )),
-                None,
             )
             .await?;
         }
@@ -1823,7 +1775,6 @@ async fn handle_create_review_task(
                 card_context,
                 format!("Failed to create review task: {err}"),
                 Some(keyboard::home_only_keyboard()),
-                None,
             )
             .await?;
         }
@@ -1910,7 +1861,6 @@ async fn handle_edit_start(
                 card_context,
                 "Task not found.",
                 Some(keyboard::home_only_keyboard()),
-                None,
             )
             .await?;
             return Ok(());
@@ -1922,7 +1872,6 @@ async fn handle_edit_start(
                 card_context,
                 format!("Failed to load task: {e}"),
                 Some(keyboard::home_only_keyboard()),
-                None,
             )
             .await?;
             return Ok(());
@@ -1936,7 +1885,6 @@ async fn handle_edit_start(
             card_context,
             format!("Task is {:?}. Only Todo tasks can be edited.", task.status),
             Some(keyboard::home_only_keyboard()),
-            None,
         )
         .await?;
         return Ok(());
@@ -1948,7 +1896,6 @@ async fn handle_edit_start(
         card_context,
         format!("Current title: {}\n\nEnter a new title:", task.title),
         Some(keyboard::cancel_keyboard()),
-        None,
     )
     .await?;
 
@@ -1990,7 +1937,6 @@ async fn handle_edit_task_finish(
                 card_context,
                 format!("Failed to locate API server: {e}"),
                 Some(keyboard::home_only_keyboard()),
-                None,
             )
             .await?;
             return Ok(false);
@@ -2012,7 +1958,6 @@ async fn handle_edit_task_finish(
                 card_context,
                 format!("Failed to edit task: {e}"),
                 Some(keyboard::home_only_keyboard()),
-                None,
             )
             .await?;
             return Ok(false);
@@ -2028,7 +1973,6 @@ async fn handle_edit_task_finish(
                 card_context,
                 format!("Failed to parse response: {e}"),
                 Some(keyboard::home_only_keyboard()),
-                None,
             )
             .await?;
             return Ok(false);
@@ -2050,7 +1994,6 @@ async fn handle_edit_task_finish(
                     updated_task.id,
                     &updated_task.status,
                 )),
-                None,
             )
             .await?;
             return Ok(true);
@@ -2063,7 +2006,6 @@ async fn handle_edit_task_finish(
                 card_context,
                 msg,
                 Some(keyboard::home_only_keyboard()),
-                None,
             )
             .await?;
         }
@@ -2088,7 +2030,6 @@ async fn handle_new_task_project(
                 card_context,
                 "Project not found.",
                 Some(keyboard::home_only_keyboard()),
-                None,
             )
             .await?;
             return Ok(());
@@ -2100,7 +2041,6 @@ async fn handle_new_task_project(
                 card_context,
                 format!("Failed to load project: {e}"),
                 Some(keyboard::home_only_keyboard()),
-                None,
             )
             .await?;
             return Ok(());
@@ -2111,12 +2051,8 @@ async fn handle_new_task_project(
         bot,
         chat_id,
         card_context,
-        format!(
-            "➕ New task in *{}*\n\nEnter the task title:",
-            escape_markdown_v2(&project.name)
-        ),
+        format!("➕ New task in {}\n\nEnter the task title:", project.name),
         Some(keyboard::cancel_keyboard()),
-        Some(ParseMode::MarkdownV2),
     )
     .await?;
 
@@ -2163,7 +2099,6 @@ async fn handle_create_task_finish(
                 card_context,
                 format!("Failed to create task: {e}"),
                 Some(keyboard::home_only_keyboard()),
-                None,
             )
             .await?;
         }
@@ -2179,53 +2114,13 @@ async fn render_or_send_card(
     card_context: Option<CardRenderContext>,
     text: impl Into<String>,
     markup: Option<InlineKeyboardMarkup>,
-    parse_mode: Option<ParseMode>,
 ) -> ResponseResult<MessageId> {
     let text = text.into();
-
-    if let Some(context) = card_context {
-        let mut request = bot.edit_message_text(chat_id, context.source_message_id, text.clone());
-        if let Some(markup) = markup.clone() {
-            request = request.reply_markup(markup);
-        }
-        if let Some(ref parse_mode) = parse_mode {
-            request = request.parse_mode(parse_mode.clone());
-        }
-
-        match request.await {
-            Ok(message) => return Ok(message.id),
-            Err(err) => {
-                tracing::trace!(
-                    "Failed to edit Telegram card {}, sending a new card: {}",
-                    context.source_message_id.0,
-                    err
-                );
-            }
-        }
-
-        let mut send_request = bot.send_message(chat_id, text);
-        if let Some(markup) = markup {
-            send_request = send_request.reply_markup(markup);
-        }
-        if let Some(ref parse_mode) = parse_mode {
-            send_request = send_request.parse_mode(parse_mode.clone());
-        }
-        let sent = send_request.await?;
-        if sent.id != context.source_message_id {
-            delete_message_best_effort(bot, chat_id, context.source_message_id).await;
-        }
-        return Ok(sent.id);
-    }
-
-    let mut request = bot.send_message(chat_id, text);
-    if let Some(markup) = markup {
-        request = request.reply_markup(markup);
-    }
-    if let Some(parse_mode) = parse_mode {
-        request = request.parse_mode(parse_mode);
-    }
-
-    Ok(request.await?.id)
+    let source_message_id = card_context.map(|context| context.source_message_id);
+    let message =
+        format::edit_or_send_rich_then_plain(bot, chat_id, source_message_id, &text, markup)
+            .await?;
+    Ok(message.id)
 }
 
 async fn delete_message_best_effort(bot: &Bot, chat_id: ChatId, message_id: MessageId) {
@@ -2247,23 +2142,6 @@ async fn cleanup_plan_review_cards(bot: &Bot, chat_id: ChatId, task_id: Uuid) ->
     message_ids
 }
 
-fn escape_markdown_v2(text: &str) -> String {
-    let mut escaped = String::with_capacity(text.len());
-
-    for ch in text.chars() {
-        match ch {
-            '\\' | '_' | '*' | '[' | ']' | '(' | ')' | '~' | '`' | '>' | '#' | '+' | '-' | '='
-            | '|' | '{' | '}' | '.' | '!' => {
-                escaped.push('\\');
-                escaped.push(ch);
-            }
-            _ => escaped.push(ch),
-        }
-    }
-
-    escaped
-}
-
 fn empty_inline_keyboard() -> InlineKeyboardMarkup {
     InlineKeyboardMarkup::new(Vec::<Vec<teloxide::types::InlineKeyboardButton>>::new())
 }
@@ -2273,14 +2151,8 @@ mod tests {
     use executors::logs::{ActionType, NormalizedEntry, NormalizedEntryType, ToolStatus};
     use uuid::Uuid;
 
-    use super::{approval_requires_structured_input, escape_markdown_v2};
+    use super::approval_requires_structured_input;
     use crate::services::approvals::PendingApprovalInfo;
-
-    #[test]
-    fn escape_markdown_v2_escapes_reserved_characters() {
-        let project_name = "xx-yyy.v1";
-        assert_eq!(escape_markdown_v2(project_name), "xx\\-yyy\\.v1");
-    }
 
     #[test]
     fn request_user_input_requires_structured_handling() {

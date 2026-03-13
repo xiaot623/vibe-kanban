@@ -11,6 +11,7 @@ use teloxide::{
 };
 
 use super::TelegramBotService;
+use crate::services::telegram::format;
 
 #[derive(BotCommands, Clone)]
 #[command(rename_rule = "lowercase", description = "Commands:")]
@@ -104,7 +105,7 @@ pub(super) async fn handle_command(
     };
 
     if let Some(text) = response {
-        bot.send_message(msg.chat.id, text).await?;
+        format::send_rich_then_plain(&bot, msg.chat.id, &text, None).await?;
     }
 
     Ok(())
@@ -133,7 +134,7 @@ async fn handle_plain_text(
     ShortIdMapping::cleanup_expired(&service.db.pool).await;
 
     if let Err(err) = service.create_daily_task_from_message(text).await {
-        bot.send_message(msg.chat.id, err).await?;
+        format::send_rich_then_plain(&bot, msg.chat.id, &err, None).await?;
     }
 
     Ok(())

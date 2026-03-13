@@ -54,6 +54,7 @@ fst = "0.4"
 secrecy = "0.10.3"
 moka = { version = "0.12", features = ["future"] }
 teloxide = { version = "0.13", features = ["macros"] }
+pulldown-cmark = "0.13"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 security-framework = "2"
