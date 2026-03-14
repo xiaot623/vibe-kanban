@@ -960,12 +960,20 @@ fn should_emit_terminal_tool_card(
     true
 }
 
+fn should_send_tool_pending_approval_card(tool_name: &str) -> bool {
+    tool_name != EXIT_PLAN_MODE_NAME
+}
+
 async fn send_tool_pending_approval_card(
     tg: &TelegramContext,
     approval_id: &str,
     tool_name: &str,
     content: &str,
 ) {
+    if !should_send_tool_pending_approval_card(tool_name) {
+        return;
+    }
+
     let structured_input = tg
         .approvals
         .pending_by_id(approval_id)
@@ -1346,6 +1354,12 @@ mod tests {
     #[test]
     fn split_plan_empty() {
         assert!(split_plan("").is_empty());
+    }
+
+    #[test]
+    fn exit_plan_mode_does_not_send_pending_approval_card() {
+        assert!(!should_send_tool_pending_approval_card(EXIT_PLAN_MODE_NAME));
+        assert!(should_send_tool_pending_approval_card("Bash"));
     }
 
     #[test]
