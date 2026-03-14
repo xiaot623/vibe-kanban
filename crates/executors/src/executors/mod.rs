@@ -210,11 +210,7 @@ pub trait StandardCodingAgentExecutor {
         }
     }
 
-    fn normalize_logs(
-        &self,
-        _raw_logs_event_store: Arc<MsgStore>,
-        _worktree_path: &Path,
-    );
+    fn normalize_logs(&self, _raw_logs_event_store: Arc<MsgStore>, _worktree_path: &Path);
 
     // MCP configuration methods
     fn default_mcp_config_path(&self) -> Option<std::path::PathBuf>;

@@ -84,11 +84,7 @@ impl StandardCodingAgentExecutor for QaMockExecutor {
         self.spawn(current_dir, prompt, env).await
     }
 
-    fn normalize_logs(
-        &self,
-        msg_store: Arc<MsgStore>,
-        current_dir: &Path,
-    ) {
+    fn normalize_logs(&self, msg_store: Arc<MsgStore>, current_dir: &Path) {
         // Reuse Claude's log processor since we output ClaudeJson format
         let entry_index_provider = EntryIndexProvider::start_from(&msg_store);
         crate::executors::claude::ClaudeLogProcessor::process_logs(

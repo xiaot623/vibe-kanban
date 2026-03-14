@@ -410,8 +410,8 @@ pub(crate) fn clamp_plain_message(message: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        TELEGRAM_MESSAGE_LIMIT, clamp_plain_message, escape_telegram_html,
-        markdown_to_plain_text, markdown_to_telegram_html, split_telegram_chunks,
+        TELEGRAM_MESSAGE_LIMIT, clamp_plain_message, escape_telegram_html, markdown_to_plain_text,
+        markdown_to_telegram_html, split_telegram_chunks,
     };
 
     #[test]

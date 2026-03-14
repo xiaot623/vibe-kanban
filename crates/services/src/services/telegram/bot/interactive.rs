@@ -1347,6 +1347,21 @@ async fn handle_run_with_executor_mode(
             if let Some(context) = card_context {
                 delete_message_best_effort(bot, chat_id, context.source_message_id).await;
             }
+
+            let text = match Task::find_by_id(&service.db.pool, task_id).await {
+                Ok(Some(task)) => format_run_started_message(&task, executor, selected_mode),
+                Ok(None) => format!("▶️ Task started\nExecutor: {executor}\nMode: {selected_mode}"),
+                Err(err) => {
+                    tracing::warn!(
+                        "Failed to load task {} after Telegram run start: {}",
+                        task_id,
+                        err
+                    );
+                    format!("▶️ Task started\nExecutor: {executor}\nMode: {selected_mode}")
+                }
+            };
+
+            format::send_rich_then_plain(bot, chat_id, &text, None).await?;
         }
         Err(msg) => {
             render_or_send_card(
@@ -1360,6 +1375,13 @@ async fn handle_run_with_executor_mode(
         }
     }
     Ok(())
+}
+
+fn format_run_started_message(task: &Task, executor: &str, mode: &str) -> String {
+    format!(
+        "▶️ Running task\nTitle: {}\nExecutor: {}\nMode: {}",
+        task.title, executor, mode
+    )
 }
 
 async fn run_failure_keyboard(service: &TelegramBotService, task_id: Uuid) -> InlineKeyboardMarkup {
@@ -1450,14 +1472,8 @@ async fn handle_approve(
         Ok(_) => {
             let cleanup = approval_completion_cleanup_plan(card_context);
             apply_completion_cleanup(bot, chat_id, task_id, cleanup).await;
-            send_completion_message(
-                bot,
-                chat_id,
-                cleanup,
-                card_context,
-                "✅ Plan approved!",
-            )
-            .await?;
+            send_completion_message(bot, chat_id, cleanup, card_context, "✅ Plan approved!")
+                .await?;
         }
         Err(e) => {
             render_or_send_card(
@@ -1535,14 +1551,8 @@ async fn handle_reject_finish(
         Ok(_) => {
             let cleanup = reject_completion_cleanup_plan(plan_message_id, _card_context);
             apply_completion_cleanup(bot, chat_id, task_id, cleanup).await;
-            send_completion_message(
-                bot,
-                chat_id,
-                cleanup,
-                _card_context,
-                "📝 Plan rejected.",
-            )
-            .await?;
+            send_completion_message(bot, chat_id, cleanup, _card_context, "📝 Plan rejected.")
+                .await?;
             return Ok(true);
         }
         Err(e) => {
@@ -2290,13 +2300,15 @@ fn empty_inline_keyboard() -> InlineKeyboardMarkup {
 
 #[cfg(test)]
 mod tests {
-    use teloxide::types::{
-        Chat, ChatFullInfo, ChatId, ChatKind, ChatPrivate, InlineKeyboardButton,
-        InlineKeyboardMarkup, MediaKind, MediaText, Message, MessageCommon, MessageId,
-        MessageKind, User, UserId,
-    };
     use executors::logs::{ActionType, NormalizedEntry, NormalizedEntryType, ToolStatus};
-    use teloxide::utils::command::BotCommands;
+    use teloxide::{
+        types::{
+            Chat, ChatFullInfo, ChatId, ChatKind, ChatPrivate, InlineKeyboardButton,
+            InlineKeyboardMarkup, MediaKind, MediaText, Message, MessageCommon, MessageId,
+            MessageKind, User, UserId,
+        },
+        utils::command::BotCommands,
+    };
     use uuid::Uuid;
 
     use super::{
@@ -2305,8 +2317,10 @@ mod tests {
         extract_task_id_from_inline_keyboard, reject_completion_cleanup_plan,
         review_completion_cleanup_plan,
     };
-    use crate::services::telegram::{callback::CallbackAction, keyboard};
-    use crate::services::approvals::PendingApprovalInfo;
+    use crate::services::{
+        approvals::PendingApprovalInfo,
+        telegram::{callback::CallbackAction, keyboard},
+    };
 
     #[test]
     fn interactive_commands_parse_supported_slash_commands() {
@@ -2401,10 +2415,14 @@ mod tests {
     #[test]
     fn extracts_task_id_from_stage_summary_reply_message() {
         let task_id = Uuid::new_v4();
-        let replied_message = bot_message_with_keyboard(keyboard::stage_summary_reply_keyboard(task_id));
+        let replied_message =
+            bot_message_with_keyboard(keyboard::stage_summary_reply_keyboard(task_id));
         let reply_message = user_reply_message(replied_message);
 
-        assert_eq!(extract_stage_summary_task_id_from_reply(&reply_message), Some(task_id));
+        assert_eq!(
+            extract_stage_summary_task_id_from_reply(&reply_message),
+            Some(task_id)
+        );
     }
 
     #[test]
@@ -2425,16 +2443,23 @@ mod tests {
         ]]));
         let reply_message = user_reply_message(replied_message);
 
-        assert_eq!(extract_stage_summary_task_id_from_reply(&reply_message), None);
+        assert_eq!(
+            extract_stage_summary_task_id_from_reply(&reply_message),
+            None
+        );
     }
 
     #[test]
     fn ignores_replies_to_non_bot_messages() {
         let task_id = Uuid::new_v4();
-        let replied_message = user_message_with_keyboard(keyboard::stage_summary_reply_keyboard(task_id));
+        let replied_message =
+            user_message_with_keyboard(keyboard::stage_summary_reply_keyboard(task_id));
         let reply_message = user_reply_message(replied_message);
 
-        assert_eq!(extract_stage_summary_task_id_from_reply(&reply_message), None);
+        assert_eq!(
+            extract_stage_summary_task_id_from_reply(&reply_message),
+            None
+        );
     }
 
     #[test]
