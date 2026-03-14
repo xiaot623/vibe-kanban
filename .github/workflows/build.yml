@@ -27,7 +27,7 @@ jobs:
         include:
           - platform: macos
             runs_on: macos-latest
-            bundles: app
+            bundles: dmg
           - platform: linux
             runs_on: ubuntu-latest
             bundles: appimage,deb
@@ -78,11 +78,9 @@ jobs:
         run: pnpm run frontend:build
 
       - name: Build desktop app bundle
+        env:
+          APPLE_SIGNING_IDENTITY: ${{ matrix.platform == 'macos' && '-' || '' }}
         run: cd crates/desktop && pnpm exec tauri build --ci --bundles ${{ matrix.bundles }}
-
-      - name: Sign app and recreate dmg
-        if: matrix.platform == 'macos'
-        run: scripts/sign-dmg.sh
 
       - name: Prepare macOS build asset
         if: matrix.platform == 'macos'
