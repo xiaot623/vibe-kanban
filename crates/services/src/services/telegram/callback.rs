@@ -41,6 +41,8 @@ pub enum CallbackAction {
     ApproveYes { task_id: Uuid },
     /// Reject plan — enter reason input (enters dialogue)
     RejectInput { task_id: Uuid },
+    /// Dismiss a temporary interaction message
+    DismissInteraction,
     /// Approve tool execution request by approval id
     ToolApprove { approval_id: String },
     /// Reject tool execution request by approval id
@@ -57,6 +59,8 @@ pub enum CallbackAction {
     FollowUpReply { task_id: Uuid },
     /// Create a review subtask for this task
     CreateReviewTask { task_id: Uuid },
+    /// Create a review subtask after explicit confirmation
+    CreateReviewTaskConfirm { task_id: Uuid },
     /// Mark a Daily task as Done (attempt merge first when needed)
     DoneTask { task_id: Uuid },
     /// Pagination for task lists
@@ -85,6 +89,7 @@ impl CallbackAction {
             Self::ApproveConfirm { .. } => "ac",
             Self::ApproveYes { .. } => "ay",
             Self::RejectInput { .. } => "ri",
+            Self::DismissInteraction => "di",
             Self::ToolApprove { .. } => "ta",
             Self::ToolReject { .. } => "tr",
             Self::Pending => "pe",
@@ -93,6 +98,7 @@ impl CallbackAction {
             Self::Refresh { .. } => "rf",
             Self::FollowUpReply { .. } => "fr",
             Self::CreateReviewTask { .. } => "rv",
+            Self::CreateReviewTaskConfirm { .. } => "rc",
             Self::DoneTask { .. } => "fd",
             Self::TaskPage { .. } => "tp",
             Self::Cancel => "ca",
@@ -108,6 +114,7 @@ impl CallbackAction {
             | Self::Projects
             | Self::Pending
             | Self::NewTask
+            | Self::DismissInteraction
             | Self::Cancel
             | Self::Skip
             | Self::Noop => {
@@ -130,6 +137,7 @@ impl CallbackAction {
             | Self::Refresh { task_id }
             | Self::FollowUpReply { task_id }
             | Self::CreateReviewTask { task_id }
+            | Self::CreateReviewTaskConfirm { task_id }
             | Self::DoneTask { task_id } => {
                 format!("v1|{}|{}", self.tag(), short_uuid(task_id))
             }
@@ -175,6 +183,7 @@ impl CallbackAction {
             "p" => Some(Self::Projects),
             "pe" => Some(Self::Pending),
             "nt" => Some(Self::NewTask),
+            "di" => Some(Self::DismissInteraction),
             "ca" => Some(Self::Cancel),
             "sk" => Some(Self::Skip),
             "no" => Some(Self::Noop),
@@ -238,6 +247,9 @@ impl CallbackAction {
                 task_id: parse_short_uuid(parts.get(2)?)?,
             }),
             "rv" => Some(Self::CreateReviewTask {
+                task_id: parse_short_uuid(parts.get(2)?)?,
+            }),
+            "rc" => Some(Self::CreateReviewTaskConfirm {
                 task_id: parse_short_uuid(parts.get(2)?)?,
             }),
             "fd" => Some(Self::DoneTask {
@@ -304,6 +316,7 @@ mod tests {
             CallbackAction::Projects,
             CallbackAction::Pending,
             CallbackAction::NewTask,
+            CallbackAction::DismissInteraction,
             CallbackAction::Cancel,
             CallbackAction::Skip,
             CallbackAction::Noop,
@@ -335,6 +348,7 @@ mod tests {
             CallbackAction::Refresh { task_id: id },
             CallbackAction::FollowUpReply { task_id: id },
             CallbackAction::CreateReviewTask { task_id: id },
+            CallbackAction::CreateReviewTaskConfirm { task_id: id },
             CallbackAction::DoneTask { task_id: id },
             CallbackAction::NewTaskProject { project_id: id },
         ];
@@ -417,6 +431,15 @@ mod tests {
     }
 
     #[test]
+    fn roundtrip_create_review_task_confirm() {
+        let id = Uuid::new_v4();
+        let action = CallbackAction::CreateReviewTaskConfirm { task_id: id };
+        let encoded = action.encode();
+        assert!(encoded.len() <= 64);
+        assert_eq!(CallbackAction::decode(&encoded).unwrap(), action);
+    }
+
+    #[test]
     fn decode_invalid_returns_none() {
         assert!(CallbackAction::decode("").is_none());
         assert!(CallbackAction::decode("v2|h").is_none());
@@ -433,6 +456,7 @@ mod tests {
             CallbackAction::Projects,
             CallbackAction::Pending,
             CallbackAction::NewTask,
+            CallbackAction::DismissInteraction,
             CallbackAction::Cancel,
             CallbackAction::Skip,
             CallbackAction::Noop,
@@ -465,6 +489,7 @@ mod tests {
             CallbackAction::Refresh { task_id: id },
             CallbackAction::FollowUpReply { task_id: id },
             CallbackAction::CreateReviewTask { task_id: id },
+            CallbackAction::CreateReviewTaskConfirm { task_id: id },
             CallbackAction::DoneTask { task_id: id },
             CallbackAction::NewTaskProject { project_id: id },
             CallbackAction::TaskPage {

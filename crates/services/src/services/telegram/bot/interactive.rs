@@ -14,7 +14,7 @@ use teloxide::{
     dptree,
     error_handlers::LoggingErrorHandler,
     prelude::*,
-    types::{InlineKeyboardMarkup, MessageId},
+    types::{InlineKeyboardButtonKind, InlineKeyboardMarkup, MessageId},
     update_listeners::Polling,
     utils::command::BotCommands,
 };
@@ -40,7 +40,7 @@ use crate::services::{
 type BotDialogue =
     teloxide::dispatching::dialogue::Dialogue<DialogueState, InMemStorage<DialogueState>>;
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct CardRenderContext {
     source_message_id: MessageId,
 }
@@ -63,6 +63,14 @@ struct DoneRepoBranchStatus {
 #[derive(Debug, Serialize)]
 struct MergeTaskAttemptBody {
     repo_id: Uuid,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct CompletionCleanupPlan {
+    delete_plan_review_cards: bool,
+    delete_plan_message_id: Option<MessageId>,
+    delete_interaction_message_id: Option<MessageId>,
+    send_result_as_new_message: bool,
 }
 
 // ─── Commands ────────────────────────────────────────────────────────
@@ -243,6 +251,25 @@ async fn handle_callback(
 
     // Handle actions that complete immediately.
     match &action {
+        CallbackAction::DismissInteraction => {
+            let current_message_id = q.message.as_ref().map(|message| message.id());
+            let should_reset = match (dialogue.get().await.ok().flatten(), current_message_id) {
+                (Some(state), Some(current_message_id)) => {
+                    state.prompt_message_id() == Some(current_message_id.0)
+                }
+                _ => false,
+            };
+
+            if should_reset {
+                dialogue.reset().await.ok();
+            }
+
+            if let Some(current_message_id) = current_message_id {
+                delete_message_best_effort(&bot, chat_id, current_message_id).await;
+            }
+
+            return Ok(());
+        }
         CallbackAction::Cancel => {
             let prompt_message_id = dialogue
                 .get()
@@ -432,14 +459,7 @@ async fn handle_callback(
             handle_edit_start(&bot, chat_id, &service, task_id, &dialogue, card_context).await?;
         }
         CallbackAction::ApproveConfirm { task_id } => {
-            render_or_send_card(
-                &bot,
-                chat_id,
-                card_context,
-                "⚠️ Confirm plan approval?",
-                Some(keyboard::approve_confirm_keyboard(task_id)),
-            )
-            .await?;
+            handle_approve_confirm(&bot, chat_id, task_id).await?;
         }
         CallbackAction::ApproveYes { task_id } => {
             handle_approve(&bot, chat_id, &service, task_id, card_context).await?;
@@ -451,6 +471,9 @@ async fn handle_callback(
             handle_follow_up_reply_start(&bot, chat_id, task_id, &dialogue, card_context).await?;
         }
         CallbackAction::CreateReviewTask { task_id } => {
+            handle_create_review_task_confirm(&bot, chat_id, task_id).await?;
+        }
+        CallbackAction::CreateReviewTaskConfirm { task_id } => {
             handle_create_review_task(&bot, chat_id, &service, task_id, card_context).await?;
         }
         CallbackAction::DoneTask { task_id } => {
@@ -485,7 +508,10 @@ async fn handle_callback(
             handle_new_task_project(&bot, chat_id, &service, project_id, &dialogue, card_context)
                 .await?;
         }
-        CallbackAction::Cancel | CallbackAction::Skip | CallbackAction::Noop => {
+        CallbackAction::DismissInteraction
+        | CallbackAction::Cancel
+        | CallbackAction::Skip
+        | CallbackAction::Noop => {
             // Already handled above
         }
     }
@@ -621,8 +647,10 @@ async fn handle_dialogue_text(
 
     match state {
         DialogueState::Idle => {
-            // No active dialogue: treat plain text as a Daily task.
-            if let Err(err) = service.create_daily_task_from_message(text).await {
+            if let Some(task_id) = extract_stage_summary_task_id_from_reply(&msg) {
+                handle_follow_up_reply_finish(&bot, msg.chat.id, &service, task_id, text, None)
+                    .await?;
+            } else if let Err(err) = service.create_daily_task_from_message(text).await {
                 format::send_rich_then_plain(
                     &bot,
                     msg.chat.id,
@@ -809,6 +837,7 @@ async fn handle_dialogue_text(
                 msg.chat.id,
                 &service,
                 task_id,
+                msg.reply_to_message().map(|reply| reply.id),
                 reason.as_deref(),
                 Some(CardRenderContext {
                     source_message_id: MessageId(prompt_message_id),
@@ -1340,6 +1369,53 @@ async fn run_failure_keyboard(service: &TelegramBotService, task_id: Uuid) -> In
     }
 }
 
+async fn handle_approve_confirm(bot: &Bot, chat_id: ChatId, task_id: Uuid) -> ResponseResult<()> {
+    format::send_rich_then_plain(
+        bot,
+        chat_id,
+        "⚠️ Confirm plan approval?",
+        Some(keyboard::approve_confirm_keyboard(task_id)),
+    )
+    .await?;
+    Ok(())
+}
+
+fn approval_completion_cleanup_plan(
+    card_context: Option<CardRenderContext>,
+) -> CompletionCleanupPlan {
+    let interaction_message_id = card_context.map(|ctx| ctx.source_message_id);
+
+    CompletionCleanupPlan {
+        delete_plan_review_cards: true,
+        delete_plan_message_id: None,
+        delete_interaction_message_id: interaction_message_id,
+        send_result_as_new_message: true,
+    }
+}
+
+fn reject_completion_cleanup_plan(
+    plan_message_id: Option<MessageId>,
+    card_context: Option<CardRenderContext>,
+) -> CompletionCleanupPlan {
+    CompletionCleanupPlan {
+        delete_plan_review_cards: true,
+        delete_plan_message_id: plan_message_id,
+        delete_interaction_message_id: card_context.map(|ctx| ctx.source_message_id),
+        send_result_as_new_message: true,
+    }
+}
+
+fn review_completion_cleanup_plan(
+    card_context: Option<CardRenderContext>,
+) -> CompletionCleanupPlan {
+    CompletionCleanupPlan {
+        delete_plan_review_cards: false,
+        delete_plan_message_id: None,
+        delete_interaction_message_id: card_context.map(|ctx| ctx.source_message_id),
+        send_result_as_new_message: true,
+    }
+}
+
 async fn handle_approve(
     bot: &Bot,
     chat_id: ChatId,
@@ -1372,19 +1448,14 @@ async fn handle_approve(
         .await
     {
         Ok(_) => {
-            let removed = cleanup_plan_review_cards(bot, chat_id, task_id).await;
-            let target_context =
-                if card_context.is_some_and(|ctx| removed.contains(&ctx.source_message_id)) {
-                    None
-                } else {
-                    card_context
-                };
-            render_or_send_card(
+            let cleanup = approval_completion_cleanup_plan(card_context);
+            apply_completion_cleanup(bot, chat_id, task_id, cleanup).await;
+            send_completion_message(
                 bot,
                 chat_id,
-                target_context,
+                cleanup,
+                card_context,
                 "✅ Plan approved!",
-                Some(keyboard::home_only_keyboard()),
             )
             .await?;
         }
@@ -1407,20 +1478,19 @@ async fn handle_reject_start(
     chat_id: ChatId,
     task_id: Uuid,
     dialogue: &BotDialogue,
-    card_context: Option<CardRenderContext>,
+    _card_context: Option<CardRenderContext>,
 ) -> ResponseResult<()> {
-    let prompt_message_id = render_or_send_card(
+    let prompt_message = format::send_rich_then_plain(
         bot,
         chat_id,
-        card_context,
         "Enter a rejection reason (or send any text to reject without reason):",
-        Some(keyboard::cancel_keyboard()),
+        Some(keyboard::interaction_cancel_keyboard()),
     )
     .await?;
     dialogue
         .update(DialogueState::RejectingPlan {
             task_id,
-            prompt_message_id: prompt_message_id.0,
+            prompt_message_id: prompt_message.id.0,
         })
         .await
         .ok();
@@ -1432,14 +1502,15 @@ async fn handle_reject_finish(
     chat_id: ChatId,
     service: &TelegramBotService,
     task_id: Uuid,
+    plan_message_id: Option<MessageId>,
     reason: Option<&str>,
-    card_context: Option<CardRenderContext>,
+    _card_context: Option<CardRenderContext>,
 ) -> ResponseResult<bool> {
     let Some(plan_approval) = service.find_exit_plan_approval(task_id).await else {
         render_or_send_card(
             bot,
             chat_id,
-            card_context,
+            _card_context,
             "No pending plan approval found. It may have expired.",
             Some(keyboard::home_only_keyboard()),
         )
@@ -1462,19 +1533,14 @@ async fn handle_reject_finish(
         .await
     {
         Ok(_) => {
-            let removed = cleanup_plan_review_cards(bot, chat_id, task_id).await;
-            let target_context =
-                if card_context.is_some_and(|ctx| removed.contains(&ctx.source_message_id)) {
-                    None
-                } else {
-                    card_context
-                };
-            render_or_send_card(
+            let cleanup = reject_completion_cleanup_plan(plan_message_id, _card_context);
+            apply_completion_cleanup(bot, chat_id, task_id, cleanup).await;
+            send_completion_message(
                 bot,
                 chat_id,
-                target_context,
+                cleanup,
+                _card_context,
                 "📝 Plan rejected.",
-                Some(keyboard::home_only_keyboard()),
             )
             .await?;
             return Ok(true);
@@ -1483,7 +1549,7 @@ async fn handle_reject_finish(
             render_or_send_card(
                 bot,
                 chat_id,
-                card_context,
+                _card_context,
                 format!("Failed to reject plan: {e}"),
                 Some(keyboard::home_only_keyboard()),
             )
@@ -1741,12 +1807,13 @@ async fn handle_create_review_task(
 
             let message =
                 format_review_task_created_message(&short_id, result.task.has_in_progress_attempt);
+            let cleanup = review_completion_cleanup_plan(card_context);
+            apply_completion_cleanup(bot, chat_id, task_id, cleanup).await;
 
-            render_or_send_card(
+            format::send_rich_then_plain(
                 bot,
                 chat_id,
-                card_context,
-                message,
+                &message,
                 Some(keyboard::task_detail_keyboard(
                     result.task.id,
                     &result.task.status,
@@ -1759,13 +1826,28 @@ async fn handle_create_review_task(
                 bot,
                 chat_id,
                 card_context,
-                format!("Failed to create review task: {err}"),
-                Some(keyboard::home_only_keyboard()),
+                format!("Failed to create review task: {err}\n\nYou can retry or cancel."),
+                Some(keyboard::review_confirm_keyboard(task_id)),
             )
             .await?;
         }
     }
 
+    Ok(())
+}
+
+async fn handle_create_review_task_confirm(
+    bot: &Bot,
+    chat_id: ChatId,
+    task_id: Uuid,
+) -> ResponseResult<()> {
+    format::send_rich_then_plain(
+        bot,
+        chat_id,
+        "Confirm creating a review task?",
+        Some(keyboard::review_confirm_keyboard(task_id)),
+    )
+    .await?;
     Ok(())
 }
 
@@ -2128,17 +2210,102 @@ async fn cleanup_plan_review_cards(bot: &Bot, chat_id: ChatId, task_id: Uuid) ->
     message_ids
 }
 
+async fn apply_completion_cleanup(
+    bot: &Bot,
+    chat_id: ChatId,
+    task_id: Uuid,
+    cleanup: CompletionCleanupPlan,
+) {
+    if cleanup.delete_plan_review_cards {
+        cleanup_plan_review_cards(bot, chat_id, task_id).await;
+    }
+
+    if let Some(message_id) = cleanup.delete_plan_message_id {
+        delete_message_best_effort(bot, chat_id, message_id).await;
+    }
+
+    if let Some(message_id) = cleanup.delete_interaction_message_id {
+        delete_message_best_effort(bot, chat_id, message_id).await;
+    }
+}
+
+async fn send_completion_message(
+    bot: &Bot,
+    chat_id: ChatId,
+    cleanup: CompletionCleanupPlan,
+    card_context: Option<CardRenderContext>,
+    text: &str,
+) -> ResponseResult<()> {
+    if cleanup.send_result_as_new_message {
+        format::send_rich_then_plain(bot, chat_id, text, Some(keyboard::home_only_keyboard()))
+            .await?;
+    } else {
+        render_or_send_card(
+            bot,
+            chat_id,
+            card_context,
+            text,
+            Some(keyboard::home_only_keyboard()),
+        )
+        .await?;
+    }
+
+    Ok(())
+}
+
+fn extract_stage_summary_task_id_from_reply(message: &Message) -> Option<Uuid> {
+    let reply = message.reply_to_message()?;
+    let from = reply.from.as_ref()?;
+    if !from.is_bot {
+        return None;
+    }
+
+    let markup = reply.reply_markup()?;
+    extract_task_id_from_inline_keyboard(markup)
+}
+
+fn extract_task_id_from_inline_keyboard(markup: &InlineKeyboardMarkup) -> Option<Uuid> {
+    for row in &markup.inline_keyboard {
+        for button in row {
+            let InlineKeyboardButtonKind::CallbackData(data) = &button.kind else {
+                continue;
+            };
+
+            match CallbackAction::decode(data) {
+                Some(CallbackAction::CreateReviewTask { task_id })
+                | Some(CallbackAction::CreateReviewTaskConfirm { task_id })
+                | Some(CallbackAction::DoneTask { task_id })
+                | Some(CallbackAction::FollowUpReply { task_id }) => return Some(task_id),
+                _ => {}
+            }
+        }
+    }
+
+    None
+}
+
 fn empty_inline_keyboard() -> InlineKeyboardMarkup {
     InlineKeyboardMarkup::new(Vec::<Vec<teloxide::types::InlineKeyboardButton>>::new())
 }
 
 #[cfg(test)]
 mod tests {
+    use teloxide::types::{
+        Chat, ChatFullInfo, ChatId, ChatKind, ChatPrivate, InlineKeyboardButton,
+        InlineKeyboardMarkup, MediaKind, MediaText, Message, MessageCommon, MessageId,
+        MessageKind, User, UserId,
+    };
     use executors::logs::{ActionType, NormalizedEntry, NormalizedEntryType, ToolStatus};
     use teloxide::utils::command::BotCommands;
     use uuid::Uuid;
 
-    use super::{Command, approval_requires_structured_input};
+    use super::{
+        CardRenderContext, Command, approval_completion_cleanup_plan,
+        approval_requires_structured_input, extract_stage_summary_task_id_from_reply,
+        extract_task_id_from_inline_keyboard, reject_completion_cleanup_plan,
+        review_completion_cleanup_plan,
+    };
+    use crate::services::telegram::{callback::CallbackAction, keyboard};
     use crate::services::approvals::PendingApprovalInfo;
 
     #[test]
@@ -2229,5 +2396,162 @@ mod tests {
         };
 
         assert!(approval_requires_structured_input(&approval));
+    }
+
+    #[test]
+    fn extracts_task_id_from_stage_summary_reply_message() {
+        let task_id = Uuid::new_v4();
+        let replied_message = bot_message_with_keyboard(keyboard::stage_summary_reply_keyboard(task_id));
+        let reply_message = user_reply_message(replied_message);
+
+        assert_eq!(extract_stage_summary_task_id_from_reply(&reply_message), Some(task_id));
+    }
+
+    #[test]
+    fn extracts_task_id_from_legacy_follow_up_button() {
+        let task_id = Uuid::new_v4();
+        let markup = InlineKeyboardMarkup::new(vec![vec![InlineKeyboardButton::callback(
+            "Reply",
+            CallbackAction::FollowUpReply { task_id }.encode(),
+        )]]);
+
+        assert_eq!(extract_task_id_from_inline_keyboard(&markup), Some(task_id));
+    }
+
+    #[test]
+    fn ignores_replies_without_stage_summary_callback_data() {
+        let replied_message = bot_message_with_keyboard(InlineKeyboardMarkup::new(vec![vec![
+            InlineKeyboardButton::callback("Home", CallbackAction::Home.encode()),
+        ]]));
+        let reply_message = user_reply_message(replied_message);
+
+        assert_eq!(extract_stage_summary_task_id_from_reply(&reply_message), None);
+    }
+
+    #[test]
+    fn ignores_replies_to_non_bot_messages() {
+        let task_id = Uuid::new_v4();
+        let replied_message = user_message_with_keyboard(keyboard::stage_summary_reply_keyboard(task_id));
+        let reply_message = user_reply_message(replied_message);
+
+        assert_eq!(extract_stage_summary_task_id_from_reply(&reply_message), None);
+    }
+
+    #[test]
+    fn approve_cleanup_plan_deletes_interaction_and_sends_new_message() {
+        let context = Some(CardRenderContext {
+            source_message_id: MessageId(42),
+        });
+
+        let cleanup = approval_completion_cleanup_plan(context);
+
+        assert!(cleanup.delete_plan_review_cards);
+        assert_eq!(cleanup.delete_plan_message_id, None);
+        assert_eq!(cleanup.delete_interaction_message_id, Some(MessageId(42)));
+        assert!(cleanup.send_result_as_new_message);
+    }
+
+    #[test]
+    fn reject_cleanup_plan_deletes_plan_and_interaction_messages() {
+        let cleanup = reject_completion_cleanup_plan(
+            Some(MessageId(7)),
+            Some(CardRenderContext {
+                source_message_id: MessageId(8),
+            }),
+        );
+
+        assert!(cleanup.delete_plan_review_cards);
+        assert_eq!(cleanup.delete_plan_message_id, Some(MessageId(7)));
+        assert_eq!(cleanup.delete_interaction_message_id, Some(MessageId(8)));
+        assert!(cleanup.send_result_as_new_message);
+    }
+
+    #[test]
+    fn review_cleanup_plan_only_deletes_interaction_message() {
+        let cleanup = review_completion_cleanup_plan(Some(CardRenderContext {
+            source_message_id: MessageId(99),
+        }));
+
+        assert!(!cleanup.delete_plan_review_cards);
+        assert_eq!(cleanup.delete_plan_message_id, None);
+        assert_eq!(cleanup.delete_interaction_message_id, Some(MessageId(99)));
+        assert!(cleanup.send_result_as_new_message);
+    }
+
+    fn bot_message_with_keyboard(markup: InlineKeyboardMarkup) -> Message {
+        message_with_keyboard(true, markup)
+    }
+
+    fn user_message_with_keyboard(markup: InlineKeyboardMarkup) -> Message {
+        message_with_keyboard(false, markup)
+    }
+
+    fn message_with_keyboard(is_bot: bool, markup: InlineKeyboardMarkup) -> Message {
+        Message {
+            id: MessageId(11),
+            thread_id: None,
+            from: Some(User {
+                id: UserId(1),
+                is_bot,
+                first_name: if is_bot { "Bot" } else { "User" }.to_string(),
+                last_name: None,
+                username: None,
+                language_code: None,
+                is_premium: false,
+                added_to_attachment_menu: false,
+            }),
+            sender_chat: None,
+            date: chrono::Utc::now(),
+            chat: Chat {
+                id: ChatId(1),
+                kind: ChatKind::Private(ChatPrivate {
+                    username: None,
+                    first_name: Some("Tester".to_string()),
+                    last_name: None,
+                    bio: None,
+                    has_private_forwards: None,
+                    has_restricted_voice_and_video_messages: None,
+                }),
+                photo: None,
+                available_reactions: None,
+                pinned_message: None,
+                message_auto_delete_time: None,
+                has_hidden_members: false,
+                has_aggressive_anti_spam_enabled: false,
+                chat_full_info: ChatFullInfo::default(),
+            },
+            is_topic_message: false,
+            via_bot: None,
+            kind: MessageKind::Common(MessageCommon {
+                author_signature: None,
+                forward_origin: None,
+                reply_to_message: None,
+                external_reply: None,
+                quote: None,
+                edit_date: None,
+                media_kind: MediaKind::Text(MediaText {
+                    text: "stage summary".to_string(),
+                    entities: Vec::new(),
+                    link_preview_options: None,
+                }),
+                reply_markup: Some(markup),
+                is_automatic_forward: false,
+                has_protected_content: false,
+            }),
+        }
+    }
+
+    fn user_reply_message(reply_to_message: Message) -> Message {
+        let mut message = user_message_with_keyboard(InlineKeyboardMarkup::default());
+        if let MessageKind::Common(common) = &mut message.kind {
+            common.reply_to_message = Some(Box::new(reply_to_message));
+            common.reply_markup = None;
+            common.media_kind = MediaKind::Text(MediaText {
+                text: "reply".to_string(),
+                entities: Vec::new(),
+                link_preview_options: None,
+            });
+        }
+        message
     }
 }

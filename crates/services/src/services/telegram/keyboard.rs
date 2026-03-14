@@ -194,7 +194,18 @@ pub fn run_mode_pick_keyboard(
 pub fn approve_confirm_keyboard(task_id: Uuid) -> InlineKeyboardMarkup {
     InlineKeyboardMarkup::new(vec![vec![
         btn("✅ Yes, approve", CallbackAction::ApproveYes { task_id }),
-        btn("❌ Cancel", CallbackAction::Cancel),
+        btn("❌ Cancel", CallbackAction::DismissInteraction),
+    ]])
+}
+
+/// Build the confirmation keyboard shown before creating a review task.
+pub fn review_confirm_keyboard(task_id: Uuid) -> InlineKeyboardMarkup {
+    InlineKeyboardMarkup::new(vec![vec![
+        btn(
+            "✅ Confirm",
+            CallbackAction::CreateReviewTaskConfirm { task_id },
+        ),
+        btn("❌ Cancel", CallbackAction::DismissInteraction),
     ]])
 }
 
@@ -224,18 +235,17 @@ pub fn tool_approval_keyboard(approval_id: &str) -> InlineKeyboardMarkup {
     ]])
 }
 
-/// Build follow-up reply + review buttons shown after stage summaries.
+/// Build review buttons shown after stage summaries.
 pub fn stage_summary_reply_keyboard(task_id: Uuid) -> InlineKeyboardMarkup {
-    InlineKeyboardMarkup::new(vec![vec![
-        btn("💬 Reply", CallbackAction::FollowUpReply { task_id }),
-        btn("🔍 Review", CallbackAction::CreateReviewTask { task_id }),
-    ]])
+    InlineKeyboardMarkup::new(vec![vec![btn(
+        "🔍 Review",
+        CallbackAction::CreateReviewTask { task_id },
+    )]])
 }
 
-/// Build follow-up + review + done buttons shown after Daily task stage summaries.
+/// Build review + done buttons shown after Daily task stage summaries.
 pub fn stage_summary_reply_done_keyboard(task_id: Uuid) -> InlineKeyboardMarkup {
     InlineKeyboardMarkup::new(vec![vec![
-        btn("💬 Reply", CallbackAction::FollowUpReply { task_id }),
         btn("🔍 Review", CallbackAction::CreateReviewTask { task_id }),
         btn("✅ Done", CallbackAction::DoneTask { task_id }),
     ]])
@@ -292,6 +302,14 @@ pub fn cancel_keyboard() -> InlineKeyboardMarkup {
     InlineKeyboardMarkup::new(vec![vec![btn("❌ Cancel", CallbackAction::Cancel)]])
 }
 
+/// Build a dismiss-only keyboard for temporary interaction messages.
+pub fn interaction_cancel_keyboard() -> InlineKeyboardMarkup {
+    InlineKeyboardMarkup::new(vec![vec![btn(
+        "❌ Cancel",
+        CallbackAction::DismissInteraction,
+    )]])
+}
+
 /// Build a skip+cancel keyboard for optional dialogue steps.
 pub fn skip_cancel_keyboard() -> InlineKeyboardMarkup {
     InlineKeyboardMarkup::new(vec![vec![
@@ -334,7 +352,7 @@ mod tests {
     }
 
     #[test]
-    fn stage_summary_reply_keyboard_contains_reply_and_review_buttons() {
+    fn stage_summary_reply_keyboard_contains_only_review_button() {
         let task_id = Uuid::new_v4();
         let keyboard = stage_summary_reply_keyboard(task_id);
         let value = serde_json::to_value(keyboard).expect("keyboard should serialize");
@@ -343,21 +361,16 @@ mod tests {
             .and_then(Value::as_array)
             .expect("first row should exist");
 
-        assert_eq!(row.len(), 2);
-        assert_eq!(row[0]["text"], "💬 Reply");
+        assert_eq!(row.len(), 1);
+        assert_eq!(row[0]["text"], "🔍 Review");
         assert_eq!(
             CallbackAction::decode(callback_data(&row[0])),
-            Some(CallbackAction::FollowUpReply { task_id })
-        );
-        assert_eq!(row[1]["text"], "🔍 Review");
-        assert_eq!(
-            CallbackAction::decode(callback_data(&row[1])),
             Some(CallbackAction::CreateReviewTask { task_id })
         );
     }
 
     #[test]
-    fn stage_summary_reply_done_keyboard_contains_reply_review_and_done_buttons() {
+    fn stage_summary_reply_done_keyboard_contains_review_and_done_buttons() {
         let task_id = Uuid::new_v4();
         let keyboard = stage_summary_reply_done_keyboard(task_id);
         let value = serde_json::to_value(keyboard).expect("keyboard should serialize");
@@ -366,21 +379,39 @@ mod tests {
             .and_then(Value::as_array)
             .expect("first row should exist");
 
-        assert_eq!(row.len(), 3);
-        assert_eq!(row[0]["text"], "💬 Reply");
+        assert_eq!(row.len(), 2);
+        assert_eq!(row[0]["text"], "🔍 Review");
         assert_eq!(
             CallbackAction::decode(callback_data(&row[0])),
-            Some(CallbackAction::FollowUpReply { task_id })
-        );
-        assert_eq!(row[1]["text"], "🔍 Review");
-        assert_eq!(
-            CallbackAction::decode(callback_data(&row[1])),
             Some(CallbackAction::CreateReviewTask { task_id })
         );
-        assert_eq!(row[2]["text"], "✅ Done");
+        assert_eq!(row[1]["text"], "✅ Done");
         assert_eq!(
-            CallbackAction::decode(callback_data(&row[2])),
+            CallbackAction::decode(callback_data(&row[1])),
             Some(CallbackAction::DoneTask { task_id })
+        );
+    }
+
+    #[test]
+    fn review_confirm_keyboard_contains_confirm_and_cancel_buttons() {
+        let task_id = Uuid::new_v4();
+        let keyboard = review_confirm_keyboard(task_id);
+        let value = serde_json::to_value(keyboard).expect("keyboard should serialize");
+        let row = value["inline_keyboard"]
+            .get(0)
+            .and_then(Value::as_array)
+            .expect("first row should exist");
+
+        assert_eq!(row.len(), 2);
+        assert_eq!(row[0]["text"], "✅ Confirm");
+        assert_eq!(
+            CallbackAction::decode(callback_data(&row[0])),
+            Some(CallbackAction::CreateReviewTaskConfirm { task_id })
+        );
+        assert_eq!(row[1]["text"], "❌ Cancel");
+        assert_eq!(
+            CallbackAction::decode(callback_data(&row[1])),
+            Some(CallbackAction::DismissInteraction)
         );
     }
 
