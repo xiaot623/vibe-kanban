@@ -263,6 +263,7 @@ pub(super) struct TodoUpdatedEvent {
 
 #[derive(Debug, Deserialize)]
 pub(super) struct SdkTodo {
+    #[serde(default)]
     pub(super) id: String,
     pub(super) content: String,
     pub(super) status: String,

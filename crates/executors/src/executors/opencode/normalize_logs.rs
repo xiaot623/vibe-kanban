@@ -1876,6 +1876,50 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn todo_updated_without_todo_ids_is_normalized() {
+        let (mut state, msg_store) = new_state();
+        let worktree_path = Path::new("/tmp");
+
+        state
+            .handle_sdk_event(
+                &json!({
+                    "type": "todo.updated",
+                    "properties": {
+                        "sessionID": "session-1",
+                        "todos": [{
+                            "content": "Inspect callback handling",
+                            "status": "in_progress",
+                            "priority": "high"
+                        }]
+                    }
+                }),
+                worktree_path,
+                &msg_store,
+            )
+            .await;
+
+        let entries = collect_entries(&msg_store);
+        let entry = entries
+            .iter()
+            .find(|entry| {
+                matches!(
+                    entry.entry_type,
+                    NormalizedEntryType::ToolUse {
+                        action_type: ActionType::TodoManagement { .. },
+                        ..
+                    }
+                )
+            })
+            .expect("todo entry should be present");
+
+        assert_eq!(entry.content, "TODO list updated");
+        assert!(!entries.iter().any(|entry| {
+            matches!(entry.entry_type, NormalizedEntryType::SystemMessage)
+                && entry.content.contains("Unrecognized OpenCode SDK event")
+        }));
+    }
+
+    #[tokio::test]
     async fn plan_presentation_survives_tool_state_and_approval_updates() {
         let (mut state, msg_store) = new_state();
         let plan_text = "# Plan\n- Step 1\n- Step 2";
