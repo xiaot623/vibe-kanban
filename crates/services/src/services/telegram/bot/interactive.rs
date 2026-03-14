@@ -113,6 +113,10 @@ pub(super) async fn run_dispatcher(service: TelegramBotService, bot: Bot, chat_i
         );
     }
 
+    if let Err(err) = bot.set_my_commands(Command::bot_commands()).send().await {
+        tracing::warn!("Failed to register Telegram slash commands: {:?}", err);
+    }
+
     let listener = Polling::builder(bot.clone())
         .timeout(Duration::from_secs(10))
         .build();
@@ -2162,6 +2166,20 @@ mod tests {
             Command::parse("/cancel", bot_name),
             Ok(Command::Cancel)
         ));
+    }
+
+    #[test]
+    fn interactive_commands_publish_supported_slash_commands_in_expected_order() {
+        let commands = Command::bot_commands();
+        let names = commands
+            .iter()
+            .map(|command| command.command.as_str())
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            names,
+            vec!["/start", "/help", "/tasks", "/new", "/pending", "/cancel"]
+        );
     }
 
     #[test]
