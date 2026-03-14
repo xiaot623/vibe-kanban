@@ -41,7 +41,8 @@ use crate::{
     },
     env::ExecutionEnv,
     executors::{
-        AppendPrompt, ExecutorError, ExecutorExitResult, SpawnedChild, StandardCodingAgentExecutor,
+        AppendPrompt, AvailabilityInfo, ExecutorError, ExecutorExitResult, SpawnedChild,
+        StandardCodingAgentExecutor, command_available,
     },
     stdout_dup::create_stdout_pipe_writer,
 };
@@ -250,6 +251,23 @@ impl StandardCodingAgentExecutor for Pi {
 
     fn default_mcp_config_path(&self) -> Option<PathBuf> {
         dirs::home_dir().map(|home| home.join(".pi").join("config.json"))
+    }
+
+    fn get_availability_info(&self) -> AvailabilityInfo {
+        let config_found = self
+            .default_mcp_config_path()
+            .map(|path| path.exists())
+            .unwrap_or(false);
+        let command_found = command_available(
+            self.build_command_builder()
+                .and_then(|builder| builder.build_initial()),
+        );
+
+        if config_found || command_found {
+            AvailabilityInfo::InstallationFound
+        } else {
+            AvailabilityInfo::NotFound
+        }
     }
 }
 

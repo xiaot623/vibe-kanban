@@ -17,7 +17,7 @@ use crate::executors::qa_mock::QaMockExecutor;
 use crate::{
     actions::{ExecutorAction, review::RepoReviewContext},
     approvals::ExecutorApprovalService,
-    command::CommandBuildError,
+    command::{CommandBuildError, CommandParts},
     env::ExecutionEnv,
     executors::{
         claude::ClaudeCode, codex::Codex, droid::Droid, gemini::Gemini, opencode::Opencode, pi::Pi,
@@ -178,6 +178,26 @@ impl AvailabilityInfo {
     }
 }
 
+pub(crate) fn command_available(command_parts: Result<CommandParts, CommandBuildError>) -> bool {
+    match command_parts {
+        Err(err) => {
+            tracing::debug!(?err, "command_available: failed to build command");
+            false
+        }
+        Ok(parts) => match parts.into_resolved_blocking() {
+            Ok(_) => true,
+            Err(ExecutorError::ExecutableNotFound { ref program }) => {
+                tracing::debug!(%program, "command_available: executable not found in PATH");
+                false
+            }
+            Err(err) => {
+                tracing::debug!(?err, "command_available: failed to resolve executable");
+                false
+            }
+        },
+    }
+}
+
 #[async_trait]
 #[enum_dispatch(CodingAgent)]
 pub trait StandardCodingAgentExecutor {
@@ -332,5 +352,31 @@ mod tests {
         let result = BaseCodingAgent::from_str("CLAUDE_CODE");
         assert!(result.is_ok(), "CLAUDE_CODE should be valid");
         assert_eq!(result.unwrap(), BaseCodingAgent::ClaudeCode);
+    }
+
+    #[test]
+    fn command_available_detects_absolute_executable_paths() {
+        // Use a well-known system binary that is guaranteed to exist on all
+        // supported platforms rather than relying on the test binary path.
+        #[cfg(unix)]
+        let well_known = "/bin/sh";
+        #[cfg(windows)]
+        let well_known = "C:\\Windows\\System32\\cmd.exe";
+
+        let parts = CommandParts::new(well_known.to_string(), vec![]);
+        assert!(
+            command_available(Ok(parts)),
+            "{well_known} should be detected as available"
+        );
+    }
+
+    #[test]
+    fn command_available_returns_false_for_missing_programs() {
+        let parts = CommandParts::new(
+            "vibe-kanban-missing-executable-for-test".to_string(),
+            vec![],
+        );
+
+        assert!(!command_available(Ok(parts)));
     }
 }

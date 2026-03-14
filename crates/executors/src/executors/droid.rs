@@ -12,7 +12,10 @@ use workspace_utils::msg_store::MsgStore;
 use crate::{
     command::{CommandBuildError, CommandBuilder, CommandParts, format_command_for_log},
     env::ExecutionEnv,
-    executors::{AppendPrompt, ExecutorError, SpawnedChild, StandardCodingAgentExecutor},
+    executors::{
+        AppendPrompt, AvailabilityInfo, ExecutorError, SpawnedChild, StandardCodingAgentExecutor,
+        command_available,
+    },
     logs::utils::EntryIndexProvider,
 };
 
@@ -185,5 +188,22 @@ impl StandardCodingAgentExecutor for Droid {
 
     fn default_mcp_config_path(&self) -> Option<std::path::PathBuf> {
         dirs::home_dir().map(|home| home.join(".factory").join("mcp.json"))
+    }
+
+    fn get_availability_info(&self) -> AvailabilityInfo {
+        let config_found = self
+            .default_mcp_config_path()
+            .map(|path| path.exists())
+            .unwrap_or(false);
+        let command_found = command_available(
+            self.build_command_builder()
+                .and_then(|builder| builder.build_initial()),
+        );
+
+        if config_found || command_found {
+            AvailabilityInfo::InstallationFound
+        } else {
+            AvailabilityInfo::NotFound
+        }
     }
 }

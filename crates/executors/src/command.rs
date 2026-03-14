@@ -7,7 +7,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use ts_rs::TS;
-use workspace_utils::shell::resolve_executable_path;
+use workspace_utils::shell::{resolve_executable_path, resolve_executable_path_blocking};
 
 use crate::executors::ExecutorError;
 
@@ -38,6 +38,13 @@ impl CommandParts {
         let CommandParts { program, args } = self;
         let executable = resolve_executable_path(&program)
             .await
+            .ok_or(ExecutorError::ExecutableNotFound { program })?;
+        Ok((executable, args))
+    }
+
+    pub(crate) fn into_resolved_blocking(self) -> Result<(PathBuf, Vec<String>), ExecutorError> {
+        let CommandParts { program, args } = self;
+        let executable = resolve_executable_path_blocking(&program)
             .ok_or(ExecutorError::ExecutableNotFound { program })?;
         Ok((executable, args))
     }

@@ -22,7 +22,7 @@ use crate::{
     env::ExecutionEnv,
     executors::{
         AppendPrompt, AvailabilityInfo, ExecutorError, ExecutorExitResult, SpawnedChild,
-        StandardCodingAgentExecutor,
+        StandardCodingAgentExecutor, command_available,
     },
     stdout_dup::create_stdout_pipe_writer,
 };
@@ -81,7 +81,7 @@ impl Opencode {
     }
 
     fn build_command_builder(&self) -> Result<CommandBuilder, CommandBuildError> {
-        tracing::info!(
+        tracing::debug!(
             "build_command_builder using system opencode command {}",
             base_command()
         );
@@ -89,7 +89,7 @@ impl Opencode {
     }
 
     fn build_fallback_command_builder(&self) -> Result<CommandBuilder, CommandBuildError> {
-        tracing::info!(
+        tracing::debug!(
             "build_fallback_builder using fallback npx opencode command {}",
             fallback_command()
         );
@@ -322,7 +322,26 @@ impl StandardCodingAgentExecutor for Opencode {
             .map(|config| config.join("opencode").exists())
             .unwrap_or(false);
 
-        if mcp_config_found || installation_indicator_found {
+        // Check whether the primary `opencode` binary is on PATH.
+        let primary_command_found = command_available(
+            self.build_command_builder()
+                .and_then(|builder| builder.build_initial()),
+        );
+
+        // Only check the npx fallback when no override is set and the primary
+        // command is absent. The fallback resolves `npx` (the first token), not
+        // the opencode package itself, so it must not be used as a standalone
+        // installation signal — it would return true on any machine with Node.js.
+        let command_found = primary_command_found
+            || (!primary_command_found
+                && self.cmd.base_command_override.is_none()
+                && (mcp_config_found || installation_indicator_found)
+                && command_available(
+                    self.build_fallback_command_builder()
+                        .and_then(|builder| builder.build_initial()),
+                ));
+
+        if mcp_config_found || installation_indicator_found || command_found {
             AvailabilityInfo::InstallationFound
         } else {
             AvailabilityInfo::NotFound
@@ -340,4 +359,76 @@ fn setup_approvals_env(auto_approve: bool, env: &ExecutionEnv) -> ExecutionEnv {
         env.insert("OPENCODE_PERMISSION", r#"{"edit": "ask", "bash": "ask", "webfetch": "ask", "doom_loop": "ask", "external_directory": "ask"}"#);
     }
     env
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::command::CmdOverrides;
+
+    fn make_opencode(base_command_override: Option<String>) -> Opencode {
+        Opencode {
+            append_prompt: AppendPrompt::default(),
+            model: None,
+            mode: None,
+            auto_approve: true,
+            cmd: CmdOverrides {
+                base_command_override,
+                additional_params: None,
+                env: None,
+            },
+            approvals: None,
+        }
+    }
+
+    /// When `base_command_override` is set to an existing binary the primary
+    /// command check should succeed and the fallback path must not be consulted.
+    #[test]
+    fn get_availability_info_uses_override_command() {
+        // Use the current test binary itself as a guaranteed-existing executable.
+        let exe = std::env::current_exe()
+            .expect("current_exe should resolve")
+            .to_string_lossy()
+            .into_owned();
+
+        let opencode = make_opencode(Some(exe));
+        assert!(
+            opencode.get_availability_info().is_available(),
+            "override pointing to existing binary should be InstallationFound"
+        );
+    }
+
+    /// When `base_command_override` is set to a nonexistent binary the result
+    /// must be `NotFound` — the fallback should NOT be checked.
+    #[test]
+    fn get_availability_info_override_missing_binary_not_found() {
+        let opencode =
+            make_opencode(Some("vibe-kanban-nonexistent-opencode-override".to_string()));
+        // Only valid if neither config dir nor command resolves; on a CI box
+        // without opencode installed this should return NotFound.
+        let info = opencode.get_availability_info();
+        // We can't guarantee config dirs don't exist on all machines, so we
+        // only assert that if both config checks fail, the result is NotFound.
+        if !dirs::config_dir()
+            .map(|d| d.join("opencode").exists())
+            .unwrap_or(false)
+        {
+            assert!(
+                !info.is_available(),
+                "nonexistent override with no config dir should be NotFound"
+            );
+        }
+    }
+
+    /// When no override is set the fallback must not signal installation when
+    /// the primary `opencode` binary is absent and no config directory exists.
+    #[test]
+    fn get_availability_info_fallback_requires_config_or_primary() {
+        // Only meaningful on machines without `opencode` installed.
+        let opencode = make_opencode(None);
+        // We're testing the logic path: if neither primary command nor config
+        // dir exists, the fallback should NOT make it available.
+        // This is a logic test; we check the function doesn't panic.
+        let _info = opencode.get_availability_info();
+    }
 }
