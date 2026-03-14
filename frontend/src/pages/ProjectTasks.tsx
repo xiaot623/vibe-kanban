@@ -367,8 +367,8 @@ export function ProjectTasks() {
     });
 
     const getTimestamp = (item: KanbanColumnItem) => {
-      const createdAt = item.task.created_at;
-      return new Date(createdAt).getTime();
+      const updatedAt = item.task.updated_at;
+      return new Date(updatedAt).getTime();
     };
 
     TASK_STATUSES.forEach((status) => {
