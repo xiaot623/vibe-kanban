@@ -17,7 +17,7 @@ use deployment::Deployment;
 use futures_util::{SinkExt, StreamExt, TryStreamExt};
 use serde::Deserialize;
 use serde_json::json;
-use services::services::container::{ContainerService, StreamedLogMsg};
+use services::services::container::{ContainerService, StreamedNormalizedLogEvent};
 use utils::{log_msg::LogMsg, response::ApiResponse};
 use uuid::Uuid;
 
@@ -34,6 +34,7 @@ pub struct SessionExecutionProcessQuery {
 #[derive(Debug, Deserialize, Default)]
 pub struct LogStreamCursorQuery {
     pub after_seq: Option<i64>,
+    pub before_seq: Option<i64>,
     pub limit: Option<u32>,
 }
 
@@ -57,6 +58,24 @@ fn patch_to_ws_message(patch: serde_json::Value, seq: Option<i64>) -> axum::extr
     } else {
         json!({
             "JsonPatch": patch,
+        })
+    };
+
+    axum::extract::ws::Message::Text(payload.to_string().into())
+}
+
+fn normalized_event_to_ws_message(
+    event: serde_json::Value,
+    seq: Option<i64>,
+) -> axum::extract::ws::Message {
+    let payload = if let Some(seq) = seq {
+        json!({
+            "event": event,
+            "seq": seq,
+        })
+    } else {
+        json!({
+            "event": event,
         })
     };
 
@@ -99,10 +118,13 @@ pub async fn stream_raw_logs_ws(
     Query(query): Query<LogStreamCursorQuery>,
 ) -> Result<impl IntoResponse, ApiError> {
     let after_seq = query.after_seq;
+    let before_seq = query.before_seq;
     let limit = query.normalized_limit();
 
     Ok(ws.on_upgrade(move |socket| async move {
-        if let Err(e) = handle_raw_logs_ws(socket, deployment, exec_id, after_seq, limit).await {
+        if let Err(e) =
+            handle_raw_logs_ws(socket, deployment, exec_id, after_seq, before_seq, limit).await
+        {
             tracing::warn!("raw logs WS closed: {}", e);
         }
     }))
@@ -113,12 +135,13 @@ async fn handle_raw_logs_ws(
     deployment: DeploymentImpl,
     exec_id: Uuid,
     after_seq: Option<i64>,
+    before_seq: Option<i64>,
     limit: u32,
 ) -> anyhow::Result<()> {
     // Get the raw stream and convert to JSON patches on-the-fly
     let raw_stream = deployment
         .container()
-        .stream_raw_logs(&exec_id, after_seq, limit)
+        .stream_raw_logs(&exec_id, after_seq, before_seq, limit)
         .await
         .ok_or_else(|| anyhow::anyhow!("Execution process not found"))?;
 
@@ -160,7 +183,12 @@ pub async fn stream_normalized_logs_ws(
 ) -> Result<impl IntoResponse, ApiError> {
     let stream = deployment
         .container()
-        .stream_normalized_logs(&exec_id, query.after_seq, query.normalized_limit())
+        .stream_normalized_logs(
+            &exec_id,
+            query.after_seq,
+            query.before_seq,
+            query.normalized_limit(),
+        )
         .await
         .ok_or_else(|| {
             ApiError::ExecutionProcess(ExecutionProcessError::ExecutionProcessNotFound)
@@ -178,22 +206,36 @@ pub async fn stream_normalized_logs_ws(
 
 async fn handle_normalized_logs_ws(
     socket: WebSocket,
-    stream: impl futures_util::Stream<Item = anyhow::Result<StreamedLogMsg>> + Unpin + Send + 'static,
+    stream: impl futures_util::Stream<Item = anyhow::Result<StreamedNormalizedLogEvent>>
+    + Unpin
+    + Send
+    + 'static,
 ) -> anyhow::Result<()> {
-    let mut stream = stream.map_ok(|msg| match msg.msg {
-        LogMsg::JsonPatch(patch) => patch_to_ws_message(
-            serde_json::to_value(patch).unwrap_or_else(|_| json!([])),
-            msg.seq,
-        ),
-        LogMsg::Finished => LogMsg::Finished.to_ws_message_unchecked(),
-        other => other.to_ws_message_unchecked(),
+    // Assign a monotonic counter to live events that have no DB sequence number, so the
+    // frontend can use `after_seq` for cursor-based pagination even on in-memory streams.
+    let mut next_synthetic_seq: i64 = 0;
+    let mut stream = stream.map_ok(move |msg| {
+        let is_finished = matches!(msg.event, executors::logs::NormalizedLogEvent::Finished);
+        let effective_seq = msg.seq.or_else(|| {
+            let s = next_synthetic_seq;
+            next_synthetic_seq += 1;
+            Some(s)
+        });
+        let message = normalized_event_to_ws_message(
+            serde_json::to_value(msg.event).unwrap_or_else(|_| json!({"type":"finished"})),
+            effective_seq,
+        );
+        (message, is_finished)
     });
     let (mut sender, mut receiver) = socket.split();
     tokio::spawn(async move { while let Some(Ok(_)) = receiver.next().await {} });
     while let Some(item) = stream.next().await {
         match item {
-            Ok(msg) => {
+            Ok((msg, is_finished)) => {
                 if sender.send(msg).await.is_err() {
+                    break;
+                }
+                if is_finished {
                     break;
                 }
             }

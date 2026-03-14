@@ -5,6 +5,7 @@ use std::{
 
 use axum::response::sse::Event;
 use futures::{StreamExt, TryStreamExt, future};
+use json_patch::Patch;
 use tokio::{sync::broadcast, task::JoinHandle};
 use tokio_stream::wrappers::BroadcastStream;
 
@@ -25,10 +26,18 @@ struct Inner {
     total_bytes: usize,
 }
 
-#[derive(Debug)]
+type PatchInterceptor = Arc<dyn Fn(&Patch) -> bool + Send + Sync>;
+
 pub struct MsgStore {
     inner: RwLock<Inner>,
     sender: broadcast::Sender<LogMsg>,
+    patch_interceptor: RwLock<Option<PatchInterceptor>>,
+}
+
+impl std::fmt::Debug for MsgStore {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MsgStore").finish_non_exhaustive()
+    }
 }
 
 impl Default for MsgStore {
@@ -46,6 +55,7 @@ impl MsgStore {
                 total_bytes: 0,
             }),
             sender,
+            patch_interceptor: RwLock::new(None),
         }
     }
 
@@ -74,7 +84,23 @@ impl MsgStore {
         self.push(LogMsg::Stderr(s.into()));
     }
     pub fn push_patch(&self, patch: json_patch::Patch) {
+        if self
+            .patch_interceptor
+            .read()
+            .unwrap()
+            .as_ref()
+            .is_some_and(|interceptor| interceptor(&patch))
+        {
+            return;
+        }
         self.push(LogMsg::JsonPatch(patch));
+    }
+
+    pub fn set_patch_interceptor(
+        &self,
+        interceptor: Option<Arc<dyn Fn(&Patch) -> bool + Send + Sync>>,
+    ) {
+        *self.patch_interceptor.write().unwrap() = interceptor;
     }
 
     pub fn push_session_id(&self, session_id: String) {

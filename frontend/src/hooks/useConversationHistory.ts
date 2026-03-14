@@ -12,6 +12,10 @@ import {
 import { useExecutionProcessesContext } from '@/contexts/ExecutionProcessesContext';
 import { useCallback, useEffect, useMemo, useRef } from 'react';
 import { streamJsonPatchEntries } from '@/utils/streamJsonPatchEntries';
+import {
+  type IndexedNormalizedEntry,
+  streamNormalizedLogEvents,
+} from '@/utils/streamNormalizedLogEvents';
 
 export type PatchTypeWithKey = PatchType & {
   patchKey: string;
@@ -51,6 +55,7 @@ const MIN_INITIAL_ENTRIES = 10;
 const REMAINING_BATCH_SIZE = 50;
 const HISTORIC_LOG_PAGE_LIMIT = 400;
 const MAX_HISTORIC_LOG_PAGES = 200;
+const MAX_SAFE_CURSOR = Number.MAX_SAFE_INTEGER;
 class StreamCancelledError extends Error {
   constructor() {
     super('stream-cancelled');
@@ -100,6 +105,12 @@ const nextActionPatch: (
   patchKey: 'next_action',
   executionProcessId: '',
 });
+
+const normalizedEntriesToPatches = (entries: NormalizedEntry[]): PatchType[] =>
+  entries.map((entry) => ({
+    type: 'NORMALIZED_ENTRY',
+    content: entry,
+  }));
 
 export const useConversationHistory = ({
   attempt,
@@ -184,11 +195,17 @@ export const useConversationHistory = ({
   const buildLogStreamUrl = useCallback(
     (
       executionProcess: ExecutionProcess,
-      afterSeq?: number
+      opts: { afterSeq?: number; beforeSeq?: number } = {}
     ): { url: string; supportsCursor: boolean } => {
+      const { afterSeq, beforeSeq } = opts;
       if (executionProcess.executor_action.typ.type === 'ScriptRequest') {
+        const params = new URLSearchParams();
+        params.set('limit', String(HISTORIC_LOG_PAGE_LIMIT));
+        if (afterSeq !== undefined) {
+          params.set('after_seq', String(afterSeq));
+        }
         return {
-          url: `/api/execution-processes/${executionProcess.id}/raw-logs/ws`,
+          url: `/api/execution-processes/${executionProcess.id}/raw-logs/ws?${params.toString()}`,
           supportsCursor: false,
         };
       }
@@ -197,6 +214,9 @@ export const useConversationHistory = ({
       params.set('limit', String(HISTORIC_LOG_PAGE_LIMIT));
       if (afterSeq !== undefined) {
         params.set('after_seq', String(afterSeq));
+      }
+      if (beforeSeq !== undefined) {
+        params.set('before_seq', String(beforeSeq));
       }
 
       return {
@@ -224,7 +244,10 @@ export const useConversationHistory = ({
       }
 
       let accumulatedEntries: PatchType[] = [];
+      let accumulatedIndexedEntries: IndexedNormalizedEntry[] = [];
+      let accumulatedResolvedIndexes: number[] = [];
       let afterSeq: number | undefined;
+      let beforeSeq: number | undefined;
 
       for (let page = 0; page < MAX_HISTORIC_LOG_PAGES; page++) {
         if (!isGenerationCurrent(generation)) {
@@ -233,33 +256,86 @@ export const useConversationHistory = ({
 
         const { url, supportsCursor } = buildLogStreamUrl(
           executionProcess,
-          afterSeq
+          executionProcess.executor_action.typ.type === 'ScriptRequest'
+            ? { afterSeq }
+            : { beforeSeq: beforeSeq ?? MAX_SAFE_CURSOR }
         );
+        const isScriptStream =
+          executionProcess.executor_action.typ.type === 'ScriptRequest';
         const initialEntries = accumulatedEntries;
+        const initialIndexedEntries = accumulatedIndexedEntries;
+        const initialResolvedIndexes = accumulatedResolvedIndexes;
         const pageResult = await new Promise<{
           entries: PatchType[];
           lastSeq?: number;
+          indexedEntries?: IndexedNormalizedEntry[];
+          resolvedIndexes?: number[];
         }>((resolve) => {
           let settled = false;
           let unregisterCancel: () => void = () => {};
 
-          const settle = (entries: PatchType[], lastSeq?: number) => {
+          const settle = (
+            entries: PatchType[],
+            lastSeq?: number,
+            indexedEntries?: IndexedNormalizedEntry[],
+            resolvedIndexes?: number[]
+          ) => {
             if (settled) return;
             settled = true;
             unregisterCancel();
-            resolve({ entries, lastSeq });
+            resolve({ entries, lastSeq, indexedEntries, resolvedIndexes });
           };
 
-          const controller = streamJsonPatchEntries<PatchType>(url, {
-            initial: {
-              entries: initialEntries,
-            },
-            onFinished: (allEntries, meta) => {
+          if (isScriptStream) {
+            const controller = streamJsonPatchEntries<PatchType>(url, {
+              initial: {
+                entries: initialEntries,
+              },
+              onFinished: (allEntries, meta) => {
+                if (!isGenerationCurrent(generation)) {
+                  settle([], meta.lastSeq);
+                  return;
+                }
+                settle(allEntries, meta.lastSeq);
+              },
+              onError: (err) => {
+                if (!isGenerationCurrent(generation)) {
+                  controller.close();
+                  settle([], controller.getLastSeq());
+                  return;
+                }
+                console.warn(
+                  `Error loading entries for historic execution process ${executionProcess.id}`,
+                  err
+                );
+                controller.close();
+                settle(initialEntries, controller.getLastSeq());
+              },
+              onClose: () => {
+                settle(initialEntries);
+              },
+            });
+
+            unregisterCancel = registerActiveStreamCancel(
+              executionProcess.id,
+              () => controller.close()
+            );
+            return;
+          }
+
+          const controller = streamNormalizedLogEvents(url, {
+            initialIndexedEntries,
+            onFinished: (normalizedEntries, meta) => {
               if (!isGenerationCurrent(generation)) {
                 settle([], meta.lastSeq);
                 return;
               }
-              settle(allEntries, meta.lastSeq);
+              settle(
+                normalizedEntriesToPatches(normalizedEntries),
+                meta.lastSeq,
+                meta.indexedEntries,
+                meta.resolvedIndexes
+              );
             },
             onError: (err) => {
               if (!isGenerationCurrent(generation)) {
@@ -267,16 +343,28 @@ export const useConversationHistory = ({
                 settle([], controller.getLastSeq());
                 return;
               }
-              console.warn!(
+              console.warn(
                 `Error loading entries for historic execution process ${executionProcess.id}`,
                 err
               );
               controller.close();
-              settle(initialEntries, controller.getLastSeq());
+              settle(
+                initialEntries,
+                controller.getLastSeq(),
+                initialIndexedEntries,
+                initialResolvedIndexes
+              );
             },
             onClose: () => {
-              settle(initialEntries);
+              settle(
+                initialEntries,
+                undefined,
+                initialIndexedEntries,
+                initialResolvedIndexes
+              );
             },
+            initialResolvedIndexes,
+            applyMode: 'last_write_wins',
           });
 
           unregisterCancel = registerActiveStreamCancel(
@@ -290,15 +378,25 @@ export const useConversationHistory = ({
         }
 
         accumulatedEntries = pageResult.entries;
+        accumulatedIndexedEntries =
+          pageResult.indexedEntries ?? accumulatedIndexedEntries;
+        accumulatedResolvedIndexes =
+          pageResult.resolvedIndexes ?? accumulatedResolvedIndexes;
 
         if (!supportsCursor || pageResult.lastSeq === undefined) {
           break;
         }
-        if (afterSeq !== undefined && pageResult.lastSeq <= afterSeq) {
+        if (isScriptStream) {
+          if (afterSeq !== undefined && pageResult.lastSeq <= afterSeq) {
+            break;
+          }
+          afterSeq = pageResult.lastSeq;
+          continue;
+        }
+        if (beforeSeq !== undefined && pageResult.lastSeq >= beforeSeq) {
           break;
         }
-
-        afterSeq = pageResult.lastSeq;
+        beforeSeq = pageResult.lastSeq;
       }
 
       return accumulatedEntries;
@@ -624,54 +722,88 @@ export const useConversationHistory = ({
           reject(error);
         };
 
-        const controller = streamJsonPatchEntries<PatchType>(url, {
-          onEntries(entries) {
+        const applyEntries = (entries: PatchType[]) => {
+          const patchesWithKey = entries.map((entry, index) =>
+            patchWithKey(entry, executionProcess.id, index)
+          );
+          let shouldEmit = true;
+          mergeIntoDisplayed((state) => {
+            const previousEntries = state[executionProcess.id]?.entries ?? [];
+            if (patchesWithKey.length === 0 && previousEntries.length > 0) {
+              shouldEmit = false;
+              return;
+            }
+            state[executionProcess.id] = {
+              executionProcess,
+              entries: patchesWithKey,
+            };
+          });
+          if (shouldEmit) {
+            emitEntries(displayedExecutionProcesses.current, 'running', false);
+          }
+        };
+
+        if (executionProcess.executor_action.typ.type === 'ScriptRequest') {
+          const controller = streamJsonPatchEntries<PatchType>(url, {
+            onEntries(entries) {
+              if (!isGenerationCurrent(generation)) {
+                controller.close();
+                return;
+              }
+              applyEntries(entries);
+            },
+            onFinished: (entries) => {
+              if (!isGenerationCurrent(generation)) {
+                settleReject(new StreamCancelledError());
+                return;
+              }
+              applyEntries(entries);
+              settleResolve();
+            },
+            onError: (error) => {
+              if (!isGenerationCurrent(generation)) {
+                controller.close();
+                settleReject(new StreamCancelledError());
+                return;
+              }
+              controller.close();
+              settleReject(error);
+            },
+            onClose: () => {
+              if (settled) return;
+              if (!isGenerationCurrent(generation)) {
+                settleReject(new StreamCancelledError());
+                return;
+              }
+              settleReject(
+                new Error(
+                  `Stream closed before completion for execution process ${executionProcess.id}`
+                )
+              );
+            },
+          });
+
+          unregisterCancel = registerActiveStreamCancel(
+            executionProcess.id,
+            () => controller.close()
+          );
+          return;
+        }
+
+        const controller = streamNormalizedLogEvents(url, {
+          onEntries(normalizedEntries) {
             if (!isGenerationCurrent(generation)) {
               controller.close();
               return;
             }
-
-            const patchesWithKey = entries.map((entry, index) =>
-              patchWithKey(entry, executionProcess.id, index)
-            );
-            let shouldEmit = true;
-            mergeIntoDisplayed((state) => {
-              const previousEntries = state[executionProcess.id]?.entries ?? [];
-              if (patchesWithKey.length === 0 && previousEntries.length > 0) {
-                // Keep already-rendered history if the live stream briefly
-                // reconnects and reports an empty snapshot.
-                shouldEmit = false;
-                return;
-              }
-              state[executionProcess.id] = {
-                executionProcess,
-                entries: patchesWithKey,
-              };
-            });
-            if (shouldEmit) {
-              emitEntries(
-                displayedExecutionProcesses.current,
-                'running',
-                false
-              );
-            }
+            applyEntries(normalizedEntriesToPatches(normalizedEntries));
           },
-          onFinished: (entries) => {
+          onFinished: (normalizedEntries) => {
             if (!isGenerationCurrent(generation)) {
               settleReject(new StreamCancelledError());
               return;
             }
-
-            const patchesWithKey = entries.map((entry, index) =>
-              patchWithKey(entry, executionProcess.id, index)
-            );
-            mergeIntoDisplayed((state) => {
-              state[executionProcess.id] = {
-                executionProcess,
-                entries: patchesWithKey,
-              };
-            });
-            emitEntries(displayedExecutionProcesses.current, 'running', false);
+            applyEntries(normalizedEntriesToPatches(normalizedEntries));
             settleResolve();
           },
           onError: (error) => {

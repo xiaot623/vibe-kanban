@@ -295,7 +295,11 @@ impl StandardCodingAgentExecutor for ClaudeCode {
         }
     }
 
-    fn normalize_logs(&self, msg_store: Arc<MsgStore>, current_dir: &Path) {
+    fn normalize_logs(
+        &self,
+        msg_store: Arc<MsgStore>,
+        current_dir: &Path,
+    ) {
         let entry_index_provider = EntryIndexProvider::start_from(&msg_store);
 
         // Process stdout logs (Claude's JSON output)
@@ -2352,6 +2356,11 @@ mod tests {
 
         use workspace_utils::msg_store::MsgStore;
 
+        struct NoopSink;
+        impl crate::logs::NormalizedEventSink for NoopSink {
+            fn emit(&self, _event: crate::logs::NormalizedLogEvent) {}
+        }
+
         let executor = ClaudeCode {
             claude_code_router: Some(false),
             plan: None,
@@ -2378,7 +2387,7 @@ mod tests {
         msg_store.push_finished();
 
         // Start normalization (this spawns async task)
-        executor.normalize_logs(msg_store.clone(), &current_dir);
+        executor.normalize_logs(msg_store.clone(), Arc::new(NoopSink), &current_dir);
 
         // Give some time for async processing
         tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;

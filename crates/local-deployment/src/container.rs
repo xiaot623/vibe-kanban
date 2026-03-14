@@ -35,9 +35,7 @@ use executors::{
     approvals::{ExecutorApprovalService, NoopExecutorApprovalService},
     env::{ExecutionEnv, RepoContext},
     executors::{BaseCodingAgent, ExecutorExitResult, ExecutorExitSignal, InterruptSender},
-    logs::{
-        NormalizedEntry, NormalizedEntryType, utils::patch::extract_normalized_entry_from_patch,
-    },
+    logs::{NormalizedEntry, NormalizedEntryType},
     profile::ExecutorProfileId,
 };
 use futures::{FutureExt, TryStreamExt, stream::select};
@@ -49,6 +47,7 @@ use services::services::{
     container::{ContainerError, ContainerRef, ContainerService},
     context_archive,
     diff_stream::{self, DiffStreamHandle},
+    execution_log_hub::ExecutionLogHub,
     git::{GitCli, GitService},
     image::ImageService,
     notification::NotificationService,
@@ -72,6 +71,7 @@ pub struct LocalContainerService {
     child_store: Arc<RwLock<HashMap<Uuid, Arc<RwLock<AsyncGroupChild>>>>>,
     interrupt_senders: Arc<RwLock<HashMap<Uuid, InterruptSender>>>,
     msg_stores: Arc<RwLock<HashMap<Uuid, Arc<MsgStore>>>>,
+    execution_log_hubs: Arc<RwLock<HashMap<Uuid, Arc<ExecutionLogHub>>>>,
     config: Arc<RwLock<Config>>,
     git: GitService,
     image_service: ImageService,
@@ -86,6 +86,7 @@ impl LocalContainerService {
     pub async fn new(
         db: DBService,
         msg_stores: Arc<RwLock<HashMap<Uuid, Arc<MsgStore>>>>,
+        execution_log_hubs: Arc<RwLock<HashMap<Uuid, Arc<ExecutionLogHub>>>>,
         config: Arc<RwLock<Config>>,
         git: GitService,
         image_service: ImageService,
@@ -103,6 +104,7 @@ impl LocalContainerService {
             child_store,
             interrupt_senders,
             msg_stores,
+            execution_log_hubs,
             config,
             git,
             image_service,
@@ -391,6 +393,7 @@ impl LocalContainerService {
         let exec_id = *exec_id;
         let child_store = self.child_store.clone();
         let msg_stores = self.msg_stores.clone();
+        let execution_log_hubs = self.execution_log_hubs.clone();
         let db = self.db.clone();
         let config = self.config.clone();
         let container = self.clone();
@@ -604,17 +607,21 @@ impl LocalContainerService {
             // capture the HEAD OID as the definitive "after" state (best-effort).
             container.update_after_head_commits(exec_id).await;
 
-            // Cleanup msg store
-            if let Some(msg_arc) = msg_stores.write().await.remove(&exec_id) {
+            // Cleanup execution log hub + raw msg store
+            if let Some(hub) = execution_log_hubs.write().await.remove(&exec_id) {
+                hub.push_finished();
+            } else if let Some(msg_arc) = msg_stores.read().await.get(&exec_id).cloned() {
                 msg_arc.push_finished();
-                tokio::time::sleep(Duration::from_millis(50)).await; // Wait for the finish message to propogate
-                match Arc::try_unwrap(msg_arc) {
-                    Ok(inner) => drop(inner),
-                    Err(arc) => tracing::error!(
+            }
+
+            if let Some(msg_arc) = msg_stores.write().await.remove(&exec_id) {
+                tokio::time::sleep(Duration::from_millis(50)).await;
+                if let Err(arc) = Arc::try_unwrap(msg_arc) {
+                    tracing::error!(
                         "There are still {} strong Arcs to MsgStore for {}",
                         Arc::strong_count(&arc),
                         exec_id
-                    ),
+                    );
                 }
             }
 
@@ -667,6 +674,7 @@ impl LocalContainerService {
 
     async fn track_child_msgs_in_store(&self, id: Uuid, child: &mut AsyncGroupChild) {
         let store = Arc::new(MsgStore::new());
+        let hub = ExecutionLogHub::new(store.clone());
 
         let out = child.inner().stdout.take().expect("no stdout");
         let err = child.inner().stderr.take().expect("no stderr");
@@ -685,8 +693,8 @@ impl LocalContainerService {
         let merged = select(out, err); // Stream<Item = Result<LogMsg, io::Error>>
         store.clone().spawn_forwarder(merged);
 
-        let mut map = self.msg_stores().write().await;
-        map.insert(id, store);
+        self.msg_stores().write().await.insert(id, store);
+        self.execution_log_hubs.write().await.insert(id, hub);
     }
 
     /// Create a live diff log stream for ongoing attempts for WebSocket
@@ -701,21 +709,23 @@ impl LocalContainerService {
     }
 
     fn collect_normalized_entries(&self, exec_id: &Uuid) -> Vec<NormalizedEntry> {
-        let Ok(msg_stores) = self.msg_stores.try_read() else {
+        let Ok(hubs) = self.execution_log_hubs.try_read() else {
             return Vec::new();
         };
-        let Some(msg_store) = msg_stores.get(exec_id) else {
+        let Some(hub) = hubs.get(exec_id) else {
             return Vec::new();
         };
 
-        // Build a stable final snapshot by upserting latest entry per index.
-        let history = msg_store.get_history();
         let mut entries = BTreeMap::new();
-        for msg in &history {
-            if let LogMsg::JsonPatch(patch) = msg
-                && let Some((idx, entry)) = extract_normalized_entry_from_patch(patch)
-            {
-                entries.insert(idx, entry);
+        for event in hub.normalized_history() {
+            match event {
+                executors::logs::NormalizedLogEvent::UpsertEntry { index, entry } => {
+                    entries.insert(index, entry);
+                }
+                executors::logs::NormalizedLogEvent::RemoveEntry { index } => {
+                    entries.remove(&index);
+                }
+                executors::logs::NormalizedLogEvent::Finished => {}
             }
         }
 
@@ -1008,6 +1018,10 @@ fn failure_exit_status() -> std::process::ExitStatus {
 impl ContainerService for LocalContainerService {
     fn msg_stores(&self) -> &Arc<RwLock<HashMap<Uuid, Arc<MsgStore>>>> {
         &self.msg_stores
+    }
+
+    fn execution_log_hubs(&self) -> &Arc<RwLock<HashMap<Uuid, Arc<ExecutionLogHub>>>> {
+        &self.execution_log_hubs
     }
 
     fn db(&self) -> &DBService {
@@ -1329,10 +1343,15 @@ impl ContainerService for LocalContainerService {
         }
         self.remove_child_from_store(&execution_process.id).await;
 
-        // Mark the process finished in the MsgStore
-        if let Some(msg) = self.msg_stores.write().await.remove(&execution_process.id) {
-            msg.push_finished();
+        if let Some(hub) = self
+            .execution_log_hubs
+            .write()
+            .await
+            .remove(&execution_process.id)
+        {
+            hub.push_finished();
         }
+        self.msg_stores.write().await.remove(&execution_process.id);
 
         // Update task status to InReview when execution is stopped
         if let Ok(ctx) = ExecutionProcess::load_context(&self.db.pool, execution_process.id).await

@@ -3,9 +3,15 @@ use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 use workspace_utils::approvals::ApprovalStatus;
 
+pub mod normalized_event;
 pub mod plain_text_processor;
 pub mod stderr_processor;
 pub mod utils;
+
+pub use normalized_event::{
+    MSG_TYPE_NORMALIZED_FINISHED, MSG_TYPE_NORMALIZED_REMOVE, MSG_TYPE_NORMALIZED_UPSERT,
+    NormalizedEventSink, NormalizedEventStream, NormalizedLogEvent,
+};
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[serde(tag = "type", rename_all = "snake_case")]

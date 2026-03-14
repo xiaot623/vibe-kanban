@@ -244,7 +244,11 @@ impl StandardCodingAgentExecutor for Pi {
         .await
     }
 
-    fn normalize_logs(&self, msg_store: Arc<MsgStore>, worktree_path: &Path) {
+    fn normalize_logs(
+        &self,
+        msg_store: Arc<MsgStore>,
+        worktree_path: &Path,
+    ) {
         normalize_logs(msg_store, worktree_path);
     }
 

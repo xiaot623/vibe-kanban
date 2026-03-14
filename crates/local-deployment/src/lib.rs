@@ -11,6 +11,7 @@ use services::services::{
     config::{Config, load_config_from_file, save_config_to_file},
     container::ContainerService,
     events::EventService,
+    execution_log_hub::ExecutionLogHub,
     file_search::FileSearchCache,
     filesystem::FilesystemService,
     git::GitService,
@@ -107,6 +108,8 @@ impl Deployment for LocalDeployment {
         let project = ProjectService::new();
         let repo = RepoService::new();
         let msg_stores = Arc::new(RwLock::new(HashMap::new()));
+        let execution_log_hubs: Arc<RwLock<HashMap<Uuid, Arc<ExecutionLogHub>>>> =
+            Arc::new(RwLock::new(HashMap::new()));
         let filesystem = FilesystemService::new();
 
         // Create shared components for EventService
@@ -156,6 +159,7 @@ impl Deployment for LocalDeployment {
         let container = LocalContainerService::new(
             db.clone(),
             msg_stores.clone(),
+            execution_log_hubs.clone(),
             config.clone(),
             git.clone(),
             image.clone(),

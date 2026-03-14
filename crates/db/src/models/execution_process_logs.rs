@@ -63,10 +63,18 @@ impl ExecutionProcessLogs {
         pool: &SqlitePool,
         execution_id: Uuid,
         after_seq: Option<i64>,
+        before_seq: Option<i64>,
         limit: u32,
     ) -> Result<Vec<SequencedExecutionProcessLog>, sqlx::Error> {
-        Self::find_by_execution_id_with_cursor_and_type(pool, execution_id, after_seq, limit, None)
-            .await
+        Self::find_by_execution_id_with_cursor_and_type(
+            pool,
+            execution_id,
+            after_seq,
+            before_seq,
+            limit,
+            None,
+        )
+        .await
     }
 
     /// Find logs for one message type with optional rowid cursor.
@@ -74,6 +82,7 @@ impl ExecutionProcessLogs {
         pool: &SqlitePool,
         execution_id: Uuid,
         after_seq: Option<i64>,
+        before_seq: Option<i64>,
         limit: u32,
         msg_type: Option<&str>,
     ) -> Result<Vec<SequencedExecutionProcessLog>, sqlx::Error> {
@@ -97,9 +106,68 @@ impl ExecutionProcessLogs {
         if let Some(after_seq) = after_seq {
             qb.push(" AND rowid > ");
             qb.push_bind(after_seq);
+            qb.push(" ORDER BY rowid ASC LIMIT ");
+            qb.push_bind(i64::from(limit.max(1)));
+        } else if let Some(before_seq) = before_seq {
+            qb.push(" AND rowid < ");
+            qb.push_bind(before_seq);
+            qb.push(" ORDER BY rowid DESC LIMIT ");
+            qb.push_bind(i64::from(limit.max(1)));
+        } else {
+            qb.push(" ORDER BY rowid ASC LIMIT ");
+            qb.push_bind(i64::from(limit.max(1)));
         }
-        qb.push(" ORDER BY rowid ASC LIMIT ");
-        qb.push_bind(i64::from(limit.max(1)));
+
+        qb.build_query_as::<SequencedExecutionProcessLog>()
+            .fetch_all(pool)
+            .await
+    }
+
+    /// Find logs for multiple message types with optional rowid cursor.
+    pub async fn find_by_execution_id_with_cursor_and_types(
+        pool: &SqlitePool,
+        execution_id: Uuid,
+        after_seq: Option<i64>,
+        before_seq: Option<i64>,
+        limit: u32,
+        msg_types: &[&str],
+    ) -> Result<Vec<SequencedExecutionProcessLog>, sqlx::Error> {
+        let mut qb = QueryBuilder::<Sqlite>::new(
+            r#"SELECT
+                rowid as seq,
+                execution_id,
+                logs,
+                msg_type,
+                byte_size,
+                inserted_at
+               FROM execution_process_logs
+               WHERE execution_id = "#,
+        );
+        qb.push_bind(execution_id);
+
+        if !msg_types.is_empty() {
+            qb.push(" AND msg_type IN (");
+            let mut separated = qb.separated(", ");
+            for msg_type in msg_types {
+                separated.push_bind(msg_type);
+            }
+            separated.push_unseparated(")");
+        }
+
+        if let Some(after_seq) = after_seq {
+            qb.push(" AND rowid > ");
+            qb.push_bind(after_seq);
+            qb.push(" ORDER BY rowid ASC LIMIT ");
+            qb.push_bind(i64::from(limit.max(1)));
+        } else if let Some(before_seq) = before_seq {
+            qb.push(" AND rowid < ");
+            qb.push_bind(before_seq);
+            qb.push(" ORDER BY rowid DESC LIMIT ");
+            qb.push_bind(i64::from(limit.max(1)));
+        } else {
+            qb.push(" ORDER BY rowid ASC LIMIT ");
+            qb.push_bind(i64::from(limit.max(1)));
+        }
 
         qb.build_query_as::<SequencedExecutionProcessLog>()
             .fetch_all(pool)
@@ -134,8 +202,12 @@ impl ExecutionProcessLogs {
         let mut messages = Vec::new();
         for line in records.iter().flat_map(|record| record.logs.lines()) {
             if !line.trim().is_empty() {
-                let msg: LogMsg = serde_json::from_str(line)?;
-                messages.push(msg);
+                match serde_json::from_str::<LogMsg>(line) {
+                    Ok(msg) => messages.push(msg),
+                    Err(err) => {
+                        tracing::debug!("Skipping non-LogMsg execution log line: {}", err);
+                    }
+                }
             }
         }
         Ok(messages)
@@ -149,11 +221,19 @@ impl ExecutionProcessLogs {
         for record in records {
             for line in record.logs.lines() {
                 if !line.trim().is_empty() {
-                    let msg: LogMsg = serde_json::from_str(line)?;
-                    messages.push(SequencedLogMsg {
-                        seq: record.seq,
-                        msg,
-                    });
+                    match serde_json::from_str::<LogMsg>(line) {
+                        Ok(msg) => messages.push(SequencedLogMsg {
+                            seq: record.seq,
+                            msg,
+                        }),
+                        Err(err) => {
+                            tracing::debug!(
+                                "Skipping non-LogMsg execution log row {}: {}",
+                                record.seq,
+                                err
+                            );
+                        }
+                    }
                 }
             }
         }

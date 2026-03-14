@@ -533,6 +533,8 @@ export type ToolResultValueType = { "type": "markdown" } | { "type": "json" };
 
 export type ToolStatus = { "status": "created" } | { "status": "success" } | { "status": "failed" } | { "status": "denied", reason: string | null, } | { "status": "pending_approval", approval_id: string, requested_at: string, timeout_at: string, } | { "status": "timed_out" };
 
+export type NormalizedLogEvent = { "type": "upsert_entry", index: number, entry: NormalizedEntry, } | { "type": "remove_entry", index: number, } | { "type": "finished" };
+
 export type PatchType = { "type": "NORMALIZED_ENTRY", "content": NormalizedEntry } | { "type": "STDOUT", "content": string } | { "type": "STDERR", "content": string } | { "type": "DIFF", "content": Diff };
 
 export type JsonValue = number | string | boolean | Array<JsonValue> | { [key in string]?: JsonValue } | null;

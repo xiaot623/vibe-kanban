@@ -1,12 +1,12 @@
 use std::sync::Arc;
 
-use json_patch::Patch;
+use json_patch::{Patch, PatchOperation as JsonPatchOperation};
 use serde::{Deserialize, Serialize};
 use serde_json::{from_value, json, to_value};
 use ts_rs::TS;
 use workspace_utils::{diff::Diff, msg_store::MsgStore};
 
-use crate::logs::{NormalizedEntry, utils::EntryIndexProvider};
+use crate::logs::{NormalizedEntry, NormalizedLogEvent, utils::EntryIndexProvider};
 
 #[derive(Deserialize, Serialize, Debug, Clone, PartialEq, Eq, TS)]
 #[serde(rename_all = "lowercase")]
@@ -17,7 +17,7 @@ enum PatchOperation {
 }
 
 #[allow(clippy::large_enum_variant)]
-#[derive(Serialize, TS)]
+#[derive(Deserialize, Serialize, TS)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE", tag = "type", content = "content")]
 pub enum PatchType {
     NormalizedEntry(NormalizedEntry),
@@ -140,6 +140,63 @@ pub fn extract_normalized_entry_from_patch(patch: &Patch) -> Option<(usize, Norm
             .and_then(|c| from_value::<NormalizedEntry>(c.clone()).ok())
             .map(|entry| (entry_index, entry))
     })
+}
+
+/// Convert a json patch into typed normalized events.
+/// Returns `None` when the patch contains no normalized-entry operations at all.
+/// Non-normalized operations (e.g. Stdout/Stderr adds) are silently skipped so
+/// that mixed patches do not swallow the normalized events they contain.
+pub fn extract_normalized_events_from_patch(patch: &Patch) -> Option<Vec<NormalizedLogEvent>> {
+    let mut events = Vec::new();
+
+    for op in &patch.0 {
+        match op {
+            JsonPatchOperation::Add(add) => {
+                let Some(index) = add
+                    .path
+                    .strip_prefix("/entries/")
+                    .and_then(|s| s.parse::<usize>().ok())
+                else {
+                    continue;
+                };
+                let Ok(patch_type) = from_value::<PatchType>(add.value.clone()) else {
+                    continue;
+                };
+                if let PatchType::NormalizedEntry(entry) = patch_type {
+                    events.push(NormalizedLogEvent::UpsertEntry { index, entry });
+                }
+                // Non-normalized adds (Stdout/Stderr/Diff) are intentionally skipped.
+            }
+            JsonPatchOperation::Replace(replace) => {
+                let Some(index) = replace
+                    .path
+                    .strip_prefix("/entries/")
+                    .and_then(|s| s.parse::<usize>().ok())
+                else {
+                    continue;
+                };
+                let Ok(patch_type) = from_value::<PatchType>(replace.value.clone()) else {
+                    continue;
+                };
+                if let PatchType::NormalizedEntry(entry) = patch_type {
+                    events.push(NormalizedLogEvent::UpsertEntry { index, entry });
+                }
+            }
+            JsonPatchOperation::Remove(remove) => {
+                let Some(index) = remove
+                    .path
+                    .strip_prefix("/entries/")
+                    .and_then(|s| s.parse::<usize>().ok())
+                else {
+                    continue;
+                };
+                events.push(NormalizedLogEvent::RemoveEntry { index });
+            }
+            _ => {}
+        }
+    }
+
+    (!events.is_empty()).then_some(events)
 }
 
 pub fn upsert_normalized_entry(

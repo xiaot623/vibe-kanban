@@ -192,6 +192,7 @@ fn generate_types_content() -> String {
         executors::logs::ToolResult::decl(),
         executors::logs::ToolResultValueType::decl(),
         executors::logs::ToolStatus::decl(),
+        executors::logs::NormalizedLogEvent::decl(),
         executors::logs::utils::patch::PatchType::decl(),
         serde_json::Value::decl(),
     ];

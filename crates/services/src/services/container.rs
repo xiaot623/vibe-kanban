@@ -36,7 +36,11 @@ use executors::{
         script::{ScriptContext, ScriptRequest, ScriptRequestLanguage},
     },
     executors::{ExecutorError, StandardCodingAgentExecutor},
-    logs::{NormalizedEntry, NormalizedEntryError, NormalizedEntryType, utils::ConversationPatch},
+    logs::{
+        MSG_TYPE_NORMALIZED_FINISHED, MSG_TYPE_NORMALIZED_REMOVE, MSG_TYPE_NORMALIZED_UPSERT,
+        NormalizedEntry, NormalizedEntryError, NormalizedEntryType, NormalizedLogEvent,
+        utils::patch::extract_normalized_events_from_patch,
+    },
     profile::ExecutorProfileId,
 };
 use futures::{StreamExt, TryStreamExt, future};
@@ -55,6 +59,7 @@ use utils::{
 use uuid::Uuid;
 
 use crate::services::{
+    execution_log_hub::ExecutionLogHub,
     git::{GitService, GitServiceError},
     notification::NotificationService,
     workspace_manager::WorkspaceError as WorkspaceManagerError,
@@ -92,6 +97,12 @@ pub struct StreamedLogMsg {
     pub seq: Option<i64>,
 }
 
+#[derive(Debug, Clone)]
+pub struct StreamedNormalizedLogEvent {
+    pub event: NormalizedLogEvent,
+    pub seq: Option<i64>,
+}
+
 const LOG_DB_FLUSH_MAX_BATCH: usize = 64;
 const LOG_DB_FLUSH_INTERVAL: Duration = Duration::from_millis(250);
 
@@ -119,6 +130,7 @@ async fn flush_execution_log_batch(
 #[async_trait]
 pub trait ContainerService {
     fn msg_stores(&self) -> &Arc<RwLock<HashMap<Uuid, Arc<MsgStore>>>>;
+    fn execution_log_hubs(&self) -> &Arc<RwLock<HashMap<Uuid, Arc<ExecutionLogHub>>>>;
 
     fn db(&self) -> &DBService;
 
@@ -566,6 +578,11 @@ pub trait ContainerService {
         map.get(uuid).cloned()
     }
 
+    async fn get_execution_log_hub_by_id(&self, uuid: &Uuid) -> Option<Arc<ExecutionLogHub>> {
+        let map = self.execution_log_hubs().read().await;
+        map.get(uuid).cloned()
+    }
+
     async fn git_branch_prefix(&self) -> String;
 
     async fn git_branch_from_workspace(&self, workspace_id: &Uuid, task_title: &str) -> String {
@@ -583,6 +600,7 @@ pub trait ContainerService {
         &self,
         id: &Uuid,
         after_seq: Option<i64>,
+        before_seq: Option<i64>,
         limit: u32,
     ) -> Option<futures::stream::BoxStream<'static, Result<StreamedLogMsg, std::io::Error>>> {
         if let Some(store) = self.get_msg_store_by_id(id).await {
@@ -605,6 +623,7 @@ pub trait ContainerService {
                 &self.db().pool,
                 *id,
                 after_seq,
+                before_seq,
                 limit,
             )
             .await
@@ -649,275 +668,373 @@ pub trait ContainerService {
         &self,
         id: &Uuid,
         after_seq: Option<i64>,
+        before_seq: Option<i64>,
         limit: u32,
-    ) -> Option<futures::stream::BoxStream<'static, Result<StreamedLogMsg, std::io::Error>>> {
-        // First try in-memory store (existing behavior)
-        if let Some(store) = self.get_msg_store_by_id(id).await {
-            Some(
-                store
-                    .history_plus_stream() // BoxStream<Result<LogMsg, io::Error>>
-                    .filter(|msg| future::ready(matches!(msg, Ok(LogMsg::JsonPatch(..)))))
-                    .map_ok(|msg| StreamedLogMsg { msg, seq: None })
-                    .chain(futures::stream::once(async {
-                        Ok::<_, std::io::Error>(StreamedLogMsg {
-                            msg: LogMsg::Finished,
-                            seq: None,
-                        })
-                    }))
+    ) -> Option<
+        futures::stream::BoxStream<'static, Result<StreamedNormalizedLogEvent, std::io::Error>>,
+    > {
+        if let Some(hub) = self.get_execution_log_hub_by_id(id).await {
+            return Some(
+                hub.normalized_history_plus_stream()
+                    .map_ok(|event| StreamedNormalizedLogEvent { event, seq: None })
                     .boxed(),
-            )
-        } else {
-            // Fast path for new data: read persisted JsonPatch rows directly.
-            let has_json_patch_logs = match ExecutionProcessLogs::has_logs_for_type(
+            );
+        }
+
+        let has_typed_normalized_logs = match tokio::try_join!(
+            ExecutionProcessLogs::has_logs_for_type(
                 &self.db().pool,
                 *id,
-                utils::log_msg::EV_JSON_PATCH,
+                MSG_TYPE_NORMALIZED_UPSERT
+            ),
+            ExecutionProcessLogs::has_logs_for_type(
+                &self.db().pool,
+                *id,
+                MSG_TYPE_NORMALIZED_REMOVE
+            ),
+            ExecutionProcessLogs::has_logs_for_type(
+                &self.db().pool,
+                *id,
+                MSG_TYPE_NORMALIZED_FINISHED
+            ),
+        ) {
+            Ok((has_upsert, has_remove, has_finished)) => has_upsert || has_remove || has_finished,
+            Err(e) => {
+                tracing::error!(
+                    "Failed to inspect normalized log types for execution {}: {}",
+                    id,
+                    e
+                );
+                return None;
+            }
+        };
+
+        if has_typed_normalized_logs {
+            let records = match ExecutionProcessLogs::find_by_execution_id_with_cursor_and_types(
+                &self.db().pool,
+                *id,
+                after_seq,
+                before_seq,
+                limit,
+                &[
+                    MSG_TYPE_NORMALIZED_UPSERT,
+                    MSG_TYPE_NORMALIZED_REMOVE,
+                    MSG_TYPE_NORMALIZED_FINISHED,
+                ],
             )
             .await
             {
-                Ok(value) => value,
+                Ok(records) => records,
                 Err(e) => {
-                    tracing::error!("Failed to inspect logs for execution {}: {}", id, e);
+                    tracing::error!(
+                        "Failed to fetch typed normalized logs for execution {}: {}",
+                        id,
+                        e
+                    );
                     return None;
                 }
             };
 
-            if has_json_patch_logs {
-                let records = match ExecutionProcessLogs::find_by_execution_id_with_cursor_and_type(
-                    &self.db().pool,
-                    *id,
-                    after_seq,
-                    limit,
-                    Some(utils::log_msg::EV_JSON_PATCH),
-                )
-                .await
+            let mut events = Vec::new();
+            for record in records {
+                for line in record.logs.lines() {
+                    if line.trim().is_empty() {
+                        continue;
+                    }
+                    match serde_json::from_str::<NormalizedLogEvent>(line) {
+                        Ok(NormalizedLogEvent::Finished) => {}
+                        Ok(event) => events.push(Ok(StreamedNormalizedLogEvent {
+                            event,
+                            seq: Some(record.seq),
+                        })),
+                        Err(err) => {
+                            tracing::warn!(
+                                "Skipping unparsable normalized log row {} for execution {}: {}",
+                                record.seq,
+                                id,
+                                err
+                            );
+                        }
+                    }
+                }
+            }
+
+            events.push(Ok(StreamedNormalizedLogEvent {
+                event: NormalizedLogEvent::Finished,
+                seq: None,
+            }));
+
+            return Some(futures::stream::iter(events).boxed());
+        }
+
+        let has_json_patch_logs = match ExecutionProcessLogs::has_logs_for_type(
+            &self.db().pool,
+            *id,
+            utils::log_msg::EV_JSON_PATCH,
+        )
+        .await
+        {
+            Ok(value) => value,
+            Err(e) => {
+                tracing::error!("Failed to inspect logs for execution {}: {}", id, e);
+                return None;
+            }
+        };
+
+        if has_json_patch_logs {
+            let records = match ExecutionProcessLogs::find_by_execution_id_with_cursor_and_type(
+                &self.db().pool,
+                *id,
+                after_seq,
+                before_seq,
+                limit,
+                Some(utils::log_msg::EV_JSON_PATCH),
+            )
+            .await
+            {
+                Ok(records) => records,
+                Err(e) => {
+                    tracing::error!(
+                        "Failed to fetch json_patch logs for execution {}: {}",
+                        id,
+                        e
+                    );
+                    return None;
+                }
+            };
+
+            let messages = match ExecutionProcessLogs::parse_logs_with_seq(&records) {
+                Ok(messages) => messages,
+                Err(e) => {
+                    tracing::error!(
+                        "Failed to parse json_patch logs for execution {}: {}",
+                        id,
+                        e
+                    );
+                    return None;
+                }
+            };
+
+            let mut converted = Vec::new();
+            let mut lazy_backfill = Vec::new();
+
+            for message in messages {
+                let LogMsg::JsonPatch(patch) = message.msg else {
+                    continue;
+                };
+                let Some(events) = extract_normalized_events_from_patch(&patch) else {
+                    continue;
+                };
+
+                for event in events {
+                    converted.push(Ok(StreamedNormalizedLogEvent {
+                        event: event.clone(),
+                        seq: Some(message.seq),
+                    }));
+                    if let Ok(json_line) = serde_json::to_string(&event) {
+                        lazy_backfill.push(NewExecutionProcessLog {
+                            logs: format!("{json_line}\n"),
+                            msg_type: Some(event.msg_type().to_string()),
+                        });
+                    }
+                }
+            }
+
+            if !converted.is_empty() && !lazy_backfill.is_empty() {
+                if let Err(err) =
+                    ExecutionProcessLogs::append_log_lines(&self.db().pool, *id, &lazy_backfill)
+                        .await
                 {
-                    Ok(records) => records,
-                    Err(e) => {
-                        tracing::error!(
-                            "Failed to fetch json_patch logs for execution {}: {}",
-                            id,
-                            e
-                        );
-                        return None;
-                    }
-                };
-
-                let stream_messages = match ExecutionProcessLogs::parse_logs_with_seq(&records) {
-                    Ok(messages) => messages
-                        .into_iter()
-                        .filter_map(|msg| match msg.msg {
-                            LogMsg::JsonPatch(patch) => Some(StreamedLogMsg {
-                                msg: LogMsg::JsonPatch(patch),
-                                seq: Some(msg.seq),
-                            }),
-                            _ => None,
-                        })
-                        .chain(std::iter::once(StreamedLogMsg {
-                            msg: LogMsg::Finished,
-                            seq: None,
-                        }))
-                        .map(Ok::<_, std::io::Error>)
-                        .collect::<Vec<_>>(),
-                    Err(e) => {
-                        tracing::error!(
-                            "Failed to parse json_patch logs for execution {}: {}",
-                            id,
-                            e
-                        );
-                        return None;
-                    }
-                };
-
-                return Some(futures::stream::iter(stream_messages).boxed());
+                    tracing::warn!(
+                        "Failed to lazily backfill typed normalized logs for execution {}: {}",
+                        id,
+                        err
+                    );
+                }
             }
 
-            // Fallback for old rows without msg_type=json_patch: rebuild + normalize.
-            let log_records =
-                match ExecutionProcessLogs::find_by_execution_id(&self.db().pool, *id).await {
-                    Ok(records) => records,
-                    Err(e) => {
-                        tracing::error!("Failed to fetch logs for execution {}: {}", id, e);
-                        return None;
-                    }
-                };
+            converted.push(Ok(StreamedNormalizedLogEvent {
+                event: NormalizedLogEvent::Finished,
+                seq: None,
+            }));
 
-            let raw_messages = match ExecutionProcessLogs::parse_logs(&log_records) {
-                Ok(msgs) => msgs,
+            return Some(futures::stream::iter(converted).boxed());
+        }
+
+        // Fallback for old rows without typed normalized logs: rebuild + normalize.
+        let log_records =
+            match ExecutionProcessLogs::find_by_execution_id(&self.db().pool, *id).await {
+                Ok(records) => records,
                 Err(e) => {
-                    tracing::error!("Failed to parse logs for execution {}: {}", id, e);
+                    tracing::error!("Failed to fetch logs for execution {}: {}", id, e);
                     return None;
                 }
             };
 
-            // Create temporary store and populate
-            // Include JsonPatch messages (already normalized) and Stdout/Stderr (need normalization)
-            let temp_store = Arc::new(MsgStore::new());
-            for msg in raw_messages {
-                if matches!(
-                    msg,
-                    LogMsg::Stdout(_) | LogMsg::Stderr(_) | LogMsg::JsonPatch(_)
-                ) {
-                    temp_store.push(msg);
-                }
+        let raw_messages = match ExecutionProcessLogs::parse_logs(&log_records) {
+            Ok(msgs) => msgs,
+            Err(e) => {
+                tracing::error!("Failed to parse logs for execution {}: {}", id, e);
+                return None;
             }
-            temp_store.push_finished();
+        };
 
-            let process = match ExecutionProcess::find_by_id(&self.db().pool, *id).await {
-                Ok(Some(process)) => process,
+        let temp_store = Arc::new(MsgStore::new());
+        let temp_hub = ExecutionLogHub::new(temp_store.clone());
+        for msg in raw_messages {
+            match msg {
+                LogMsg::Stdout(_) | LogMsg::Stderr(_) => temp_store.push(msg),
+                LogMsg::JsonPatch(patch) => temp_store.push_patch(patch),
+                _ => {}
+            }
+        }
+        temp_store.push_finished();
+
+        let process = match ExecutionProcess::find_by_id(&self.db().pool, *id).await {
+            Ok(Some(process)) => process,
+            Ok(None) => {
+                tracing::error!("No execution process found for ID: {}", id);
+                return None;
+            }
+            Err(e) => {
+                tracing::error!("Failed to fetch execution process {}: {}", id, e);
+                return None;
+            }
+        };
+
+        let (workspace, _session) =
+            match process.parent_workspace_and_session(&self.db().pool).await {
+                Ok(Some((workspace, session))) => (workspace, session),
                 Ok(None) => {
-                    tracing::error!("No execution process found for ID: {}", id);
+                    tracing::error!(
+                        "No workspace/session found for session ID: {}",
+                        process.session_id
+                    );
                     return None;
                 }
                 Err(e) => {
-                    tracing::error!("Failed to fetch execution process {}: {}", id, e);
+                    tracing::error!(
+                        "Failed to fetch workspace for session {}: {}",
+                        process.session_id,
+                        e
+                    );
                     return None;
                 }
             };
 
-            // Get the workspace to determine correct directory
-            let (workspace, _session) =
-                match process.parent_workspace_and_session(&self.db().pool).await {
-                    Ok(Some((workspace, session))) => (workspace, session),
-                    Ok(None) => {
-                        tracing::error!(
-                            "No workspace/session found for session ID: {}",
-                            process.session_id
-                        );
-                        return None;
-                    }
-                    Err(e) => {
-                        tracing::error!(
-                            "Failed to fetch workspace for session {}: {}",
-                            process.session_id,
-                            e
-                        );
-                        return None;
-                    }
-                };
+        if let Err(err) = self.ensure_container_exists(&workspace).await {
+            tracing::warn!(
+                "Failed to recreate worktree before log normalization for workspace {}: {}",
+                workspace.id,
+                err
+            );
+        }
 
-            if let Err(err) = self.ensure_container_exists(&workspace).await {
-                tracing::warn!(
-                    "Failed to recreate worktree before log normalization for workspace {}: {}",
-                    workspace.id,
-                    err
-                );
-            }
-
-            let current_dir = self.workspace_to_current_dir(&workspace);
-
-            let executor_action = if let Ok(executor_action) = process.executor_action() {
-                executor_action
-            } else {
+        let current_dir = self.workspace_to_current_dir(&workspace);
+        let executor_action = match process.executor_action() {
+            Ok(action) => action,
+            Err(_) => {
                 tracing::error!(
                     "Failed to parse executor action: {:?}",
                     process.executor_action()
                 );
                 return None;
-            };
+            }
+        };
 
-            // Spawn normalizer on populated store
-            match executor_action.typ() {
-                ExecutorActionType::CodingAgentInitialRequest(request) => {
-                    #[cfg(feature = "qa-mode")]
-                    {
-                        let executor = QaMockExecutor;
-                        executor.normalize_logs(
-                            temp_store.clone(),
-                            &request.effective_dir(&current_dir),
-                        );
-                    }
-                    #[cfg(not(feature = "qa-mode"))]
-                    {
-                        let executor = ExecutorConfigs::get_cached()
-                            .get_coding_agent_or_default(&request.executor_profile_id);
-                        executor.normalize_logs(
-                            temp_store.clone(),
-                            &request.effective_dir(&current_dir),
-                        );
-                    }
-                }
-                ExecutorActionType::CodingAgentFollowUpRequest(request) => {
-                    #[cfg(feature = "qa-mode")]
-                    {
-                        let executor = QaMockExecutor;
-                        executor.normalize_logs(
-                            temp_store.clone(),
-                            &request.effective_dir(&current_dir),
-                        );
-                    }
-                    #[cfg(not(feature = "qa-mode"))]
-                    {
-                        let executor = ExecutorConfigs::get_cached()
-                            .get_coding_agent_or_default(&request.executor_profile_id);
-                        executor.normalize_logs(
-                            temp_store.clone(),
-                            &request.effective_dir(&current_dir),
-                        );
-                    }
-                }
+        match executor_action.typ() {
+            ExecutorActionType::CodingAgentInitialRequest(request) => {
                 #[cfg(feature = "qa-mode")]
-                ExecutorActionType::ReviewRequest(_request) => {
+                {
                     let executor = QaMockExecutor;
-                    executor.normalize_logs(temp_store.clone(), &current_dir);
+                    executor
+                        .normalize_logs(temp_store.clone(), &request.effective_dir(&current_dir));
                 }
                 #[cfg(not(feature = "qa-mode"))]
-                ExecutorActionType::ReviewRequest(request) => {
+                {
                     let executor = ExecutorConfigs::get_cached()
                         .get_coding_agent_or_default(&request.executor_profile_id);
-                    executor.normalize_logs(temp_store.clone(), &current_dir);
-                }
-                _ => {
-                    tracing::debug!(
-                        "Executor action doesn't support log normalization: {:?}",
-                        process.executor_action()
-                    );
-                    return None;
+                    executor
+                        .normalize_logs(temp_store.clone(), &request.effective_dir(&current_dir));
                 }
             }
-            Some(
-                temp_store
-                    .history_plus_stream()
-                    .filter(|msg| future::ready(matches!(msg, Ok(LogMsg::JsonPatch(..)))))
-                    .map_ok(|msg| StreamedLogMsg { msg, seq: None })
-                    .chain(futures::stream::once(async {
-                        Ok::<_, std::io::Error>(StreamedLogMsg {
-                            msg: LogMsg::Finished,
-                            seq: None,
-                        })
-                    }))
-                    .boxed(),
-            )
+            ExecutorActionType::CodingAgentFollowUpRequest(request) => {
+                #[cfg(feature = "qa-mode")]
+                {
+                    let executor = QaMockExecutor;
+                    executor
+                        .normalize_logs(temp_store.clone(), &request.effective_dir(&current_dir));
+                }
+                #[cfg(not(feature = "qa-mode"))]
+                {
+                    let executor = ExecutorConfigs::get_cached()
+                        .get_coding_agent_or_default(&request.executor_profile_id);
+                    executor
+                        .normalize_logs(temp_store.clone(), &request.effective_dir(&current_dir));
+                }
+            }
+            #[cfg(feature = "qa-mode")]
+            ExecutorActionType::ReviewRequest(_request) => {
+                let executor = QaMockExecutor;
+                executor.normalize_logs(temp_store.clone(), &current_dir);
+            }
+            #[cfg(not(feature = "qa-mode"))]
+            ExecutorActionType::ReviewRequest(request) => {
+                let executor = ExecutorConfigs::get_cached()
+                    .get_coding_agent_or_default(&request.executor_profile_id);
+                executor.normalize_logs(temp_store.clone(), &current_dir);
+            }
+            _ => {
+                tracing::debug!(
+                    "Executor action doesn't support log normalization: {:?}",
+                    process.executor_action()
+                );
+                return None;
+            }
         }
+
+        Some(
+            temp_hub
+                .normalized_history_plus_stream()
+                .map_ok(|event| StreamedNormalizedLogEvent { event, seq: None })
+                .boxed(),
+        )
     }
 
     fn spawn_stream_raw_logs_to_db(&self, execution_id: &Uuid) -> JoinHandle<()> {
         let execution_id = *execution_id;
         let msg_stores = self.msg_stores().clone();
+        let execution_log_hubs = self.execution_log_hubs().clone();
         let db = self.db().clone();
 
         tokio::spawn(async move {
-            // Get the message store for this execution
             let store = {
                 let map = msg_stores.read().await;
                 map.get(&execution_id).cloned()
             };
+            let hub = {
+                let map = execution_log_hubs.read().await;
+                map.get(&execution_id).cloned()
+            };
 
             if let Some(store) = store {
-                let mut stream = store.history_plus_stream();
+                let mut raw_stream = store.history_plus_stream();
+                let mut normalized_stream = hub.map(|h| h.normalized_history_plus_stream());
                 let mut pending_logs: Vec<NewExecutionProcessLog> = Vec::new();
                 let mut flush_interval = tokio::time::interval_at(
                     Instant::now() + LOG_DB_FLUSH_INTERVAL,
                     LOG_DB_FLUSH_INTERVAL,
                 );
                 flush_interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
+                let mut raw_finished = false;
+                let mut normalized_finished = normalized_stream.is_none();
 
                 loop {
                     tokio::select! {
                         _ = flush_interval.tick() => {
                             flush_execution_log_batch(&db.pool, execution_id, &mut pending_logs).await;
                         }
-                        next = stream.next() => {
+                        next = raw_stream.next(), if !raw_finished => {
                             match next {
                                 Some(Ok(msg)) => match &msg {
                                     LogMsg::SessionId(agent_session_id) => {
@@ -937,9 +1054,7 @@ pub trait ContainerService {
                                         }
                                     }
                                     LogMsg::Finished => {
-                                        flush_execution_log_batch(&db.pool, execution_id, &mut pending_logs)
-                                            .await;
-                                        break;
+                                        raw_finished = true;
                                     }
                                     _ => {
                                         match serde_json::to_string(&msg) {
@@ -974,15 +1089,64 @@ pub trait ContainerService {
                                         execution_id,
                                         e
                                     );
-                                    flush_execution_log_batch(&db.pool, execution_id, &mut pending_logs).await;
-                                    break;
+                                    raw_finished = true;
                                 }
                                 None => {
-                                    flush_execution_log_batch(&db.pool, execution_id, &mut pending_logs).await;
-                                    break;
+                                    raw_finished = true;
                                 }
                             }
                         }
+                        next = async {
+                            if let Some(stream) = normalized_stream.as_mut() {
+                                stream.next().await
+                            } else {
+                                None
+                            }
+                        }, if !normalized_finished => {
+                            match next {
+                                Some(Ok(event)) => {
+                                    match serde_json::to_string(&event) {
+                                        Ok(jsonl_line) => {
+                                            pending_logs.push(NewExecutionProcessLog {
+                                                logs: format!("{jsonl_line}\n"),
+                                                msg_type: Some(event.msg_type().to_string()),
+                                            });
+                                        }
+                                        Err(e) => {
+                                            tracing::error!(
+                                                "Failed to serialize normalized log event for execution {}: {}",
+                                                execution_id,
+                                                e
+                                            );
+                                        }
+                                    }
+
+                                    if matches!(event, NormalizedLogEvent::Finished) {
+                                        normalized_finished = true;
+                                    }
+                                }
+                                Some(Err(e)) => {
+                                    tracing::error!(
+                                        "Failed to read normalized stream for execution {}: {}",
+                                        execution_id,
+                                        e
+                                    );
+                                    normalized_finished = true;
+                                }
+                                None => {
+                                    normalized_finished = true;
+                                }
+                            }
+                        }
+                    }
+
+                    if pending_logs.len() >= LOG_DB_FLUSH_MAX_BATCH {
+                        flush_execution_log_batch(&db.pool, execution_id, &mut pending_logs).await;
+                    }
+
+                    if raw_finished && normalized_finished {
+                        flush_execution_log_batch(&db.pool, execution_id, &mut pending_logs).await;
+                        break;
                     }
                 }
             }
@@ -1214,19 +1378,24 @@ pub trait ContainerService {
                     content: help_text,
                     metadata: None,
                 };
-                let patch = ConversationPatch::add_normalized_entry(2, error_message);
-                if let Ok(json_line) = serde_json::to_string::<LogMsg>(&LogMsg::JsonPatch(patch)) {
+                let event = NormalizedLogEvent::UpsertEntry {
+                    index: 2,
+                    entry: error_message,
+                };
+                if let Ok(json_line) = serde_json::to_string(&event) {
                     let _ = ExecutionProcessLogs::append_log_line(
                         &self.db().pool,
                         execution_process.id,
                         &format!("{json_line}\n"),
-                        Some(utils::log_msg::EV_JSON_PATCH),
+                        Some(event.msg_type()),
                     )
                     .await;
                 }
             };
             return Err(start_error);
         }
+
+        self.spawn_stream_raw_logs_to_db(&execution_process.id);
 
         // Start processing normalised logs for executor requests and follow ups
         let workspace_root = self.workspace_to_current_dir(workspace);
@@ -1268,7 +1437,6 @@ pub trait ContainerService {
             }
         }
 
-        self.spawn_stream_raw_logs_to_db(&execution_process.id);
         Ok(execution_process)
     }
 
