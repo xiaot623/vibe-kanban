@@ -23,7 +23,7 @@ use super::{
 };
 use crate::services::{
     approvals::{ApprovalError, PendingApprovalInfo},
-    telegram::{format, keyboard},
+    telegram::{format, keyboard, notifier},
 };
 
 #[derive(Debug, Deserialize)]
@@ -168,6 +168,50 @@ pub(super) async fn handle_run_default(
     Ok(())
 }
 
+fn normalize_running_label(value: &str, fallback: &str) -> String {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        fallback.to_string()
+    } else {
+        trimmed.to_string()
+    }
+}
+
+async fn send_running_message(
+    bot: &Bot,
+    chat_id: ChatId,
+    service: &TelegramBotService,
+    task_id: Uuid,
+    executor: &str,
+    mode: &str,
+) {
+    let task_title = match Task::find_by_id(&service.db.pool, task_id).await {
+        Ok(Some(task)) => task.title,
+        _ => "Unknown task".to_string(),
+    };
+    let executor_label = normalize_running_label(executor, "UNKNOWN");
+    let mode_label = normalize_running_label(mode, "DEFAULT");
+    let message = format!(
+        "🏃 Running\nTask: {task_title}\nExecutor: {executor_label}\nMode: {mode_label}"
+    );
+
+    match format::send_rich_then_plain(
+        bot,
+        chat_id,
+        &message,
+        Some(keyboard::home_only_keyboard()),
+    )
+    .await
+    {
+        Ok(sent) => {
+            notifier::record_running_message_id(task_id, sent.id).await;
+        }
+        Err(err) => {
+            tracing::warn!("Failed to send Telegram running message: {err}");
+        }
+    }
+}
+
 pub(super) fn available_run_modes_for_executor(executor: &str) -> Vec<String> {
     let executor = match BaseCodingAgent::from_str(executor) {
         Ok(executor) => executor,
@@ -224,6 +268,15 @@ pub(super) async fn handle_run_with_executor_mode(
                 super::ui::delete_message_best_effort(bot, chat_id, context.source_message_id)
                     .await;
             }
+            send_running_message(
+                bot,
+                chat_id,
+                service,
+                task_id,
+                executor,
+                selected_mode,
+            )
+            .await;
         }
         Err(msg) => {
             super::ui::render_or_send_card(
@@ -478,15 +531,28 @@ pub(super) async fn handle_follow_up_reply_finish(
     card_context: Option<CardRenderContext>,
 ) -> ResponseResult<bool> {
     match service.send_follow_up_reply(task_id, prompt).await {
-        Ok(()) => {
-            super::ui::render_or_send_card(
+        Ok(latest_profile) => {
+            let (executor_label, mode_label) = if let Some(profile) = latest_profile {
+                let mode = profile
+                    .variant
+                    .clone()
+                    .unwrap_or_else(|| "DEFAULT".to_string());
+                (profile.executor.to_string(), mode)
+            } else {
+                let config = service.config.read().await.telegram.clone();
+                let mode = normalize_running_label(&config.default_mode, "DEFAULT");
+                (config.default_executor, mode)
+            };
+
+            send_running_message(
                 bot,
                 chat_id,
-                None,
-                "✅ Reply sent. The task is running again.",
-                Some(keyboard::home_only_keyboard()),
+                service,
+                task_id,
+                &executor_label,
+                &mode_label,
             )
-            .await?;
+            .await;
             return Ok(true);
         }
         Err(err) => {

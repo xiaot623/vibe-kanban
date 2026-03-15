@@ -338,7 +338,7 @@ impl TelegramBotService {
         &self,
         task_id: Uuid,
         prompt: &str,
-    ) -> Result<(), String> {
+    ) -> Result<Option<ExecutorProfileId>, String> {
         let prompt = prompt.trim();
         if prompt.is_empty() {
             return Err("Reply cannot be empty.".to_string());
@@ -349,8 +349,8 @@ impl TelegramBotService {
             ExecutionProcess::latest_executor_profile_for_session(&self.db.pool, session_id)
                 .await
                 .map_err(|e| format!("Failed to load follow-up executor profile: {e}"))?;
-        let (variant, executor) = match latest_profile {
-            Some(profile) => (profile.variant, Some(profile.executor)),
+        let (variant, executor) = match latest_profile.as_ref() {
+            Some(profile) => (profile.variant.clone(), Some(profile.executor.clone())),
             None => (None, None),
         };
         let base_url = api_base_url()
@@ -381,7 +381,7 @@ impl TelegramBotService {
 
         let error_message = api_response.message().map(String::from);
         match api_response.into_data() {
-            Some(_) => Ok(()),
+            Some(_) => Ok(latest_profile),
             None => {
                 Err(error_message.unwrap_or_else(|| "Failed to send follow-up reply.".to_string()))
             }

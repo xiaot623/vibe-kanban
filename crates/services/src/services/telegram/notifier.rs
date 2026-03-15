@@ -56,6 +56,7 @@ static TELEGRAM_HANDLER_REGISTRATION: OnceCell<()> = OnceCell::const_new();
 static RUN_FEED_WATCHERS: OnceLock<Arc<RwLock<HashMap<Uuid, RunFeedWatcherHandle>>>> =
     OnceLock::new();
 static PLAN_REVIEW_MESSAGE_IDS: OnceLock<Arc<RwLock<PlanReviewMessageRegistry>>> = OnceLock::new();
+static RUNNING_MESSAGE_IDS: OnceLock<Arc<RwLock<RunningMessageRegistry>>> = OnceLock::new();
 
 #[derive(Debug, Default)]
 struct PlanReviewMessageRegistry {
@@ -86,6 +87,21 @@ impl PlanReviewMessageRegistry {
     }
 }
 
+#[derive(Debug, Default)]
+struct RunningMessageRegistry {
+    by_task: HashMap<Uuid, Vec<i32>>,
+}
+
+impl RunningMessageRegistry {
+    fn record(&mut self, task_id: Uuid, message_id: i32) {
+        self.by_task.entry(task_id).or_default().push(message_id);
+    }
+
+    fn take(&mut self, task_id: Uuid) -> Vec<i32> {
+        self.by_task.remove(&task_id).unwrap_or_default()
+    }
+}
+
 pub fn set_telegram_context(ctx: TelegramContext) {
     let lock = TELEGRAM_CONTEXT.get_or_init(|| Arc::new(RwLock::new(None)));
     if let Ok(mut guard) = lock.try_write() {
@@ -102,6 +118,7 @@ pub fn clear_telegram_context() {
     }
     cancel_all_run_feed_watchers();
     clear_plan_review_message_registry();
+    clear_running_message_registry();
 }
 
 async fn get_context() -> Option<TelegramContext> {
@@ -122,6 +139,11 @@ fn run_feed_watchers() -> &'static Arc<RwLock<HashMap<Uuid, RunFeedWatcherHandle
 fn plan_review_message_registry() -> &'static Arc<RwLock<PlanReviewMessageRegistry>> {
     PLAN_REVIEW_MESSAGE_IDS
         .get_or_init(|| Arc::new(RwLock::new(PlanReviewMessageRegistry::default())))
+}
+
+fn running_message_registry() -> &'static Arc<RwLock<RunningMessageRegistry>> {
+    RUNNING_MESSAGE_IDS
+        .get_or_init(|| Arc::new(RwLock::new(RunningMessageRegistry::default())))
 }
 
 fn cancel_all_run_feed_watchers() {
@@ -147,6 +169,16 @@ fn clear_plan_review_message_registry() {
     }
 }
 
+fn clear_running_message_registry() {
+    let Some(lock) = RUNNING_MESSAGE_IDS.get() else {
+        return;
+    };
+
+    if let Ok(mut guard) = lock.try_write() {
+        guard.by_task.clear();
+    }
+}
+
 async fn record_plan_review_message_ids(task_id: Uuid, message_ids: Vec<MessageId>) {
     let ids: Vec<i32> = message_ids.into_iter().map(|id| id.0).collect();
     plan_review_message_registry()
@@ -163,6 +195,23 @@ async fn clear_plan_review_message_ids(task_id: Uuid) {
 
 pub(super) async fn take_plan_review_message_ids(task_id: Uuid) -> Vec<MessageId> {
     plan_review_message_registry()
+        .write()
+        .await
+        .take(task_id)
+        .into_iter()
+        .map(MessageId)
+        .collect()
+}
+
+pub(super) async fn record_running_message_id(task_id: Uuid, message_id: MessageId) {
+    running_message_registry()
+        .write()
+        .await
+        .record(task_id, message_id.0);
+}
+
+async fn take_running_message_ids(task_id: Uuid) -> Vec<MessageId> {
+    running_message_registry()
         .write()
         .await
         .take(task_id)
@@ -1059,8 +1108,28 @@ async fn emit_stage_summary(
 
     let is_daily_task = is_daily_project_task(tg, accumulator.task_project_id).await;
     let summary_markup = stage_summary_keyboard(trigger, accumulator.task_id, is_daily_task);
-    let _ = send_split_telegram_card(tg, lines.join("\n"), summary_markup).await;
+    let sent_ids = send_split_telegram_card(tg, lines.join("\n"), summary_markup).await;
+    if matches!(trigger, SummaryTrigger::ExecutionFinished)
+        && !sent_ids.is_empty()
+        && let Some(task_id) = accumulator.task_id
+    {
+        delete_running_messages_for_task(tg, task_id).await;
+    }
     accumulator.finalize_stage();
+}
+
+async fn delete_running_messages_for_task(tg: &TelegramContext, task_id: Uuid) {
+    let message_ids = take_running_message_ids(task_id).await;
+    for message_id in message_ids {
+        if let Err(err) = tg.bot.delete_message(tg.chat_id, message_id).await {
+            tracing::debug!(
+                "Failed to delete Telegram running message {} in chat {}: {}",
+                message_id.0,
+                tg.chat_id.0,
+                err
+            );
+        }
+    }
 }
 
 fn stage_summary_keyboard(
