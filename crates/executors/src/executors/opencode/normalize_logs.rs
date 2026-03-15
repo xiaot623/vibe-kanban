@@ -7,7 +7,7 @@ use workspace_utils::{approvals::ApprovalStatus, msg_store::MsgStore, path::make
 
 use super::{
     EXIT_PLAN_MODE_NAME,
-    plan_mode::{REQUEST_USER_INPUT_TOOL_NAME, parse_plan_exit_relative_path},
+    plan_mode::{REQUEST_USER_INPUT_TOOL_NAME, detect_plan_exit_question},
     types::{
         MessageInfo, MessagePartDeltaEvent, MessageRole, OpencodeExecutorEvent, Part,
         PermissionAskedEvent, QuestionAskedEvent, SdkEvent, SdkTodo, SessionStatus, ToolPart,
@@ -641,12 +641,15 @@ impl LogState {
 
         tool_state.set_approval_if_missing(self.approvals.get(&call_id).cloned());
 
-        if let Some(plan_exit) = detect_plan_exit_question(&event) {
-            let mut plan_content = tokio::fs::read_to_string(
-                worktree_path.join(plan_exit.plan_relative_path.as_str()),
-            )
-            .await
-            .unwrap_or_default();
+        if let Some(plan_exit) = detect_plan_exit_question(&event.questions) {
+            let mut plan_content =
+                if let Some(plan_relative_path) = plan_exit.plan_relative_path.as_deref() {
+                    tokio::fs::read_to_string(worktree_path.join(plan_relative_path))
+                        .await
+                        .unwrap_or_default()
+                } else {
+                    String::new()
+                };
             if plan_content.trim().is_empty() {
                 plan_content = event
                     .questions
@@ -1344,20 +1347,6 @@ fn extract_file_path_from_permission_metadata(metadata: &Value) -> Option<&str> 
     }
 }
 
-#[derive(Debug)]
-struct PlanExitQuestion {
-    plan_relative_path: String,
-}
-
-fn detect_plan_exit_question(event: &QuestionAskedEvent) -> Option<PlanExitQuestion> {
-    let plan_relative_path = event
-        .questions
-        .iter()
-        .find_map(|question| parse_plan_exit_relative_path(&question.question))?;
-
-    Some(PlanExitQuestion { plan_relative_path })
-}
-
 fn build_question_approval_input(event: &QuestionAskedEvent) -> Value {
     let questions = event
         .questions
@@ -1439,6 +1428,7 @@ mod tests {
         collections::BTreeMap,
         fs,
         path::PathBuf,
+        sync::atomic::{AtomicU64, Ordering},
         time::{SystemTime, UNIX_EPOCH},
     };
 
@@ -1669,11 +1659,16 @@ mod tests {
     }
 
     fn create_temp_worktree(plan_content: &str) -> PathBuf {
+        static NEXT_TMP_ID: AtomicU64 = AtomicU64::new(0);
         let unique = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .expect("clock should be monotonic")
             .as_nanos();
-        let root = std::env::temp_dir().join(format!("opencode-normalize-{unique}"));
+        let id = NEXT_TMP_ID.fetch_add(1, Ordering::Relaxed);
+        let root = std::env::temp_dir().join(format!(
+            "opencode-normalize-{unique}-{id}-{}",
+            std::process::id()
+        ));
         fs::create_dir_all(root.join(".opencode/plans")).expect("create plan dir");
         fs::write(root.join(".opencode/plans/test-plan.md"), plan_content)
             .expect("write plan file");
@@ -1713,7 +1708,7 @@ mod tests {
                     "sessionID": "session-1",
                     "questions": [{
                         "question": "Plan at .opencode/plans/test-plan.md is complete. Would you like to switch to the build agent and start implementing?",
-                        "header": "Build Agent",
+                        "header": "Plan Review",
                         "options": [
                             {"label": "Yes", "description": "Switch"},
                             {"label": "No", "description": "Stay"}
@@ -1773,7 +1768,7 @@ mod tests {
                             "question": format!(
                                 "Plan ready at {absolute_plan_path}; switch to build mode now?"
                             ),
-                            "header": "Build Agent",
+                            "header": "Plan Review",
                             "options": [
                                 {"label": "Yes", "description": "Switch"},
                                 {"label": "No", "description": "Stay"}
@@ -1876,6 +1871,50 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn question_asked_with_plan_path_but_non_plan_title_stays_request_user_input() {
+        let (mut state, msg_store) = new_state();
+        let worktree_path = create_temp_worktree("# Plan\n- Step");
+
+        state
+            .handle_sdk_event(
+                &json!({
+                    "type": "question.asked",
+                    "properties": {
+                        "id": "question-input-2",
+                        "sessionID": "session-1",
+                        "questions": [{
+                            "question": "Plan at .opencode/plans/test-plan.md is complete. Continue?",
+                            "header": "Build Agent",
+                            "options": [
+                                {"label": "Yes", "description": "Switch"},
+                                {"label": "No", "description": "Stay"}
+                            ],
+                            "custom": false
+                        }],
+                        "tool": {
+                            "messageID": "message-4",
+                            "callID": "call-input-2"
+                        }
+                    }
+                }),
+                worktree_path.as_path(),
+                &msg_store,
+            )
+            .await;
+
+        let entries = collect_entries(&msg_store);
+        let entry = find_tool_entry(&entries, "call-input-2");
+        match &entry.entry_type {
+            NormalizedEntryType::ToolUse { tool_name, .. } => {
+                assert_eq!(tool_name, REQUEST_USER_INPUT_TOOL_NAME);
+            }
+            _ => panic!("expected tool entry"),
+        }
+
+        let _ = fs::remove_dir_all(worktree_path);
+    }
+
+    #[tokio::test]
     async fn todo_updated_without_todo_ids_is_normalized() {
         let (mut state, msg_store) = new_state();
         let worktree_path = Path::new("/tmp");
@@ -1933,7 +1972,7 @@ mod tests {
                     "sessionID": "session-1",
                     "questions": [{
                         "question": "Plan at .opencode/plans/test-plan.md is complete. Would you like to switch to the build agent and start implementing?",
-                        "header": "Build Agent",
+                        "header": "Plan Review",
                         "options": [
                             {"label": "Yes", "description": "Switch"},
                             {"label": "No", "description": "Stay"}

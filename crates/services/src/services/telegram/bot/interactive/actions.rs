@@ -17,14 +17,14 @@ use utils::{
 };
 use uuid::Uuid;
 
-use super::{BotDialogue, CardRenderContext, TelegramBotService};
+use super::{
+    super::shared::{api_base_url, format_review_task_created_message, truncate_text},
+    BotDialogue, CardRenderContext, TelegramBotService,
+};
 use crate::services::{
     approvals::{ApprovalError, PendingApprovalInfo},
-    telegram::{
-        format, keyboard,
-    },
+    telegram::{format, keyboard},
 };
-use super::super::shared::{api_base_url, format_review_task_created_message, truncate_text};
 
 #[derive(Debug, Deserialize)]
 struct DoneRepoBranchStatus {

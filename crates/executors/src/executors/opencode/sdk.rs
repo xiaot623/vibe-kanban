@@ -21,7 +21,7 @@ use workspace_utils::approvals::ApprovalStatus;
 
 use super::{
     EXIT_PLAN_MODE_NAME,
-    plan_mode::{REQUEST_USER_INPUT_TOOL_NAME, parse_plan_exit_relative_path},
+    plan_mode::{REQUEST_USER_INPUT_TOOL_NAME, detect_plan_exit_question},
     types::{OpencodeExecutorEvent, QuestionAskedEvent},
 };
 use crate::{
@@ -880,11 +880,13 @@ async fn process_event_stream(
                     continue;
                 }
 
-                let plan_exit = detect_plan_exit_question(&question);
-                let tool_call_id = plan_exit
-                    .as_ref()
-                    .map(|p| p.tool_call_id.clone())
-                    .unwrap_or_else(|| question_tool_call_id(&question));
+                let tool_call_id = question_tool_call_id(&question);
+                let plan_exit = detect_plan_exit_question(&question.questions).map(|plan_exit| {
+                    PlanExitQuestion {
+                        tool_call_id: tool_call_id.clone(),
+                        plan_relative_path: plan_exit.plan_relative_path,
+                    }
+                });
                 let approvals = if plan_exit.is_some() {
                     ctx.plan_approvals.clone()
                 } else {
@@ -900,25 +902,24 @@ async fn process_event_stream(
                     let is_plan_exit = plan_exit.is_some();
                     let (tool_name, tool_input, strict_approval) =
                         if let Some(plan_exit) = plan_exit {
-                            let mut plan_content =
-                                match load_plan_content(&directory, &plan_exit.plan_relative_path)
-                                    .await
-                                {
+                            let mut plan_content = if let Some(plan_relative_path) =
+                                plan_exit.plan_relative_path.as_deref()
+                            {
+                                match load_plan_content(&directory, plan_relative_path).await {
                                     Ok(plan) => plan,
                                     Err(err) => {
                                         let _ = log_writer
                                             .log_error(format!(
                                                 "Failed to read OpenCode plan `{}`: {err}",
-                                                plan_exit.plan_relative_path
+                                                plan_relative_path
                                             ))
                                             .await;
-                                        question
-                                            .questions
-                                            .first()
-                                            .map(|q| q.question.clone())
-                                            .unwrap_or_default()
+                                        String::new()
                                     }
-                                };
+                                }
+                            } else {
+                                String::new()
+                            };
 
                             if plan_content.trim().is_empty()
                                 && let Some(fallback) = question
@@ -1013,7 +1014,7 @@ fn event_matches_session(event_type: &str, event: &Value, session_id: &str) -> b
 #[derive(Debug)]
 struct PlanExitQuestion {
     tool_call_id: String,
-    plan_relative_path: String,
+    plan_relative_path: Option<String>,
 }
 
 fn parse_question_asked_event(event: &Value) -> Option<QuestionAskedEvent> {
@@ -1029,23 +1030,6 @@ fn question_tool_call_id(question: &QuestionAskedEvent) -> String {
         .map(|tool| tool.call_id.trim().to_string())
         .filter(|call_id| !call_id.is_empty())
         .unwrap_or_else(|| question.id.clone())
-}
-
-fn detect_plan_exit_question(question: &QuestionAskedEvent) -> Option<PlanExitQuestion> {
-    let tool_call_id = question_tool_call_id(question);
-    if tool_call_id.trim().is_empty() {
-        return None;
-    }
-
-    let plan_relative_path = question
-        .questions
-        .iter()
-        .find_map(|item| parse_plan_exit_relative_path(&item.question))?;
-
-    Some(PlanExitQuestion {
-        tool_call_id,
-        plan_relative_path,
-    })
 }
 
 async fn load_plan_content(directory: &str, relative_path: &str) -> Result<String, io::Error> {
@@ -1340,7 +1324,7 @@ mod tests {
             "sessionID": "session-1",
             "questions": [{
                 "question": "Plan generated at /tmp/worktree/.opencode/plans/plan-1.md; switch to build mode?",
-                "header": "Build Agent",
+                "header": "Plan Review",
                 "options": [
                     { "label": "Yes", "description": "Switch to build agent" },
                     { "label": "No", "description": "Keep refining plan" }
@@ -1354,6 +1338,14 @@ mod tests {
         }
 
         serde_json::from_value(payload).expect("plan question payload should deserialize")
+    }
+
+    fn detect_plan_exit_for_test(question: &QuestionAskedEvent) -> Option<PlanExitQuestion> {
+        let tool_call_id = question_tool_call_id(question);
+        detect_plan_exit_question(&question.questions).map(|plan_exit| PlanExitQuestion {
+            tool_call_id,
+            plan_relative_path: plan_exit.plan_relative_path,
+        })
     }
 
     #[test]
@@ -1385,17 +1377,30 @@ mod tests {
     #[test]
     fn detect_plan_exit_question_parses_absolute_plan_path() {
         let question = sample_plan_question_event(true);
-        let detected = detect_plan_exit_question(&question).expect("plan exit should be detected");
+        let detected = detect_plan_exit_for_test(&question).expect("plan exit should be detected");
         assert_eq!(detected.tool_call_id, "call-plan-1");
-        assert_eq!(detected.plan_relative_path, ".opencode/plans/plan-1.md");
+        assert_eq!(
+            detected.plan_relative_path.as_deref(),
+            Some(".opencode/plans/plan-1.md")
+        );
     }
 
     #[test]
     fn detect_plan_exit_question_falls_back_to_question_id_when_tool_missing() {
         let question = sample_plan_question_event(false);
-        let detected = detect_plan_exit_question(&question).expect("plan exit should be detected");
+        let detected = detect_plan_exit_for_test(&question).expect("plan exit should be detected");
         assert_eq!(detected.tool_call_id, "question-plan-1");
-        assert_eq!(detected.plan_relative_path, ".opencode/plans/plan-1.md");
+        assert_eq!(
+            detected.plan_relative_path.as_deref(),
+            Some(".opencode/plans/plan-1.md")
+        );
+    }
+
+    #[test]
+    fn detect_plan_exit_question_requires_plan_keyword_in_title() {
+        let mut question = sample_plan_question_event(true);
+        question.questions[0].header = Some("Build Agent".to_string());
+        assert!(detect_plan_exit_for_test(&question).is_none());
     }
 
     #[tokio::test]

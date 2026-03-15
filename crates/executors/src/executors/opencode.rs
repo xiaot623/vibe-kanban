@@ -33,6 +33,7 @@ mod sdk;
 mod types;
 
 pub use plan_mode::EXIT_PLAN_MODE_NAME;
+use plan_mode::append_plan_mode_prompt_guidance;
 use sdk::{LogWriter, RunConfig, run_session};
 
 static CODEX_COMMAND: LazyLock<String> =
@@ -111,7 +112,10 @@ impl Opencode {
         command_parts: CommandParts,
         env: &ExecutionEnv,
     ) -> Result<SpawnedChild, ExecutorError> {
-        let combined_prompt = self.append_prompt.combine_prompt(prompt);
+        let combined_prompt = append_plan_mode_prompt_guidance(
+            self.mode.as_deref(),
+            self.append_prompt.combine_prompt(prompt),
+        );
         let (program_path, args) = command_parts.into_resolved().await?;
         tracing::debug!(
             command = %format_command_for_log(&program_path, &args),
@@ -402,8 +406,9 @@ mod tests {
     /// must be `NotFound` — the fallback should NOT be checked.
     #[test]
     fn get_availability_info_override_missing_binary_not_found() {
-        let opencode =
-            make_opencode(Some("vibe-kanban-nonexistent-opencode-override".to_string()));
+        let opencode = make_opencode(Some(
+            "vibe-kanban-nonexistent-opencode-override".to_string(),
+        ));
         // Only valid if neither config dir nor command resolves; on a CI box
         // without opencode installed this should return NotFound.
         let info = opencode.get_availability_info();

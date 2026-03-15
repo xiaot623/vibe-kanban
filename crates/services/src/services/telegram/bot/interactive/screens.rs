@@ -5,13 +5,11 @@ use db::models::{
 use teloxide::{prelude::*, types::InlineKeyboardMarkup};
 use uuid::Uuid;
 
-use super::{CardRenderContext, TelegramBotService};
-use crate::services::telegram::{
-    EXIT_PLAN_MODE_NAME,
-    callback::CallbackAction,
-    keyboard,
+use super::{
+    super::shared::{parse_task_status, truncate_text},
+    CardRenderContext, TelegramBotService,
 };
-use super::super::shared::{parse_task_status, truncate_text};
+use crate::services::telegram::{EXIT_PLAN_MODE_NAME, callback::CallbackAction, keyboard};
 
 const PAGE_SIZE: usize = 10;
 
