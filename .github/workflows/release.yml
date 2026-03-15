@@ -3,7 +3,9 @@ name: Build Desktop Release
 on:
   push:
     tags:
-      - "**"
+      - "v[0-9]*.[0-9]*.[0-9]*"
+    tags-ignore:
+      - "*-*"
 
 concurrency:
   group: release-${{ github.ref }}
