@@ -32,6 +32,7 @@
     "build:npx": "bash ./local-build.sh",
     "prepack": "npm run build:npx",
     "release": "pnpm run check && pnpm run desktop:build && git add -A && git commit -m \"chore: release v$npm_package_version\" && git push origin release:release && git tag -a \"v$npm_package_version\" -m \"Release v$npm_package_version\" && git push origin \"v$npm_package_version\"",
+    "pre_release": "node scripts/pre-release.js",
     "desktop:dev:raw": "npm run frontend:build && cd crates/desktop && pnpm exec tauri dev",
     "desktop:dev": "bash ./scripts/run-pm2-dev.sh vibe-desktop-dev desktop:dev:raw",
     "desktop:build": "npm run frontend:build && cd crates/desktop && pnpm exec tauri build",
