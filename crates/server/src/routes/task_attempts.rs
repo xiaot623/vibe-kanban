@@ -463,6 +463,7 @@ pub async fn start_review_subtask(
             description: Some(review_task_description),
             status: Some(TaskStatus::Todo),
             parent_workspace_id: Some(workspace.id),
+            source_cron_task_id: None,
             image_ids: None,
         },
         Uuid::new_v4(),

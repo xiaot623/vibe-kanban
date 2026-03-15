@@ -17,6 +17,7 @@ import {
   MessageCircle,
   Menu,
   Plus,
+  Clock,
 } from 'lucide-react';
 import { Logo } from '@/components/Logo';
 import { SearchBar } from '@/components/SearchBar';
@@ -270,6 +271,17 @@ export function Navbar() {
             {projectId ? (
               <>
                 <div className="flex items-center gap-1">
+                  <Button
+                    variant="ghost"
+                    size="icon"
+                    className="h-9 w-9"
+                    asChild
+                    aria-label="Cron tasks"
+                  >
+                    <Link to={`/projects/${projectId}/cron-tasks`}>
+                      <Clock className="h-4 w-4" />
+                    </Link>
+                  </Button>
                   {isSingleRepoProject && (
                     <OpenInIdeButton
                       onClick={handleOpenInIDE}

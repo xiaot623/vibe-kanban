@@ -230,6 +230,7 @@ impl Approvals {
                             description: Some(plan_content),
                             status: Some(TaskStatus::Todo),
                             parent_workspace_id: Some(ctx.workspace.id),
+                            source_cron_task_id: None,
                             image_ids: None,
                         };
                         let task_id = Uuid::new_v4();

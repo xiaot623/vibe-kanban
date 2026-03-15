@@ -1,13 +1,20 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { KanbanCard } from '@/components/ui/shadcn-io/kanban';
-import { Link, Loader2, XCircle } from 'lucide-react';
+import { Clock, Link, Loader2, XCircle } from 'lucide-react';
 import type { TaskWithAttemptStatus } from 'shared/types';
 import { ActionsDropdown } from '@/components/ui/actions-dropdown';
 import { Button } from '@/components/ui/button';
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipProvider,
+  TooltipTrigger,
+} from '@/components/ui/tooltip';
 import { useNavigateWithSearch } from '@/hooks';
 import { paths } from '@/lib/paths';
 import { attemptsApi } from '@/lib/api';
 import { TaskCardHeader } from './TaskCardHeader';
+import { formatDateShortWithTime } from '@/utils/date';
 import { useTranslation } from 'react-i18next';
 
 type Task = TaskWithAttemptStatus;
@@ -32,6 +39,7 @@ export function TaskCard({
   const { t } = useTranslation('tasks');
   const navigate = useNavigateWithSearch();
   const [isNavigatingToParent, setIsNavigatingToParent] = useState(false);
+  const cronTooltipLabel = `Cron - ${formatDateShortWithTime(task.created_at)}`;
 
   const handleClick = useCallback(() => {
     onViewDetails(task);
@@ -107,6 +115,23 @@ export function TaskCard({
                 >
                   <Link className="h-4 w-4" />
                 </Button>
+              )}
+              {task.source_cron_task_id && (
+                <TooltipProvider>
+                  <Tooltip>
+                    <TooltipTrigger asChild>
+                      <span
+                        className="inline-flex h-4 w-4 items-center justify-center text-muted-foreground"
+                        onPointerDown={(e) => e.stopPropagation()}
+                        onMouseDown={(e) => e.stopPropagation()}
+                        onClick={(e) => e.stopPropagation()}
+                      >
+                        <Clock className="h-3.5 w-3.5" />
+                      </span>
+                    </TooltipTrigger>
+                    <TooltipContent side="top">{cronTooltipLabel}</TooltipContent>
+                  </Tooltip>
+                </TooltipProvider>
               )}
               <ActionsDropdown task={task} />
             </>

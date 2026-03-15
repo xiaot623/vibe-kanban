@@ -10,6 +10,7 @@ use services::services::{
     auth::AuthContext,
     config::{Config, load_config_from_file, save_config_to_file},
     container::ContainerService,
+    cron_tasks::CronScheduler,
     events::EventService,
     execution_log_hub::ExecutionLogHub,
     file_search::FileSearchCache,
@@ -59,6 +60,7 @@ pub struct LocalDeployment {
     auth_context: AuthContext,
     oauth_handoffs: Arc<RwLock<HashMap<Uuid, PendingHandoff>>>,
     pty: PtyService,
+    cron_scheduler: CronScheduler<LocalContainerService>,
 }
 
 #[derive(Debug, Clone)]
@@ -175,6 +177,7 @@ impl Deployment for LocalDeployment {
         let file_search_cache = Arc::new(FileSearchCache::new());
 
         let pty = PtyService::new();
+        let cron_scheduler = CronScheduler::new(db.clone(), git.clone(), container.clone());
 
         let deployment = Self {
             mcp_server_handle: Arc::new(Mutex::new(None)),
@@ -196,6 +199,7 @@ impl Deployment for LocalDeployment {
             auth_context,
             oauth_handoffs,
             pty,
+            cron_scheduler,
         };
 
         Ok(deployment)
@@ -296,5 +300,9 @@ impl LocalDeployment {
 
     pub fn mcp_server_handle(&self) -> &McpServerHandle {
         &self.mcp_server_handle
+    }
+
+    pub fn cron_scheduler(&self) -> &CronScheduler<LocalContainerService> {
+        &self.cron_scheduler
     }
 }

@@ -142,8 +142,7 @@ fn plan_review_message_registry() -> &'static Arc<RwLock<PlanReviewMessageRegist
 }
 
 fn running_message_registry() -> &'static Arc<RwLock<RunningMessageRegistry>> {
-    RUNNING_MESSAGE_IDS
-        .get_or_init(|| Arc::new(RwLock::new(RunningMessageRegistry::default())))
+    RUNNING_MESSAGE_IDS.get_or_init(|| Arc::new(RwLock::new(RunningMessageRegistry::default())))
 }
 
 fn cancel_all_run_feed_watchers() {

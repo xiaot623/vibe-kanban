@@ -4,6 +4,7 @@ import { I18nextProvider } from 'react-i18next';
 import i18n from '@/i18n';
 import { Projects } from '@/pages/Projects';
 import { ProjectTasks } from '@/pages/ProjectTasks';
+import { ProjectCronTasks } from '@/pages/ProjectCronTasks';
 import { FullAttemptLogsPage } from '@/pages/FullAttemptLogs';
 import { NormalLayout } from '@/components/layout/NormalLayout';
 import { usePostHog } from 'posthog-js/react';
@@ -149,6 +150,10 @@ function AppContent() {
               <Route
                 path="/projects/:projectId/tasks"
                 element={<ProjectTasks />}
+              />
+              <Route
+                path="/projects/:projectId/cron-tasks"
+                element={<ProjectCronTasks />}
               />
               <Route path="/settings/*" element={<SettingsLayout />}>
                 <Route index element={<Navigate to="general" replace />} />

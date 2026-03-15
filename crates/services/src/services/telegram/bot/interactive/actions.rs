@@ -191,17 +191,11 @@ async fn send_running_message(
     };
     let executor_label = normalize_running_label(executor, "UNKNOWN");
     let mode_label = normalize_running_label(mode, "DEFAULT");
-    let message = format!(
-        "🏃 Running\nTask: {task_title}\nExecutor: {executor_label}\nMode: {mode_label}"
-    );
+    let message =
+        format!("🏃 Running\nTask: {task_title}\nExecutor: {executor_label}\nMode: {mode_label}");
 
-    match format::send_rich_then_plain(
-        bot,
-        chat_id,
-        &message,
-        Some(keyboard::home_only_keyboard()),
-    )
-    .await
+    match format::send_rich_then_plain(bot, chat_id, &message, Some(keyboard::home_only_keyboard()))
+        .await
     {
         Ok(sent) => {
             notifier::record_running_message_id(task_id, sent.id).await;
@@ -268,15 +262,7 @@ pub(super) async fn handle_run_with_executor_mode(
                 super::ui::delete_message_best_effort(bot, chat_id, context.source_message_id)
                     .await;
             }
-            send_running_message(
-                bot,
-                chat_id,
-                service,
-                task_id,
-                executor,
-                selected_mode,
-            )
-            .await;
+            send_running_message(bot, chat_id, service, task_id, executor, selected_mode).await;
         }
         Err(msg) => {
             super::ui::render_or_send_card(
@@ -544,15 +530,8 @@ pub(super) async fn handle_follow_up_reply_finish(
                 (config.default_executor, mode)
             };
 
-            send_running_message(
-                bot,
-                chat_id,
-                service,
-                task_id,
-                &executor_label,
-                &mode_label,
-            )
-            .await;
+            send_running_message(bot, chat_id, service, task_id, &executor_label, &mode_label)
+                .await;
             return Ok(true);
         }
         Err(err) => {

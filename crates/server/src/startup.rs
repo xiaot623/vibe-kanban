@@ -133,6 +133,17 @@ pub async fn spawn_background_services(deployment: &DeploymentImpl, platform: &s
         .track_if_analytics_allowed("session_start", serde_json::json!({ "platform": platform }))
         .await;
 
+    let deployment_for_cron = deployment.clone();
+    tokio::spawn(async move {
+        if let Err(e) = deployment_for_cron
+            .cron_scheduler()
+            .sync_all_projects()
+            .await
+        {
+            tracing::warn!("Failed to start cron task scheduler: {}", e);
+        }
+    });
+
     // Pre-warm file search cache for most active projects
     let deployment_for_cache = deployment.clone();
     tokio::spawn(async move {

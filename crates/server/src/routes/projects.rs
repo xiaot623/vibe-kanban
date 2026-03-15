@@ -19,7 +19,13 @@ use db::models::{
 };
 use deployment::Deployment;
 use futures_util::{SinkExt, StreamExt, TryStreamExt};
-use services::services::{file_search::SearchQuery, project::ProjectServiceError};
+use services::services::{
+    cron_tasks::{
+        CronTaskConfig, CronTaskError, load_project_cron_config, save_project_cron_config,
+    },
+    file_search::SearchQuery,
+    project::ProjectServiceError,
+};
 use utils::response::ApiResponse;
 use uuid::Uuid;
 
@@ -285,6 +291,50 @@ pub async fn search_project_files(
     }
 }
 
+pub async fn get_project_cron_tasks(
+    Extension(project): Extension<Project>,
+    State(deployment): State<DeploymentImpl>,
+) -> Result<ResponseJson<ApiResponse<CronTaskConfig>>, ApiError> {
+    let config = load_project_cron_config(&deployment.db().pool, &project)
+        .await
+        .map_err(map_cron_error)?;
+
+    Ok(ResponseJson(ApiResponse::success(config)))
+}
+
+pub async fn update_project_cron_tasks(
+    Extension(project): Extension<Project>,
+    State(deployment): State<DeploymentImpl>,
+    Json(payload): Json<CronTaskConfig>,
+) -> Result<ResponseJson<ApiResponse<CronTaskConfig>>, ApiError> {
+    let config = save_project_cron_config(&deployment.db().pool, &project, payload)
+        .await
+        .map_err(map_cron_error)?;
+
+    if let Err(e) = deployment
+        .cron_scheduler()
+        .replace_project_tasks(&project, config.tasks.clone())
+        .await
+    {
+        tracing::warn!(
+            "Failed to refresh cron tasks for project {}: {}",
+            project.id,
+            e
+        );
+    }
+
+    Ok(ResponseJson(ApiResponse::success(config)))
+}
+
+fn map_cron_error(err: CronTaskError) -> ApiError {
+    match err {
+        CronTaskError::Io(e) => ApiError::Io(e),
+        CronTaskError::Sqlx(e) => ApiError::Database(e),
+        CronTaskError::Json(e) => ApiError::BadRequest(format!("Invalid cron config: {e}")),
+        other => ApiError::BadRequest(other.to_string()),
+    }
+}
+
 pub async fn get_project_repositories(
     Extension(project): Extension<Project>,
     State(deployment): State<DeploymentImpl>,
@@ -438,6 +488,10 @@ pub fn router(deployment: &DeploymentImpl) -> Router<DeploymentImpl> {
         .route(
             "/",
             get(get_project).put(update_project).delete(delete_project),
+        )
+        .route(
+            "/cron-tasks",
+            get(get_project_cron_tasks).put(update_project_cron_tasks),
         )
         .route("/search", get(search_project_files))
         .route("/open-editor", post(open_project_in_editor))

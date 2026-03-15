@@ -1,6 +1,6 @@
 {
   "db_name": "SQLite",
-  "query": "UPDATE tasks\n               SET title = $3, description = $4, status = $5, parent_workspace_id = $6\n               WHERE id = $1 AND project_id = $2\n               RETURNING id as \"id!: Uuid\", project_id as \"project_id!: Uuid\", title, description, status as \"status!: TaskStatus\", parent_workspace_id as \"parent_workspace_id: Uuid\", diff_additions as \"diff_additions: i32\", diff_deletions as \"diff_deletions: i32\", created_at as \"created_at!: DateTime<Utc>\", updated_at as \"updated_at!: DateTime<Utc>\"",
+  "query": "SELECT id as \"id!: Uuid\", project_id as \"project_id!: Uuid\", title, description, status as \"status!: TaskStatus\", parent_workspace_id as \"parent_workspace_id: Uuid\", source_cron_task_id as \"source_cron_task_id: Uuid\", diff_additions as \"diff_additions: i32\", diff_deletions as \"diff_deletions: i32\", created_at as \"created_at!: DateTime<Utc>\", updated_at as \"updated_at!: DateTime<Utc>\"\n               FROM tasks\n               WHERE parent_workspace_id = $1\n               ORDER BY created_at DESC",
   "describe": {
     "columns": [
       {
@@ -34,28 +34,33 @@
         "type_info": "Blob"
       },
       {
-        "name": "diff_additions: i32",
+        "name": "source_cron_task_id: Uuid",
         "ordinal": 6,
-        "type_info": "Integer"
+        "type_info": "Blob"
       },
       {
-        "name": "diff_deletions: i32",
+        "name": "diff_additions: i32",
         "ordinal": 7,
         "type_info": "Integer"
       },
       {
-        "name": "created_at!: DateTime<Utc>",
+        "name": "diff_deletions: i32",
         "ordinal": 8,
+        "type_info": "Integer"
+      },
+      {
+        "name": "created_at!: DateTime<Utc>",
+        "ordinal": 9,
         "type_info": "Text"
       },
       {
         "name": "updated_at!: DateTime<Utc>",
-        "ordinal": 9,
+        "ordinal": 10,
         "type_info": "Text"
       }
     ],
     "parameters": {
-      "Right": 6
+      "Right": 1
     },
     "nullable": [
       true,
@@ -66,9 +71,10 @@
       true,
       true,
       true,
+      true,
       false,
       false
     ]
   },
-  "hash": "14228e10e393f65bac9ee62ad2ae1ba0b3926e0fcc67c4a57bb0fdd7baa1f661"
+  "hash": "1b7a9b2daab6f4f32354d7372703b451c5b7c142343a033ce01c3ee8846def4e"
 }

@@ -4,6 +4,7 @@ pub mod auth;
 pub mod config;
 pub mod container;
 pub mod context_archive;
+pub mod cron_tasks;
 pub mod diff_stream;
 pub mod events;
 pub mod execution_log_hub;

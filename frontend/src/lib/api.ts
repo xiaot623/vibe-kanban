@@ -31,6 +31,7 @@ import {
   TaskWithAttemptStatus,
   UpdateProject,
   UpdateTask,
+  CronTaskConfig,
   UpdateTag,
   UserSystemInfo,
   McpServerQuery,
@@ -369,6 +370,30 @@ export const tasksApi = {
       method: 'DELETE',
     });
     return handleApiResponse<void>(response);
+  },
+};
+
+// Cron Task APIs
+export const cronTasksApi = {
+  get: async (projectId: string): Promise<CronTaskConfig> => {
+    const response = await makeRequest(
+      `/api/projects/${projectId}/cron-tasks`
+    );
+    return handleApiResponse<CronTaskConfig>(response);
+  },
+
+  update: async (
+    projectId: string,
+    data: CronTaskConfig
+  ): Promise<CronTaskConfig> => {
+    const response = await makeRequest(
+      `/api/projects/${projectId}/cron-tasks`,
+      {
+        method: 'PUT',
+        body: JSON.stringify(data),
+      }
+    );
+    return handleApiResponse<CronTaskConfig>(response);
   },
 };
 
