@@ -101,7 +101,6 @@ impl Gemini {
             }
             GeminiMode::Yolo => {
                 builder = builder.extend_params(["--yolo"]);
-                builder = builder.extend_params(["--allowed-tools", "run_shell_command"]);
             }
             GeminiMode::Default => {}
         }
@@ -303,52 +302,41 @@ mod tests {
     }
 
     #[test]
-    fn plan_mode_adds_plan_approval_flags_without_yolo() {
+    fn plan_mode_adds_plan_approval_flags_without_yolo_or_allowlist() {
         let params = command_params(&gemini_with_mode(Some(true), Some(false)));
 
         assert!(has_arg_pair(&params, "--approval-mode", "plan"));
         assert!(!params.iter().any(|arg| arg == "--yolo"));
+        assert!(!params.iter().any(|arg| arg == "--allowed-tools"));
         assert!(params.iter().any(|arg| arg == "--experimental-acp"));
     }
 
     #[test]
-    fn yolo_mode_adds_yolo_flags_without_plan_approval() {
+    fn yolo_mode_adds_yolo_flags_without_plan_approval_or_allowlist() {
         let params = command_params(&gemini_with_mode(Some(false), Some(true)));
 
         assert!(params.iter().any(|arg| arg == "--yolo"));
-        assert!(has_arg_pair(
-            &params,
-            "--allowed-tools",
-            "run_shell_command"
-        ));
+        assert!(!params.iter().any(|arg| arg == "--allowed-tools"));
         assert!(!has_arg_pair(&params, "--approval-mode", "plan"));
         assert!(params.iter().any(|arg| arg == "--experimental-acp"));
     }
 
     #[test]
-    fn plan_mode_takes_precedence_over_yolo_when_both_enabled() {
+    fn plan_mode_takes_precedence_over_yolo_when_both_enabled_without_allowlist() {
         let params = command_params(&gemini_with_mode(Some(true), Some(true)));
 
         assert!(has_arg_pair(&params, "--approval-mode", "plan"));
         assert!(!params.iter().any(|arg| arg == "--yolo"));
-        assert!(!has_arg_pair(
-            &params,
-            "--allowed-tools",
-            "run_shell_command"
-        ));
+        assert!(!params.iter().any(|arg| arg == "--allowed-tools"));
     }
 
     #[test]
-    fn default_mode_has_no_plan_or_yolo_flags() {
+    fn default_mode_has_no_plan_yolo_or_allowlist_flags() {
         let params = command_params(&gemini_with_mode(Some(false), Some(false)));
 
         assert!(!has_arg_pair(&params, "--approval-mode", "plan"));
         assert!(!params.iter().any(|arg| arg == "--yolo"));
-        assert!(!has_arg_pair(
-            &params,
-            "--allowed-tools",
-            "run_shell_command"
-        ));
+        assert!(!params.iter().any(|arg| arg == "--allowed-tools"));
         assert!(params.iter().any(|arg| arg == "--experimental-acp"));
     }
 
