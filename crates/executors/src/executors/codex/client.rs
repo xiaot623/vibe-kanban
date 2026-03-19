@@ -21,10 +21,9 @@ use codex_app_server_protocol::{
 };
 use codex_protocol::{
     config_types::CollaborationMode,
-    items::TurnItem,
-    protocol::{EventMsg, ReviewDecision},
+    protocol::ReviewDecision,
 };
-use serde::{Deserialize, Serialize, de::DeserializeOwned};
+use serde::{Serialize, de::DeserializeOwned};
 use serde_json::{self, Value, json};
 use tokio::{
     io::{AsyncWrite, AsyncWriteExt, BufWriter},
@@ -48,11 +47,6 @@ const REQUEST_USER_INPUT_TOOL_NAME: &str = "request_user_input";
 struct PendingPlanProposal {
     item_id: String,
     text: String,
-}
-
-#[derive(Debug, Deserialize)]
-struct CodexEventNotificationParams {
-    msg: EventMsg,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -560,21 +554,68 @@ impl AppServerClient {
         }
     }
 
-    async fn observe_codex_event(&self, event: EventMsg) {
-        match event {
-            EventMsg::TurnStarted(_) | EventMsg::TurnAborted(_) => {
+    async fn observe_server_notification(&self, notification: &ServerNotification) {
+        match notification {
+            ServerNotification::TurnStarted(_) => {
                 self.clear_pending_plan().await;
             }
-            EventMsg::PlanDelta(event) => {
-                self.append_plan_delta(event.item_id, event.delta).await;
+            ServerNotification::PlanDelta(event) => {
+                self.append_plan_delta(event.item_id.clone(), event.delta.clone())
+                    .await;
             }
-            EventMsg::ItemCompleted(event) => {
-                if let TurnItem::Plan(plan_item) = event.item {
-                    self.set_plan_text(plan_item.id, plan_item.text).await;
+            ServerNotification::ItemCompleted(event) => {
+                if let codex_app_server_protocol::ThreadItem::Plan { id, text } = &event.item {
+                    self.set_plan_text(id.clone(), text.clone()).await;
                 }
             }
             _ => {}
         }
+    }
+
+    async fn handle_notification(
+        &self,
+        raw: &str,
+        _notification: JSONRPCNotification,
+    ) -> Result<bool, ExecutorError> {
+        let parsed_server_notification = serde_json::from_str::<ServerNotification>(raw).ok();
+        let raw = if let Some(mut server_notification) = parsed_server_notification.clone() {
+            if let ServerNotification::SessionConfigured(session_configured) =
+                &mut server_notification
+            {
+                // history can be large, which might get truncated during transmission, corrupting the JSON line and losing valuable session and model information.
+                session_configured.initial_messages = None;
+                Cow::Owned(serde_json::to_string(&server_notification)?)
+            } else {
+                Cow::Borrowed(raw)
+            }
+        } else {
+            Cow::Borrowed(raw)
+        };
+        self.log_writer.log_raw(&raw).await?;
+
+        if let Some(server_notification) = parsed_server_notification.as_ref() {
+            self.observe_server_notification(server_notification).await;
+        }
+
+        let has_finished = matches!(
+            parsed_server_notification,
+            Some(ServerNotification::TurnCompleted(_))
+        );
+        if !has_finished {
+            return Ok(false);
+        }
+
+        if has_finished {
+            let plan_approved = self.request_pending_plan_approval().await?;
+            if !plan_approved {
+                // Plan was denied — send the queued feedback to Codex so it
+                // can generate a revised plan in a new turn.
+                self.flush_pending_feedback().await;
+                return Ok(false);
+            }
+        }
+
+        Ok(has_finished)
     }
 
     async fn request_pending_plan_approval(&self) -> Result<bool, ExecutorError> {
@@ -716,56 +757,7 @@ impl JsonRpcCallbacks for AppServerClient {
         raw: &str,
         notification: JSONRPCNotification,
     ) -> Result<bool, ExecutorError> {
-        let raw =
-            if let Ok(mut server_notification) = serde_json::from_str::<ServerNotification>(raw) {
-                if let ServerNotification::SessionConfigured(session_configured) =
-                    &mut server_notification
-                {
-                    // history can be large, which might get truncated during transmission, corrupting the JSON line and losing valuable session and model information.
-                    session_configured.initial_messages = None;
-                    Cow::Owned(serde_json::to_string(&server_notification)?)
-                } else {
-                    Cow::Borrowed(raw)
-                }
-            } else {
-                Cow::Borrowed(raw)
-            };
-        self.log_writer.log_raw(&raw).await?;
-
-        let method = notification.method.as_str();
-        if method.starts_with("codex/event")
-            && let Some(params) = notification.params.clone()
-            && let Ok(parsed) = serde_json::from_value::<CodexEventNotificationParams>(params)
-        {
-            self.observe_codex_event(parsed.msg).await;
-        }
-
-        if !method.starts_with("codex/event") {
-            return Ok(false);
-        }
-
-        if method.ends_with("turn_aborted") {
-            tracing::debug!("codex turn aborted; flushing feedback queue");
-            self.clear_pending_plan().await;
-            self.flush_pending_feedback().await;
-            return Ok(false);
-        }
-
-        let has_finished = method
-            .strip_prefix("codex/event/")
-            .is_some_and(|suffix| matches!(suffix, "task_complete" | "turn_complete"));
-
-        if has_finished {
-            let plan_approved = self.request_pending_plan_approval().await?;
-            if !plan_approved {
-                // Plan was denied — send the queued feedback to Codex so it
-                // can generate a revised plan in a new turn.
-                self.flush_pending_feedback().await;
-                return Ok(false);
-            }
-        }
-
-        Ok(has_finished)
+        self.handle_notification(raw, notification).await
     }
 
     async fn on_non_json(&self, raw: &str) -> Result<(), ExecutorError> {
@@ -892,5 +884,166 @@ impl LogWriter {
         guard.write_all(b"\n").await.map_err(ExecutorError::Io)?;
         guard.flush().await.map_err(ExecutorError::Io)?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::{Arc, Mutex};
+
+    use async_trait::async_trait;
+    use serde_json::{Value, json};
+    use workspace_utils::approvals::ApprovalStatus;
+
+    use super::*;
+    use crate::approvals::{ExecutorApprovalError, ExecutorApprovalService};
+
+    #[derive(Debug, Clone)]
+    struct ApprovalCall {
+        tool_name: String,
+        tool_input: Value,
+        tool_call_id: String,
+    }
+
+    #[derive(Debug)]
+    struct MockApprovalService {
+        status: ApprovalStatus,
+        calls: Mutex<Vec<ApprovalCall>>,
+    }
+
+    impl MockApprovalService {
+        fn new(status: ApprovalStatus) -> Self {
+            Self {
+                status,
+                calls: Mutex::new(Vec::new()),
+            }
+        }
+
+        fn calls(&self) -> Vec<ApprovalCall> {
+            self.calls.lock().expect("lock approval calls").clone()
+        }
+    }
+
+    #[async_trait]
+    impl ExecutorApprovalService for MockApprovalService {
+        async fn request_tool_approval(
+            &self,
+            tool_name: &str,
+            tool_input: Value,
+            tool_call_id: &str,
+        ) -> Result<ApprovalStatus, ExecutorApprovalError> {
+            self.calls
+                .lock()
+                .expect("lock approval calls")
+                .push(ApprovalCall {
+                    tool_name: tool_name.to_string(),
+                    tool_input,
+                    tool_call_id: tool_call_id.to_string(),
+                });
+            Ok(self.status.clone())
+        }
+    }
+
+    fn new_client(approvals: Option<Arc<dyn ExecutorApprovalService>>) -> Arc<AppServerClient> {
+        AppServerClient::new(LogWriter::new(tokio::io::sink()), approvals, false)
+    }
+
+    fn make_notification(method: &str, params: Option<Value>) -> (String, JSONRPCNotification) {
+        let notification = JSONRPCNotification {
+            method: method.to_string(),
+            params,
+        };
+        let raw = serde_json::to_string(&notification).expect("serialize notification");
+        (raw, notification)
+    }
+
+    #[tokio::test]
+    async fn turn_completed_notification_marks_finished() {
+        let client = new_client(None);
+        let (raw, notification) = make_notification(
+            "turn/completed",
+            Some(json!({
+                "threadId": "thread-1",
+                "turn": {
+                    "id": "turn-1",
+                    "items": [],
+                    "status": "completed",
+                    "error": null
+                }
+            })),
+        );
+
+        let finished = client
+            .handle_notification(&raw, notification)
+            .await
+            .expect("handle turn/completed notification");
+        assert!(finished);
+    }
+
+    #[tokio::test]
+    async fn v2_plan_notifications_still_trigger_plan_approval_on_turn_complete() {
+        let approval_service = Arc::new(MockApprovalService::new(ApprovalStatus::Denied {
+            reason: Some("needs edits".to_string()),
+        }));
+        let client = new_client(Some(
+            approval_service.clone() as Arc<dyn ExecutorApprovalService>
+        ));
+
+        let (raw, notification) = make_notification(
+            "item/plan/delta",
+            Some(json!({
+                "threadId": "thread-1",
+                "turnId": "turn-1",
+                "itemId": "plan-1",
+                "delta": "Step A"
+            })),
+        );
+        let finished = client
+            .handle_notification(&raw, notification)
+            .await
+            .expect("handle plan delta");
+        assert!(!finished);
+
+        let (raw, notification) = make_notification(
+            "item/completed",
+            Some(json!({
+                "threadId": "thread-1",
+                "turnId": "turn-1",
+                "item": {
+                    "type": "plan",
+                    "id": "plan-1",
+                    "text": "Step A\nStep B"
+                }
+            })),
+        );
+        let finished = client
+            .handle_notification(&raw, notification)
+            .await
+            .expect("handle completed plan item");
+        assert!(!finished);
+
+        let (raw, notification) = make_notification(
+            "turn/completed",
+            Some(json!({
+                "threadId": "thread-1",
+                "turn": {
+                    "id": "turn-1",
+                    "items": [],
+                    "status": "completed",
+                    "error": null
+                }
+            })),
+        );
+        let finished = client
+            .handle_notification(&raw, notification)
+            .await
+            .expect("handle turn completed");
+        assert!(!finished, "denied plan approval should block completion");
+
+        let calls = approval_service.calls();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].tool_name, EXIT_PLAN_MODE_NAME);
+        assert_eq!(calls[0].tool_call_id, "plan-1");
+        assert_eq!(calls[0].tool_input, json!({ "plan": "Step A\nStep B" }));
     }
 }

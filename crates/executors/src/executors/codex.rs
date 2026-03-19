@@ -13,7 +13,7 @@ use std::{
 static CODEX_COMMAND: LazyLock<String> =
     LazyLock::new(|| env_command_or_default("VK_CODEX", "codex"));
 
-const FALLBACK_CODEX_COMMAND: &str = "npx -y @openai/codex@0.104.0";
+const FALLBACK_CODEX_COMMAND: &str = "npx -y @openai/codex@0.115.0";
 
 pub fn base_command() -> &'static str {
     CODEX_COMMAND.as_str()
