@@ -26,7 +26,7 @@ pub struct ProjectRepo {
     pub repo_id: Uuid,
 }
 
-#[derive(Debug, Clone, Deserialize, TS)]
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
 pub struct CreateProjectRepo {
     pub display_name: String,
     pub git_repo_path: String,

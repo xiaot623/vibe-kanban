@@ -28,13 +28,13 @@ pub struct Project {
     pub updated_at: DateTime<Utc>,
 }
 
-#[derive(Debug, Clone, Deserialize, TS)]
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
 pub struct CreateProject {
     pub name: String,
     pub repositories: Vec<CreateProjectRepo>,
 }
 
-#[derive(Debug, Deserialize, TS)]
+#[derive(Debug, Serialize, Deserialize, TS)]
 pub struct UpdateProject {
     pub name: Option<String>,
 }

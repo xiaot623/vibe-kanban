@@ -112,7 +112,7 @@ impl KeepAwakeState {
     }
 }
 
-/// Run desktop server mode (`kanban --server`) without launching Tauri windows.
+/// Run desktop server mode (`kanban server`) without launching Tauri windows.
 pub fn run_server_mode_blocking(port_override: Option<u16>) -> anyhow::Result<()> {
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -125,13 +125,7 @@ pub async fn run_server_mode(port_override: Option<u16>) -> anyhow::Result<()> {
     let deployment = startup::initialize_deployment().await?;
     startup::spawn_background_services(&deployment, "desktop-server").await;
 
-    let config = ServerConfig {
-        port: resolve_server_mode_port(port_override),
-        host: "127.0.0.1".to_string(),
-        open_browser: true,
-        write_port_file: true,
-        local_network_auth: false,
-    };
+    let config = server_mode_config(port_override);
 
     let (_port, server_handle) = startup::start_server(deployment.clone(), config)
         .await
@@ -142,6 +136,16 @@ pub async fn run_server_mode(port_override: Option<u16>) -> anyhow::Result<()> {
     startup::cleanup(&deployment).await;
 
     Ok(())
+}
+
+fn server_mode_config(port_override: Option<u16>) -> ServerConfig {
+    ServerConfig {
+        port: resolve_server_mode_port(port_override),
+        host: "127.0.0.1".to_string(),
+        open_browser: false,
+        write_port_file: true,
+        local_network_auth: false,
+    }
 }
 
 /// Start the embedded server and set up the desktop application.
@@ -269,6 +273,20 @@ fn parse_port_from_env(name: &str) -> Option<u16> {
             tracing::warn!("Ignoring invalid {name} value '{trimmed}': {err}");
             None
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::server_mode_config;
+
+    #[test]
+    fn server_subcommand_does_not_open_browser() {
+        let config = server_mode_config(Some(8080));
+        assert_eq!(config.port, 8080);
+        assert_eq!(config.host, "127.0.0.1");
+        assert!(!config.open_browser);
+        assert!(config.write_port_file);
     }
 }
 

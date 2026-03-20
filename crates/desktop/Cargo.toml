@@ -27,8 +27,10 @@ db = { path = "../db" }
 axum = { workspace = true }
 anyhow = { workspace = true }
 async-trait = { workspace = true }
+clap = { version = "4", features = ["derive", "env"] }
 nosleep = "0.2.1"
 gethostname = "0.5"
+reqwest = { workspace = true }
 uuid = { version = "1", features = ["v4"] }
 rfd = "0.15"
 

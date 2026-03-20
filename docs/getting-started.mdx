@@ -72,11 +72,16 @@ Agents can still perform system-level actions, so review their work and keep bac
 Desktop CLI server mode:
 
 ```bash
-kanban --server
-kanban --server --port 8080
+kanban server
+kanban server --port 8080
+kanban help task
+kanban project add --name demo --repo frontend=/path/to/frontend --repo backend=/path/to/backend
+kanban task query --project demo --q login --status todo
 ```
 
 If PATH was updated on first desktop launch, open a new terminal session before running `kanban`.
+
+`kanban project` and `kanban task` commands talk to the existing `/api` server. By default they discover the current local server from the port file; you can also pass `--server-url` or set `KANBAN_SERVER_URL`. `--password` is optional and only needed when you connect to a LAN server that requires Basic auth.
 
 For npm launches, you can still force a port with `PORT=8080 npx vibe-kanban`.
 </Tip>

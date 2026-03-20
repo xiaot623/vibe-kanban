@@ -12,6 +12,8 @@ mod cli;
 #[cfg(not(target_os = "android"))]
 mod cli_install;
 #[cfg(not(target_os = "android"))]
+mod client;
+#[cfg(not(target_os = "android"))]
 mod desktop;
 
 use serde::{Deserialize, Serialize};
@@ -48,7 +50,7 @@ pub enum LaunchError {
 impl LaunchError {
     pub fn exit_code(&self) -> i32 {
         match self {
-            Self::Cli(_) => 2,
+            Self::Cli(err) => err.exit_code(),
             Self::Runtime(_) => 1,
         }
     }
@@ -67,19 +69,46 @@ impl std::fmt::Display for LaunchError {
 #[cfg(not(target_os = "android"))]
 impl std::error::Error for LaunchError {}
 
-/// Entry point for desktop binaries that support `--server` mode.
+/// Entry point for desktop binaries that support `kanban server` mode.
 #[cfg(not(target_os = "android"))]
 pub fn run_from_cli_env() -> Result<(), LaunchError> {
     let args = cli::CliArgs::parse_env().map_err(LaunchError::Cli)?;
 
-    if args.server {
-        install_rustls_provider();
-        init_logging();
-        return desktop::run_server_mode_blocking(args.port).map_err(LaunchError::Runtime);
+    match args.command {
+        None => {
+            run();
+            Ok(())
+        }
+        Some(cli::CliCommand::Help(args)) => {
+            let target = match args.topic {
+                Some(cli::HelpTopic::Server) => cli::HelpTarget::Server,
+                Some(cli::HelpTopic::Project) => cli::HelpTarget::Project,
+                Some(cli::HelpTopic::Task) => cli::HelpTarget::Task,
+                None => cli::HelpTarget::Root,
+            };
+            print!("{}", cli::CliArgs::render_help(target));
+            Ok(())
+        }
+        Some(cli::CliCommand::Server(args)) => {
+            install_rustls_provider();
+            init_logging();
+            desktop::run_server_mode_blocking(args.port).map_err(LaunchError::Runtime)
+        }
+        Some(command @ cli::CliCommand::Project(_)) | Some(command @ cli::CliCommand::Task(_)) => {
+            install_rustls_provider();
+            init_logging();
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .map_err(anyhow::Error::from)
+                .map_err(LaunchError::Runtime)?;
+            let output = runtime
+                .block_on(client::execute_cli_command(command))
+                .map_err(LaunchError::Runtime)?;
+            print!("{output}");
+            Ok(())
+        }
     }
-
-    run();
-    Ok(())
 }
 
 /// Entry point for the Tauri application.

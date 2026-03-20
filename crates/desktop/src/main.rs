@@ -2,9 +2,16 @@
 
 #[cfg(not(target_os = "android"))]
 fn main() {
-    if let Err(err) = vibe_kanban_desktop::run_from_cli_env() {
-        eprintln!("{err}");
-        std::process::exit(err.exit_code());
+    match vibe_kanban_desktop::run_from_cli_env() {
+        Ok(()) => {}
+        Err(vibe_kanban_desktop::LaunchError::Cli(err)) => {
+            err.print();
+            std::process::exit(err.exit_code());
+        }
+        Err(err) => {
+            eprintln!("{err}");
+            std::process::exit(err.exit_code());
+        }
     }
 }
 
