@@ -200,7 +200,7 @@ impl acp::Client for AcpClient {
             Err(err) => {
                 warn!("Failed to request tool approval: {}", err);
                 return Err(acp::Error::new(
-                    ErrorCode::INTERNAL_ERROR.code,
+                    i32::from(ErrorCode::InternalError),
                     format!("Approval request failed: {}", err),
                 ));
             }
@@ -267,6 +267,7 @@ impl acp::Client for AcpClient {
             acp::SessionUpdate::ToolCall(tc) => Some(AcpEvent::ToolCall(tc)),
             acp::SessionUpdate::ToolCallUpdate(update) => Some(AcpEvent::ToolUpdate(update)),
             acp::SessionUpdate::Plan(plan) => Some(AcpEvent::Plan(plan)),
+            acp::SessionUpdate::UsageUpdate(update) => Some(AcpEvent::Usage(update)),
             _ => Some(AcpEvent::Other(args)),
         };
 

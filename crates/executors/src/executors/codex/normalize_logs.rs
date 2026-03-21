@@ -944,6 +944,33 @@ fn handle_server_notification(
                 entry_index,
             );
         }
+        ServerNotification::ThreadTokenUsageUpdated(event) => {
+            let total_tokens = if event.token_usage.last.total_tokens > 0 {
+                event.token_usage.last.total_tokens
+            } else {
+                event.token_usage.total.total_tokens
+            }
+            .max(0) as u32;
+            let model_context_window =
+                event.token_usage.model_context_window.unwrap_or_default().max(0) as u32;
+
+            add_normalized_entry(
+                msg_store,
+                entry_index,
+                NormalizedEntry {
+                    timestamp: None,
+                    entry_type: NormalizedEntryType::TokenUsageInfo(crate::logs::TokenUsageInfo {
+                        total_tokens,
+                        model_context_window,
+                    }),
+                    content: format!(
+                        "Tokens used: {} / Context window: {}",
+                        total_tokens, model_context_window
+                    ),
+                    metadata: None,
+                },
+            );
+        }
         ServerNotification::TurnStarted(_) => {
             state.in_plan_mode = false;
             state.assistant = None;
@@ -1725,4 +1752,55 @@ mod tests {
         }
         msg_store.push_finished();
     }
+
+    #[tokio::test]
+    async fn v2_thread_token_usage_updated_normalize() {
+        let worktree = create_temp_dir("v2-token-usage");
+        let msg_store = Arc::new(MsgStore::new());
+        normalize_logs(msg_store.clone(), &worktree);
+
+        push_json_line(
+            msg_store.as_ref(),
+            json!({
+                "method": "thread/tokenUsage/updated",
+                "params": {
+                    "threadId": "thread-1",
+                    "turnId": "turn-1",
+                    "tokenUsage": {
+                        "total": {
+                            "totalTokens": 321,
+                            "inputTokens": 300,
+                            "cachedInputTokens": 0,
+                            "outputTokens": 21,
+                            "reasoningOutputTokens": 0
+                        },
+                        "last": {
+                            "totalTokens": 321,
+                            "inputTokens": 300,
+                            "cachedInputTokens": 0,
+                            "outputTokens": 21,
+                            "reasoningOutputTokens": 0
+                        },
+                        "modelContextWindow": 128000
+                    }
+                }
+            }),
+        );
+
+        let entry = wait_for_entry(msg_store.as_ref(), |entry| {
+            matches!(entry.entry_type, NormalizedEntryType::TokenUsageInfo(_))
+        })
+        .await;
+
+        match entry.entry_type {
+            NormalizedEntryType::TokenUsageInfo(usage) => {
+                assert_eq!(usage.total_tokens, 321);
+                assert_eq!(usage.model_context_window, 128000);
+            }
+            other => panic!("expected token usage info, got {other:?}"),
+        }
+        assert_eq!(entry.content, "Tokens used: 321 / Context window: 128000");
+        msg_store.push_finished();
+    }
+
 }

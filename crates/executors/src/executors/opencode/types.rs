@@ -122,6 +122,8 @@ pub(super) struct MessageInfo {
     pub(super) role: MessageRole,
     #[serde(default)]
     pub(super) model: Option<MessageModelInfo>,
+    #[serde(default)]
+    pub(super) tokens: Option<MessageTokens>,
     #[serde(rename = "providerID", default)]
     pub(super) provider_id: Option<String>,
     #[serde(rename = "modelID", default)]
@@ -141,6 +143,45 @@ impl MessageInfo {
             .as_ref()
             .map(|m| m.model_id.as_str())
             .or(self.model_id.as_deref())
+    }
+}
+
+#[derive(Debug, Deserialize)]
+pub(super) struct MessageTokens {
+    #[serde(default)]
+    pub(super) input: Option<u64>,
+    #[serde(default)]
+    pub(super) output: Option<u64>,
+    #[serde(default)]
+    pub(super) reasoning: Option<u64>,
+    #[serde(default)]
+    pub(super) cache: Option<MessageTokenCache>,
+}
+
+impl MessageTokens {
+    pub(super) fn total_tokens(&self) -> u64 {
+        self.input.unwrap_or(0)
+            + self.output.unwrap_or(0)
+            + self.reasoning.unwrap_or(0)
+            + self
+                .cache
+                .as_ref()
+                .map(MessageTokenCache::total_tokens)
+                .unwrap_or(0)
+    }
+}
+
+#[derive(Debug, Deserialize)]
+pub(super) struct MessageTokenCache {
+    #[serde(default)]
+    pub(super) read: Option<u64>,
+    #[serde(default)]
+    pub(super) write: Option<u64>,
+}
+
+impl MessageTokenCache {
+    fn total_tokens(&self) -> u64 {
+        self.read.unwrap_or(0) + self.write.unwrap_or(0)
     }
 }
 

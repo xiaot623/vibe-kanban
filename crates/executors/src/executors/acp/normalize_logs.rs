@@ -185,6 +185,24 @@ pub fn normalize_logs(msg_store: Arc<MsgStore>, worktree_path: &Path) {
                         };
                         msg_store.push_patch(ConversationPatch::add_normalized_entry(idx, entry));
                     }
+                    AcpEvent::Usage(update) => {
+                        let idx = entry_index.next();
+                        let entry = NormalizedEntry {
+                            timestamp: None,
+                            entry_type: NormalizedEntryType::TokenUsageInfo(
+                                crate::logs::TokenUsageInfo {
+                                    total_tokens: update.used.min(u32::MAX as u64) as u32,
+                                    model_context_window: update.size.min(u32::MAX as u64) as u32,
+                                },
+                            ),
+                            content: format!(
+                                "Tokens used: {} / Context window: {}",
+                                update.used, update.size
+                            ),
+                            metadata: None,
+                        };
+                        msg_store.push_patch(ConversationPatch::add_normalized_entry(idx, entry));
+                    }
                     AcpEvent::RequestPermission(perm) => {
                         if let Ok(tc) = agent_client_protocol::ToolCall::try_from(perm.tool_call) {
                             handle_tool_call(
@@ -815,6 +833,7 @@ impl TryFrom<SessionNotification> for AcpEvent {
             acp::SessionUpdate::CurrentModeUpdate(update) => {
                 AcpEvent::CurrentMode(update.current_mode_id)
             }
+            acp::SessionUpdate::UsageUpdate(update) => AcpEvent::Usage(update),
             _ => return Err(()),
         };
         Ok(event)
@@ -901,6 +920,24 @@ mod tests {
         panic!("timed out waiting for normalized tool use entry");
     }
 
+    async fn wait_for_token_usage_entry(msg_store: &MsgStore) -> NormalizedEntry {
+        for _ in 0..100 {
+            if let Some(entry) = msg_store.get_history().iter().rev().find_map(|msg| {
+                if let LogMsg::JsonPatch(patch) = msg
+                    && let Some((_, entry)) = extract_normalized_entry_from_patch(patch)
+                    && matches!(entry.entry_type, NormalizedEntryType::TokenUsageInfo(_))
+                {
+                    return Some(entry);
+                }
+                None
+            }) {
+                return entry;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        panic!("timed out waiting for normalized token usage entry");
+    }
+
     #[tokio::test]
     async fn exit_plan_mode_tool_call_normalizes_to_plan_presentation_entry() {
         let worktree = create_temp_dir("plan-presentation");
@@ -981,5 +1018,28 @@ mod tests {
             other => panic!("expected tool_use entry, got {other:?}"),
         }
         assert_eq!(entry.content, title);
+    }
+
+    #[tokio::test]
+    async fn usage_update_normalizes_to_token_usage_entry() {
+        let worktree = create_temp_dir("usage-update");
+        let msg_store = Arc::new(MsgStore::new());
+        normalize_logs(msg_store.clone(), &worktree);
+
+        let update = agent_client_protocol::UsageUpdate::new(321, 1_048_576);
+        msg_store.push_stdout(format!(
+            "{}\n",
+            serde_json::to_string(&AcpEvent::Usage(update)).expect("serialize usage event")
+        ));
+
+        let entry = wait_for_token_usage_entry(msg_store.as_ref()).await;
+        match entry.entry_type {
+            NormalizedEntryType::TokenUsageInfo(usage) => {
+                assert_eq!(usage.total_tokens, 321);
+                assert_eq!(usage.model_context_window, 1_048_576);
+            }
+            other => panic!("expected token usage info entry, got {other:?}"),
+        }
+        assert_eq!(entry.content, "Tokens used: 321 / Context window: 1048576");
     }
 }

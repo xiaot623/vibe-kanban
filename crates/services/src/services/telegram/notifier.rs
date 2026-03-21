@@ -1103,10 +1103,14 @@ async fn emit_stage_summary(
     }
 
     if let Some(usage) = token_usage {
-        lines.push(format!(
-            "Token usage: total={} / context={}",
-            usage.total_tokens, usage.model_context_window
-        ));
+        if usage.model_context_window > 0 {
+            lines.push(format!(
+                "Token usage: total={} / context={}",
+                usage.total_tokens, usage.model_context_window
+            ));
+        } else {
+            lines.push(format!("Token usage: total={}", usage.total_tokens));
+        }
     } else {
         lines.push("Token usage: n/a".to_string());
     }

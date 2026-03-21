@@ -189,6 +189,7 @@ impl LogState {
             SdkEvent::MessageUpdated(event) => {
                 let info = event.info;
                 self.maybe_emit_model_system_message(&info);
+                self.maybe_emit_token_usage(&info);
                 self.message_roles.insert(info.id, info.role);
             }
             SdkEvent::MessagePartUpdated(event) => {
@@ -344,6 +345,31 @@ impl LogState {
             "model: {model_id}  provider: {provider_id}"
         )));
         self.model_system_message_emitted = true;
+    }
+
+    fn maybe_emit_token_usage(&mut self, info: &MessageInfo) {
+        if info.role != MessageRole::Assistant {
+            return;
+        }
+
+        let Some(tokens) = info.tokens.as_ref() else {
+            return;
+        };
+
+        let total_tokens = tokens.total_tokens().min(u32::MAX as u64) as u32;
+        if total_tokens == 0 {
+            return;
+        }
+
+        self.add_normalized_entry(NormalizedEntry {
+            timestamp: None,
+            entry_type: NormalizedEntryType::TokenUsageInfo(crate::logs::TokenUsageInfo {
+                total_tokens,
+                model_context_window: 0,
+            }),
+            content: format!("Tokens used: {} / Context window: 0", total_tokens),
+            metadata: None,
+        });
     }
 
     fn handle_part_update(
@@ -1630,6 +1656,52 @@ mod tests {
             .find(|entry| matches!(entry.entry_type, NormalizedEntryType::Thinking))
             .expect("thinking entry should be present");
         assert_eq!(thinking_entry.content, "Thinking");
+    }
+
+    #[tokio::test]
+    async fn message_updated_emits_token_usage_entry() {
+        let (mut state, msg_store) = new_state();
+        let worktree_path = Path::new("/tmp");
+
+        state
+            .handle_sdk_event(
+                &json!({
+                    "type": "message.updated",
+                    "properties": {
+                        "info": {
+                            "id": "message-usage-1",
+                            "role": "assistant",
+                            "tokens": {
+                                "input": 300,
+                                "output": 21,
+                                "reasoning": 9,
+                                "cache": {
+                                    "read": 10,
+                                    "write": 1
+                                }
+                            }
+                        }
+                    }
+                }),
+                worktree_path,
+                &msg_store,
+            )
+            .await;
+
+        let entries = collect_entries(&msg_store);
+        let usage_entry = entries
+            .iter()
+            .find(|entry| matches!(entry.entry_type, NormalizedEntryType::TokenUsageInfo(_)))
+            .expect("token usage entry should be present");
+
+        match usage_entry.entry_type {
+            NormalizedEntryType::TokenUsageInfo(ref usage) => {
+                assert_eq!(usage.total_tokens, 341);
+                assert_eq!(usage.model_context_window, 0);
+            }
+            _ => panic!("expected token usage entry"),
+        }
+        assert_eq!(usage_entry.content, "Tokens used: 341 / Context window: 0");
     }
 
     #[tokio::test]
