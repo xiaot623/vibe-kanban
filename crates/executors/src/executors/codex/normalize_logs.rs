@@ -6,11 +6,10 @@ use std::{
 
 use codex_app_server_protocol::{
     CommandExecutionStatus as AppCommandExecutionStatus, FileUpdateChange as AppFileUpdateChange,
-    JSONRPCResponse, McpToolCallStatus as AppMcpToolCallStatus,
-    NewConversationResponse, PatchApplyStatus as AppPatchApplyStatus,
-    PatchChangeKind as AppPatchChangeKind, ServerNotification, ThreadItem as AppThreadItem,
-    ThreadResumeResponse, ThreadStartResponse, TurnPlanStepStatus as AppTurnPlanStepStatus,
-    WebSearchAction as AppWebSearchAction,
+    JSONRPCResponse, McpToolCallStatus as AppMcpToolCallStatus, NewConversationResponse,
+    PatchApplyStatus as AppPatchApplyStatus, PatchChangeKind as AppPatchChangeKind,
+    ServerNotification, ThreadItem as AppThreadItem, ThreadResumeResponse, ThreadStartResponse,
+    TurnPlanStepStatus as AppTurnPlanStepStatus, WebSearchAction as AppWebSearchAction,
 };
 use codex_protocol::{openai_models::ReasoningEffort, protocol::McpInvocation};
 use futures::StreamExt;
@@ -1158,7 +1157,6 @@ pub fn normalize_logs(msg_store: Arc<MsgStore>, worktree_path: &Path) {
                 msg_store.push_session_id(session_id.as_str().to_string());
                 continue;
             }
-
         }
     });
 }
@@ -1727,5 +1725,4 @@ mod tests {
         }
         msg_store.push_finished();
     }
-
 }

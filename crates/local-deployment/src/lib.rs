@@ -21,6 +21,7 @@ use services::services::{
     project::ProjectService,
     queued_message::QueuedMessageService,
     repo::RepoService,
+    telegram::telegraph,
 };
 use tokio::sync::{Mutex, RwLock};
 use utils::{
@@ -94,6 +95,10 @@ impl Deployment for LocalDeployment {
                 raw_config.show_release_notes = false;
                 raw_config.last_app_version = Some(current_version.to_string());
             }
+        }
+
+        if let Err(err) = telegraph::ensure_telegraph_config(&mut raw_config).await {
+            tracing::warn!("Failed to auto-initialize telegraph config: {err}");
         }
 
         // Only save config if there was no parse error

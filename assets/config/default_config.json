@@ -53,6 +53,9 @@
     "interactive_bot": true,
     "bot_token": null,
     "chat_id": null,
+    "telegraph_enabled": false,
+    "telegraph_access_token": null,
+    "telegraph_short_name": null,
     "default_executor": "CLAUDE_CODE",
     "default_mode": "DEFAULT"
   },

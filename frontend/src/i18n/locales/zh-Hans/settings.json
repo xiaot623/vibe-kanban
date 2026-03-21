@@ -217,6 +217,12 @@
           "defaultLabel": "DEFAULT",
           "placeholder": "选择模式",
           "helper": "从 Telegram 运行任务时使用的模式。"
+        },
+        "telegraph": {
+          "enabled": {
+            "label": "启用 Telegra.ph 日志镜像（Beta）",
+            "helper": "将标准化执行日志镜像到 Telegra.ph，并在阶段总结消息中追加日志链接。"
+          }
         }
       },
       "mcpServer": {

@@ -1105,6 +1105,33 @@ export function GeneralSettings() {
                   {t('settings.general.telegram.defaultMode.helper')}
                 </p>
               </div>
+
+              <div className="ml-6 flex items-center space-x-2">
+                <Checkbox
+                  id="telegram-telegraph-enabled"
+                  checked={draft?.telegram?.telegraph_enabled ?? false}
+                  onCheckedChange={(checked: boolean) =>
+                    updateDraft({
+                      telegram: {
+                        ...draft!.telegram,
+                        telegraph_enabled: checked,
+                      },
+                    })
+                  }
+                />
+                <div className="space-y-0.5">
+                  <Label
+                    htmlFor="telegram-telegraph-enabled"
+                    className="cursor-pointer"
+                  >
+                    {t('settings.general.telegram.telegraph.enabled.label')}
+                  </Label>
+                  <p className="text-sm text-muted-foreground">
+                    {t('settings.general.telegram.telegraph.enabled.helper')}
+                  </p>
+                </div>
+              </div>
+
             </>
           )}
 

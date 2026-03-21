@@ -62,6 +62,7 @@ use crate::services::{
     execution_log_hub::ExecutionLogHub,
     git::{GitService, GitServiceError},
     notification::NotificationService,
+    telegram::telegraph,
     workspace_manager::WorkspaceError as WorkspaceManagerError,
     worktree_manager::WorktreeError,
 };
@@ -583,6 +584,8 @@ pub trait ContainerService {
         map.get(uuid).cloned()
     }
 
+    async fn telegram_config(&self) -> crate::services::config::TelegramConfig;
+
     async fn git_branch_prefix(&self) -> String;
 
     async fn git_branch_from_workspace(&self, workspace_id: &Uuid, task_title: &str) -> String {
@@ -1001,13 +1004,19 @@ pub trait ContainerService {
         )
     }
 
-    fn spawn_stream_raw_logs_to_db(&self, execution_id: &Uuid) -> JoinHandle<()> {
+    async fn spawn_stream_raw_logs_to_db(&self, execution_id: &Uuid) -> JoinHandle<()> {
         let execution_id = *execution_id;
         let msg_stores = self.msg_stores().clone();
         let execution_log_hubs = self.execution_log_hubs().clone();
         let db = self.db().clone();
+        let telegraph_mirror_config =
+            telegraph::TelegraphMirrorConfig::from_telegram_config(&self.telegram_config().await);
 
         tokio::spawn(async move {
+            let telegraph_page_title = ExecutionProcess::load_context(&db.pool, execution_id)
+                .await
+                .map(|ctx| telegraph::page_title_for_execution(&ctx.task.title, execution_id))
+                .unwrap_or_else(|_| telegraph::page_title_for_execution("", execution_id));
             let store = {
                 let map = msg_stores.read().await;
                 map.get(&execution_id).cloned()
@@ -1019,7 +1028,17 @@ pub trait ContainerService {
 
             if let Some(store) = store {
                 let mut raw_stream = store.history_plus_stream();
-                let mut normalized_stream = hub.map(|h| h.normalized_history_plus_stream());
+                let mut normalized_stream = hub.clone().map(|h| h.normalized_history_plus_stream());
+                let telegraph_handle = match (hub.clone(), telegraph_mirror_config.clone()) {
+                    (Some(hub), Some(config)) => Some(telegraph::spawn_telegraph_log_consumer(
+                        execution_id,
+                        telegraph_page_title,
+                        hub.normalized_history_plus_stream(),
+                        config,
+                        db.pool.clone(),
+                    )),
+                    _ => None,
+                };
                 let mut pending_logs: Vec<NewExecutionProcessLog> = Vec::new();
                 let mut flush_interval = tokio::time::interval_at(
                     Instant::now() + LOG_DB_FLUSH_INTERVAL,
@@ -1148,6 +1167,16 @@ pub trait ContainerService {
                         flush_execution_log_batch(&db.pool, execution_id, &mut pending_logs).await;
                         break;
                     }
+                }
+
+                if let Some(handle) = telegraph_handle
+                    && let Err(err) = handle.await
+                {
+                    tracing::debug!(
+                        "Telegraph consumer task join failed for execution {}: {}",
+                        execution_id,
+                        err
+                    );
                 }
             }
         })
@@ -1395,7 +1424,8 @@ pub trait ContainerService {
             return Err(start_error);
         }
 
-        self.spawn_stream_raw_logs_to_db(&execution_process.id);
+        self.spawn_stream_raw_logs_to_db(&execution_process.id)
+            .await;
 
         // Start processing normalised logs for executor requests and follow ups
         let workspace_root = self.workspace_to_current_dir(workspace);

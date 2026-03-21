@@ -35,7 +35,7 @@ use tokio_util::sync::CancellationToken;
 use utils::{log_msg::LogMsg, msg_store::MsgStore};
 use uuid::Uuid;
 
-use super::{EXIT_PLAN_MODE_NAME, format, keyboard};
+use super::{EXIT_PLAN_MODE_NAME, format, keyboard, telegraph};
 use crate::services::{approvals::Approvals, config::Config, git::GitService};
 
 /// Telegram context for event handlers.
@@ -496,6 +496,7 @@ struct RunFeedAccumulator {
     task_id: Option<Uuid>,
     task_project_id: Option<Uuid>,
     task_title: Option<String>,
+    execution_process_id: Option<Uuid>,
     sent_pending_approvals: HashSet<String>,
     sent_terminal_tool_updates: HashSet<(usize, &'static str)>,
 }
@@ -590,6 +591,10 @@ impl RunFeedAccumulator {
         self.task_id = Some(task_id);
         self.task_project_id = Some(task_project_id);
         self.task_title = Some(title.to_string());
+    }
+
+    fn remember_execution_process(&mut self, execution_process_id: Uuid) {
+        self.execution_process_id = Some(execution_process_id);
     }
 }
 
@@ -700,6 +705,7 @@ async fn run_feed_watcher_loop(
         };
 
         watched_processes.insert(process.id);
+        accumulator.remember_execution_process(process.id);
 
         let Some(store) = wait_for_msg_store(&tg, process.id, &cancel).await else {
             tracing::warn!(
@@ -1105,6 +1111,14 @@ async fn emit_stage_summary(
         lines.push("Token usage: n/a".to_string());
     }
 
+    let telegraph_urls = match accumulator.execution_process_id.as_ref() {
+        Some(execution_process_id) => {
+            telegraph::get_execution_process_telegraph_urls(&tg.db.pool, execution_process_id).await
+        }
+        None => Vec::new(),
+    };
+    append_telegraph_log_lines(&mut lines, &telegraph_urls);
+
     let is_daily_task = is_daily_project_task(tg, accumulator.task_project_id).await;
     let summary_markup = stage_summary_keyboard(trigger, accumulator.task_id, is_daily_task);
     let sent_ids = send_split_telegram_card(tg, lines.join("\n"), summary_markup).await;
@@ -1115,6 +1129,19 @@ async fn emit_stage_summary(
         delete_running_messages_for_task(tg, task_id).await;
     }
     accumulator.finalize_stage();
+}
+
+fn append_telegraph_log_lines(lines: &mut Vec<String>, telegraph_urls: &[String]) {
+    match telegraph_urls {
+        [] => {}
+        [url] => lines.push(format!("Telegraph log: {url}")),
+        urls => {
+            lines.push("Telegraph logs:".to_string());
+            for (page_index, url) in urls.iter().enumerate() {
+                lines.push(format!("{}. {url}", page_index + 1));
+            }
+        }
+    }
 }
 
 async fn delete_running_messages_for_task(tg: &TelegramContext, task_id: Uuid) {
@@ -1483,6 +1510,44 @@ mod tests {
     fn split_telegram_chunks_splits_when_over_limit() {
         let chunks = format::split_telegram_chunks("abcdefghij", 4, 0);
         assert_eq!(chunks, vec!["abcd", "efgh", "ij"]);
+    }
+
+    #[test]
+    fn append_telegraph_log_line_adds_tail_line_when_url_exists() {
+        let mut lines = vec!["line-1".to_string()];
+        append_telegraph_log_lines(&mut lines, &[String::from("https://telegra.ph/abc")]);
+        assert_eq!(
+            lines.last().map(String::as_str),
+            Some("Telegraph log: https://telegra.ph/abc")
+        );
+    }
+
+    #[test]
+    fn append_telegraph_log_line_keeps_original_lines_without_url() {
+        let mut lines = vec!["line-1".to_string()];
+        append_telegraph_log_lines(&mut lines, &[]);
+        assert_eq!(lines, vec!["line-1".to_string()]);
+    }
+
+    #[test]
+    fn append_telegraph_log_line_adds_all_urls_when_multiple_pages_exist() {
+        let mut lines = vec!["line-1".to_string()];
+        append_telegraph_log_lines(
+            &mut lines,
+            &[
+                String::from("https://telegra.ph/abc"),
+                String::from("https://telegra.ph/def"),
+            ],
+        );
+        assert_eq!(
+            lines,
+            vec![
+                "line-1".to_string(),
+                "Telegraph logs:".to_string(),
+                "1. https://telegra.ph/abc".to_string(),
+                "2. https://telegra.ph/def".to_string(),
+            ]
+        );
     }
 
     #[test]

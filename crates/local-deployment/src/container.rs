@@ -1036,6 +1036,10 @@ impl ContainerService for LocalContainerService {
         &self.notification_service
     }
 
+    async fn telegram_config(&self) -> services::services::config::TelegramConfig {
+        self.config.read().await.telegram.clone()
+    }
+
     async fn git_branch_prefix(&self) -> String {
         self.config.read().await.git_branch_prefix.clone()
     }

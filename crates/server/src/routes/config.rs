@@ -18,10 +18,13 @@ use executors::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use services::services::config::{
-    Config, ConfigError, SoundFile,
-    editor::{EditorConfig, EditorType},
-    save_config_to_file,
+use services::services::{
+    config::{
+        Config, ConfigError, SoundFile,
+        editor::{EditorConfig, EditorType},
+        save_config_to_file,
+    },
+    telegram::telegraph,
 };
 use tokio::fs;
 use ts_rs::TS;
@@ -112,7 +115,7 @@ async fn get_user_system_info(
 
 async fn update_config(
     State(deployment): State<DeploymentImpl>,
-    Json(new_config): Json<Config>,
+    Json(mut new_config): Json<Config>,
 ) -> ResponseJson<ApiResponse<Config>> {
     let config_path = config_path();
 
@@ -125,6 +128,10 @@ async fn update_config(
 
     // Get old config state before updating
     let old_config = deployment.config().read().await.clone();
+
+    if let Err(err) = telegraph::ensure_telegraph_config(&mut new_config).await {
+        tracing::warn!("Failed to auto-initialize telegraph config during save: {err}");
+    }
 
     match save_config_to_file(&new_config, &config_path).await {
         Ok(_) => {

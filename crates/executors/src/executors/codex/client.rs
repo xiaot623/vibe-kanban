@@ -19,10 +19,7 @@ use codex_app_server_protocol::{
     ToolRequestUserInputAnswer, ToolRequestUserInputQuestion, ToolRequestUserInputResponse,
     TurnStartParams, TurnStartResponse, UserInput,
 };
-use codex_protocol::{
-    config_types::CollaborationMode,
-    protocol::ReviewDecision,
-};
+use codex_protocol::{config_types::CollaborationMode, protocol::ReviewDecision};
 use serde::{Serialize, de::DeserializeOwned};
 use serde_json::{self, Value, json};
 use tokio::{

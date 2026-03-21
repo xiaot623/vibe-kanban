@@ -217,6 +217,12 @@
           "defaultLabel": "Default",
           "placeholder": "Select mode",
           "helper": "Mode used when running tasks from Telegram."
+        },
+        "telegraph": {
+          "enabled": {
+            "label": "Enable Telegra.ph log mirror (Beta)",
+            "helper": "Mirror normalized execution logs to Telegra.ph and append the log link to stage summary messages."
+          }
         }
       },
       "mcpServer": {

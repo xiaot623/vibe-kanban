@@ -28,6 +28,10 @@ pub struct TelegramConfig {
     pub enabled: bool,
     pub bot_token: Option<String>,
     pub chat_id: Option<i64>,
+    #[serde(default)]
+    pub telegraph_enabled: bool,
+    pub telegraph_access_token: Option<String>,
+    pub telegraph_short_name: Option<String>,
     #[serde(default = "default_telegram_executor")]
     pub default_executor: String,
     #[serde(default = "default_telegram_mode")]
@@ -48,6 +52,9 @@ impl Default for TelegramConfig {
             enabled: false,
             bot_token: None,
             chat_id: None,
+            telegraph_enabled: false,
+            telegraph_access_token: None,
+            telegraph_short_name: None,
             default_executor: default_telegram_executor(),
             default_mode: default_telegram_mode(),
         }
@@ -374,5 +381,49 @@ impl From<super::v1::Config> for Config {
             mcp_server: McpServerConfig::default(),
             power_mode: PowerMode::default(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::TelegramConfig;
+
+    #[test]
+    fn telegram_config_legacy_payload_defaults_telegraph_fields() {
+        let raw = serde_json::json!({
+            "enabled": true,
+            "bot_token": "token",
+            "chat_id": 123,
+            "default_executor": "CLAUDE_CODE",
+            "default_mode": "DEFAULT"
+        });
+
+        let parsed: TelegramConfig =
+            serde_json::from_value(raw).expect("legacy telegram config should deserialize");
+        assert!(!parsed.telegraph_enabled);
+        assert_eq!(parsed.telegraph_access_token, None);
+        assert_eq!(parsed.telegraph_short_name, None);
+    }
+
+    #[test]
+    fn telegram_config_roundtrip_includes_telegraph_fields() {
+        let config = TelegramConfig {
+            enabled: true,
+            bot_token: Some("bot".to_string()),
+            chat_id: Some(456),
+            telegraph_enabled: true,
+            telegraph_access_token: Some("access".to_string()),
+            telegraph_short_name: Some("vk_beta".to_string()),
+            default_executor: "CLAUDE_CODE".to_string(),
+            default_mode: "DEFAULT".to_string(),
+        };
+
+        let value = serde_json::to_value(&config).expect("serialize telegram config");
+        let parsed: TelegramConfig =
+            serde_json::from_value(value).expect("deserialize telegram config");
+
+        assert!(parsed.telegraph_enabled);
+        assert_eq!(parsed.telegraph_access_token.as_deref(), Some("access"));
+        assert_eq!(parsed.telegraph_short_name.as_deref(), Some("vk_beta"));
     }
 }
