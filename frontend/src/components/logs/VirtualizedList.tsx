@@ -16,7 +16,11 @@ import {
   useConversationHistory,
 } from '@/hooks/useConversationHistory';
 import { Loader2 } from 'lucide-react';
-import { TaskWithAttemptStatus } from 'shared/types';
+import {
+  ActionType,
+  NormalizedEntry,
+  TaskWithAttemptStatus,
+} from 'shared/types';
 import type { WorkspaceWithSession } from '@/types/attempt';
 import { ApprovalFormProvider } from '@/contexts/ApprovalFormContext';
 
@@ -76,6 +80,68 @@ const computeItemKey: VirtuosoMessageListProps<
   MessageListContext
 >['computeItemKey'] = ({ data }) => `l-${data.patchKey}`;
 
+const hasStructuredToolUseData = (actionType: ActionType): boolean => {
+  switch (actionType.action) {
+    case 'command_run':
+      return Boolean(
+        actionType.command.trim() ||
+          actionType.result?.output?.trim() ||
+          actionType.result?.exit_status
+      );
+    case 'file_edit':
+      return Boolean(actionType.path.trim() || actionType.changes.length > 0);
+    case 'file_read':
+      return Boolean(actionType.path.trim());
+    case 'search':
+      return Boolean(actionType.query.trim());
+    case 'web_fetch':
+      return Boolean(actionType.url.trim());
+    case 'tool':
+      return Boolean(actionType.arguments || actionType.result);
+    case 'task_create':
+      return Boolean(actionType.description.trim());
+    case 'plan_presentation':
+      return Boolean(actionType.plan.trim());
+    case 'todo_management':
+      return actionType.todos.length > 0 || Boolean(actionType.operation.trim());
+    case 'other':
+      return Boolean(actionType.description.trim());
+    default:
+      return false;
+  }
+};
+
+const isRenderableNormalizedEntry = (entry: NormalizedEntry): boolean => {
+  if (entry.content.trim() !== '') {
+    return true;
+  }
+
+  switch (entry.entry_type.type) {
+    case 'loading':
+    case 'next_action':
+    case 'token_usage_info':
+      return true;
+    case 'tool_use':
+      return (
+        entry.entry_type.status.status === 'pending_approval' ||
+        hasStructuredToolUseData(entry.entry_type.action_type)
+      );
+    default:
+      return false;
+  }
+};
+
+const filterRenderableEntries = (
+  entries: PatchTypeWithKey[]
+): PatchTypeWithKey[] => {
+  return entries.filter((entry) => {
+    if (entry.type !== 'NORMALIZED_ENTRY') {
+      return true;
+    }
+    return isRenderableNormalizedEntry(entry.content);
+  });
+};
+
 const VirtualizedList = ({ attempt, task }: VirtualizedListProps) => {
   const [channelData, setChannelData] =
     useState<DataWithScrollModifier<PatchTypeWithKey> | null>(null);
@@ -93,14 +159,15 @@ const VirtualizedList = ({ attempt, task }: VirtualizedListProps) => {
     addType: AddEntryType,
     newLoading: boolean
   ) => {
+    const filteredEntries = filterRenderableEntries(newEntries);
     let scrollModifier: ScrollModifier = InitialDataScrollModifier;
 
     if ((addType === 'running' || addType === 'plan') && !loading) {
       scrollModifier = AutoScrollToBottom;
     }
 
-    setChannelData({ data: newEntries, scrollModifier });
-    setEntries(newEntries);
+    setChannelData({ data: filteredEntries, scrollModifier });
+    setEntries(filteredEntries);
 
     if (loading) {
       setLoading(newLoading);

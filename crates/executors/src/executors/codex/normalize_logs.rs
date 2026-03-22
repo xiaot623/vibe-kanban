@@ -48,6 +48,7 @@ trait ToNormalizedEntryOpt {
 struct StreamingText {
     index: usize,
     content: String,
+    emitted: bool,
 }
 
 #[derive(Default)]
@@ -250,42 +251,55 @@ impl LogState {
         content: String,
         type_: StreamingTextKind,
         mode: UpdateMode,
-    ) -> (NormalizedEntry, usize, bool) {
+    ) -> Option<(NormalizedEntry, usize, bool)> {
         let index_provider = &self.entry_index;
         let entry = match type_ {
             StreamingTextKind::Assistant => &mut self.assistant,
             StreamingTextKind::Thinking => &mut self.thinking,
         };
-        let is_new = entry.is_none();
-        let (content, index) = if entry.is_none() {
+        if entry.is_none() {
             let index = index_provider.next();
-            *entry = Some(StreamingText { index, content });
-            (&entry.as_ref().unwrap().content, index)
+            *entry = Some(StreamingText {
+                index,
+                content,
+                emitted: false,
+            });
         } else {
             let streaming_state = entry.as_mut().unwrap();
             match mode {
                 UpdateMode::Append => streaming_state.content.push_str(&content),
                 UpdateMode::Set => streaming_state.content = content,
             }
-            (&streaming_state.content, streaming_state.index)
-        };
+        }
+
+        let streaming_state = entry.as_mut().unwrap();
+
+        if streaming_state.content.trim().is_empty() {
+            return None;
+        }
+
+        let is_new = !streaming_state.emitted;
+        streaming_state.emitted = true;
+        let content = streaming_state.content.clone();
+        let index = streaming_state.index;
+
         let normalized_entry = NormalizedEntry {
             timestamp: None,
             entry_type: match type_ {
                 StreamingTextKind::Assistant => NormalizedEntryType::AssistantMessage,
                 StreamingTextKind::Thinking => NormalizedEntryType::Thinking,
             },
-            content: content.clone(),
+            content,
             metadata: None,
         };
-        (normalized_entry, index, is_new)
+        Some((normalized_entry, index, is_new))
     }
 
     fn streaming_text_append(
         &mut self,
         content: String,
         type_: StreamingTextKind,
-    ) -> (NormalizedEntry, usize, bool) {
+    ) -> Option<(NormalizedEntry, usize, bool)> {
         self.streaming_text_update(content, type_, UpdateMode::Append)
     }
 
@@ -293,23 +307,23 @@ impl LogState {
         &mut self,
         content: String,
         type_: StreamingTextKind,
-    ) -> (NormalizedEntry, usize, bool) {
+    ) -> Option<(NormalizedEntry, usize, bool)> {
         self.streaming_text_update(content, type_, UpdateMode::Set)
     }
 
-    fn assistant_message_append(&mut self, content: String) -> (NormalizedEntry, usize, bool) {
+    fn assistant_message_append(&mut self, content: String) -> Option<(NormalizedEntry, usize, bool)> {
         self.streaming_text_append(content, StreamingTextKind::Assistant)
     }
 
-    fn thinking_append(&mut self, content: String) -> (NormalizedEntry, usize, bool) {
+    fn thinking_append(&mut self, content: String) -> Option<(NormalizedEntry, usize, bool)> {
         self.streaming_text_append(content, StreamingTextKind::Thinking)
     }
 
-    fn assistant_message(&mut self, content: String) -> (NormalizedEntry, usize, bool) {
+    fn assistant_message(&mut self, content: String) -> Option<(NormalizedEntry, usize, bool)> {
         self.streaming_text_set(content, StreamingTextKind::Assistant)
     }
 
-    fn thinking(&mut self, content: String) -> (NormalizedEntry, usize, bool) {
+    fn thinking(&mut self, content: String) -> Option<(NormalizedEntry, usize, bool)> {
         self.streaming_text_set(content, StreamingTextKind::Thinking)
     }
 
@@ -658,8 +672,9 @@ fn handle_v2_item_completed(
     match item {
         AppThreadItem::AgentMessage { text, .. } => {
             state.thinking = None;
-            let (entry, index, is_new) = state.assistant_message(text);
-            upsert_normalized_entry(&msg_store, index, entry, is_new);
+            if let Some((entry, index, is_new)) = state.assistant_message(text) {
+                upsert_normalized_entry(&msg_store, index, entry, is_new);
+            }
             state.assistant = None;
         }
         AppThreadItem::Plan { id, text } => {
@@ -683,8 +698,9 @@ fn handle_v2_item_completed(
                     summary.join("")
                 };
                 if !text.trim().is_empty() {
-                    let (entry, index, is_new) = state.thinking(text);
-                    upsert_normalized_entry(&msg_store, index, entry, is_new);
+                    if let Some((entry, index, is_new)) = state.thinking(text) {
+                        upsert_normalized_entry(&msg_store, index, entry, is_new);
+                    }
                 }
             }
             state.thinking = None;
@@ -985,21 +1001,24 @@ fn handle_server_notification(
         }
         ServerNotification::AgentMessageDelta(event) => {
             state.thinking = None;
-            let (entry, index, is_new) = state.assistant_message_append(event.delta);
-            upsert_normalized_entry(msg_store, index, entry, is_new);
+            if let Some((entry, index, is_new)) = state.assistant_message_append(event.delta) {
+                upsert_normalized_entry(msg_store, index, entry, is_new);
+            }
         }
         ServerNotification::ReasoningTextDelta(event) => {
             state.assistant = None;
             if !state.in_plan_mode {
-                let (entry, index, is_new) = state.thinking_append(event.delta);
-                upsert_normalized_entry(msg_store, index, entry, is_new);
+                if let Some((entry, index, is_new)) = state.thinking_append(event.delta) {
+                    upsert_normalized_entry(msg_store, index, entry, is_new);
+                }
             }
         }
         ServerNotification::ReasoningSummaryTextDelta(event) => {
             state.assistant = None;
             if !state.in_plan_mode {
-                let (entry, index, is_new) = state.thinking_append(event.delta);
-                upsert_normalized_entry(msg_store, index, entry, is_new);
+                if let Some((entry, index, is_new)) = state.thinking_append(event.delta) {
+                    upsert_normalized_entry(msg_store, index, entry, is_new);
+                }
             }
         }
         ServerNotification::ReasoningSummaryPartAdded(_) => {
@@ -1503,6 +1522,92 @@ mod tests {
         })
         .await;
         assert_eq!(entry.content, "Hello");
+        msg_store.push_finished();
+    }
+
+    #[tokio::test]
+    async fn v2_whitespace_only_streaming_text_is_filtered_until_visible_content_arrives() {
+        let worktree = create_temp_dir("v2-whitespace-streaming");
+        let msg_store = Arc::new(MsgStore::new());
+        normalize_logs(msg_store.clone(), &worktree);
+
+        push_json_line(
+            msg_store.as_ref(),
+            json!({
+                "method": "item/agentMessage/delta",
+                "params": {
+                    "threadId": "thread-1",
+                    "turnId": "turn-1",
+                    "itemId": "msg-whitespace",
+                    "delta": "   "
+                }
+            }),
+        );
+
+        tokio::time::sleep(Duration::from_millis(40)).await;
+
+        let entries = collect_entries(msg_store.as_ref());
+        assert!(
+            !entries
+                .iter()
+                .any(|entry| matches!(entry.entry_type, NormalizedEntryType::AssistantMessage)),
+            "whitespace-only assistant delta should not create entry"
+        );
+
+        push_json_line(
+            msg_store.as_ref(),
+            json!({
+                "method": "item/agentMessage/delta",
+                "params": {
+                    "threadId": "thread-1",
+                    "turnId": "turn-1",
+                    "itemId": "msg-whitespace",
+                    "delta": "Hello"
+                }
+            }),
+        );
+
+        tokio::time::sleep(Duration::from_millis(40)).await;
+        let entries = collect_entries(msg_store.as_ref());
+        let assistant_entry = entries
+            .iter()
+            .find(|entry| matches!(entry.entry_type, NormalizedEntryType::AssistantMessage))
+            .expect("assistant entry should be present after visible content");
+        assert_eq!(assistant_entry.content, "   Hello");
+
+        push_json_line(
+            msg_store.as_ref(),
+            json!({
+                "method": "item/plan/delta",
+                "params": {
+                    "threadId": "thread-1",
+                    "turnId": "turn-1",
+                    "itemId": "plan-structured-1",
+                    "delta": "   "
+                }
+            }),
+        );
+
+        tokio::time::sleep(Duration::from_millis(40)).await;
+        let entries = collect_entries(msg_store.as_ref());
+        let plan_entry = entries
+            .iter()
+            .find(|entry| {
+                entry
+                    .metadata
+                    .clone()
+                    .and_then(|value| serde_json::from_value::<ToolCallMetadata>(value).ok())
+                    .is_some_and(|metadata| metadata.tool_call_id == "plan-structured-1")
+            })
+            .expect("plan entry should be present");
+        assert!(matches!(
+            plan_entry.entry_type,
+            NormalizedEntryType::ToolUse {
+                action_type: ActionType::PlanPresentation { .. },
+                ..
+            }
+        ));
+
         msg_store.push_finished();
     }
 

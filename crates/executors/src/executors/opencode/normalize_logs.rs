@@ -114,6 +114,7 @@ fn parse_event(line: &str) -> Option<OpencodeExecutorEvent> {
 struct StreamingText {
     index: usize,
     content: String,
+    emitted: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -724,24 +725,25 @@ fn update_streaming_text(
     if text.is_empty() {
         return;
     }
-
-    let is_new = !map.contains_key(message_id);
-
-    if is_new && text == "\n" {
-        return;
-    }
-
     let state = map
         .entry(message_id.to_string())
         .or_insert_with(|| StreamingText {
             index: entry_index.next(),
             content: String::new(),
+            emitted: false,
         });
 
     match mode {
         UpdateMode::Append => state.content.push_str(text),
         UpdateMode::Set => state.content = text.to_string(),
     }
+
+    if state.content.trim().is_empty() {
+        return;
+    }
+
+    let is_new = !state.emitted;
+    state.emitted = true;
 
     let entry = NormalizedEntry {
         timestamp: None,
@@ -1455,7 +1457,7 @@ mod tests {
         fs,
         path::PathBuf,
         sync::atomic::{AtomicU64, Ordering},
-        time::{SystemTime, UNIX_EPOCH},
+        time::{Duration, SystemTime, UNIX_EPOCH},
     };
 
     use serde_json::{Value, json};
@@ -1656,6 +1658,164 @@ mod tests {
             .find(|entry| matches!(entry.entry_type, NormalizedEntryType::Thinking))
             .expect("thinking entry should be present");
         assert_eq!(thinking_entry.content, "Thinking");
+    }
+
+    #[tokio::test]
+    async fn whitespace_only_streaming_text_is_filtered_until_visible_text_arrives() {
+        let (mut state, msg_store) = new_state();
+        let worktree_path = Path::new("/tmp");
+
+        state
+            .handle_sdk_event(
+                &json!({
+                    "type": "message.updated",
+                    "properties": {
+                        "info": {
+                            "id": "message-ws-1",
+                            "role": "assistant"
+                        }
+                    }
+                }),
+                worktree_path,
+                &msg_store,
+            )
+            .await;
+
+        state
+            .handle_sdk_event(
+                &json!({
+                    "type": "message.part.updated",
+                    "properties": {
+                        "part": {
+                            "type": "text",
+                            "id": "part-ws-text-1",
+                            "messageID": "message-ws-1",
+                            "text": ""
+                        }
+                    }
+                }),
+                worktree_path,
+                &msg_store,
+            )
+            .await;
+
+        state
+            .handle_sdk_event(
+                &json!({
+                    "type": "message.part.delta",
+                    "properties": {
+                        "sessionID": "session-1",
+                        "messageID": "message-ws-1",
+                        "partID": "part-ws-text-1",
+                        "field": "text",
+                        "delta": " \n\t"
+                    }
+                }),
+                worktree_path,
+                &msg_store,
+            )
+            .await;
+
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        let entries = collect_entries(&msg_store);
+        assert!(
+            !entries
+                .iter()
+                .any(|entry| matches!(entry.entry_type, NormalizedEntryType::AssistantMessage)),
+            "whitespace-only assistant text should not emit an entry"
+        );
+
+        state
+            .handle_sdk_event(
+                &json!({
+                    "type": "message.part.delta",
+                    "properties": {
+                        "sessionID": "session-1",
+                        "messageID": "message-ws-1",
+                        "partID": "part-ws-text-1",
+                        "field": "text",
+                        "delta": "Hello"
+                    }
+                }),
+                worktree_path,
+                &msg_store,
+            )
+            .await;
+
+        let entries = collect_entries(&msg_store);
+        let assistant_entry = entries
+            .iter()
+            .find(|entry| matches!(entry.entry_type, NormalizedEntryType::AssistantMessage))
+            .expect("assistant entry should be present after visible content");
+        assert_eq!(assistant_entry.content, " \n\tHello");
+
+        state
+            .handle_sdk_event(
+                &json!({
+                    "type": "message.part.updated",
+                    "properties": {
+                        "part": {
+                            "type": "reasoning",
+                            "id": "part-ws-reasoning-1",
+                            "messageID": "message-ws-1",
+                            "text": ""
+                        }
+                    }
+                }),
+                worktree_path,
+                &msg_store,
+            )
+            .await;
+
+        state
+            .handle_sdk_event(
+                &json!({
+                    "type": "message.part.delta",
+                    "properties": {
+                        "sessionID": "session-1",
+                        "messageID": "message-ws-1",
+                        "partID": "part-ws-reasoning-1",
+                        "field": "text",
+                        "delta": "\n  "
+                    }
+                }),
+                worktree_path,
+                &msg_store,
+            )
+            .await;
+
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        let entries = collect_entries(&msg_store);
+        assert!(
+            !entries
+                .iter()
+                .any(|entry| matches!(entry.entry_type, NormalizedEntryType::Thinking)),
+            "whitespace-only reasoning text should not emit an entry"
+        );
+
+        state
+            .handle_sdk_event(
+                &json!({
+                    "type": "message.part.delta",
+                    "properties": {
+                        "sessionID": "session-1",
+                        "messageID": "message-ws-1",
+                        "partID": "part-ws-reasoning-1",
+                        "field": "text",
+                        "delta": "Think"
+                    }
+                }),
+                worktree_path,
+                &msg_store,
+            )
+            .await;
+
+        let entries = collect_entries(&msg_store);
+        let thinking_entry = entries
+            .iter()
+            .find(|entry| matches!(entry.entry_type, NormalizedEntryType::Thinking))
+            .expect("thinking entry should be present after visible content");
+        assert_eq!(thinking_entry.content, "\n  Think");
     }
 
     #[tokio::test]
