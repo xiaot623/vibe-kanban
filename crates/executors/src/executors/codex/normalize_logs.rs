@@ -5,6 +5,9 @@ use std::{
 };
 
 use codex_app_server_protocol::{
+    CollabAgentState as AppCollabAgentState, CollabAgentStatus as AppCollabAgentStatus,
+    CollabAgentTool as AppCollabAgentTool,
+    CollabAgentToolCallStatus as AppCollabAgentToolCallStatus,
     CommandExecutionStatus as AppCommandExecutionStatus, FileUpdateChange as AppFileUpdateChange,
     JSONRPCResponse, McpToolCallStatus as AppMcpToolCallStatus, NewConversationResponse,
     PatchApplyStatus as AppPatchApplyStatus, PatchChangeKind as AppPatchChangeKind,
@@ -15,7 +18,7 @@ use codex_protocol::{openai_models::ReasoningEffort, protocol::McpInvocation};
 use futures::StreamExt;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{Value, json};
 use workspace_utils::{
     approvals::ApprovalStatus, diff::normalize_unified_diff, msg_store::MsgStore,
     path::make_path_relative,
@@ -163,6 +166,103 @@ struct PatchEntry {
     call_id: String,
 }
 
+struct CollabToolState {
+    index: Option<usize>,
+    call_id: String,
+    tool: AppCollabAgentTool,
+    status: ToolStatus,
+    sender_thread_id: String,
+    receiver_thread_ids: Vec<String>,
+    prompt: Option<String>,
+    agents_states: HashMap<String, AppCollabAgentState>,
+}
+
+impl ToNormalizedEntry for CollabToolState {
+    fn to_normalized_entry(&self) -> NormalizedEntry {
+        let tool_name = collab_tool_name(&self.tool).to_string();
+        let sorted_receivers = sort_thread_ids(&self.receiver_thread_ids);
+        let prompt = self.prompt.clone();
+        let content = match self.tool {
+            AppCollabAgentTool::SpawnAgent => {
+                if let Some(description) = trimmed_prompt(&prompt) {
+                    format!("Task: `{description}`")
+                } else {
+                    "Task".to_string()
+                }
+            }
+            AppCollabAgentTool::SendInput => {
+                if let Some(prompt) = trimmed_prompt(&prompt) {
+                    format!("Send input: `{prompt}`")
+                } else {
+                    "Send input".to_string()
+                }
+            }
+            AppCollabAgentTool::Wait => {
+                if sorted_receivers.is_empty() {
+                    "Wait for agents".to_string()
+                } else {
+                    format!("Wait for {} agent(s)", sorted_receivers.len())
+                }
+            }
+            AppCollabAgentTool::ResumeAgent => sorted_receivers
+                .first()
+                .map(|id| format!("Resume agent {id}"))
+                .unwrap_or_else(|| "Resume agent".to_string()),
+            AppCollabAgentTool::CloseAgent => sorted_receivers
+                .first()
+                .map(|id| format!("Close agent {id}"))
+                .unwrap_or_else(|| "Close agent".to_string()),
+        };
+
+        let entry_type = match self.tool {
+            AppCollabAgentTool::SpawnAgent => {
+                let description = trimmed_prompt(&prompt).unwrap_or_else(|| "Spawn agent".to_string());
+                NormalizedEntryType::ToolUse {
+                    tool_name: tool_name.clone(),
+                    action_type: ActionType::TaskCreate { description },
+                    status: self.status.clone(),
+                }
+            }
+            _ => {
+                let mut arguments = json!({
+                    "receiver_thread_ids": sorted_receivers,
+                });
+                if let Some(prompt) = prompt {
+                    arguments["prompt"] = Value::String(prompt);
+                }
+
+                NormalizedEntryType::ToolUse {
+                    tool_name: tool_name.clone(),
+                    action_type: ActionType::Tool {
+                        tool_name: tool_name.clone(),
+                        arguments: Some(arguments),
+                        result: Some(ToolResult::markdown(collab_result_markdown(
+                            &self.tool,
+                            &self.status,
+                            &self.agents_states,
+                        ))),
+                    },
+                    status: self.status.clone(),
+                }
+            }
+        };
+
+        NormalizedEntry {
+            timestamp: None,
+            entry_type,
+            content,
+            metadata: Some(json!({
+                "call_id": self.call_id.clone(),
+                "sender_thread_id": self.sender_thread_id.clone(),
+                "receiver_thread_ids": sort_thread_ids(&self.receiver_thread_ids),
+                "prompt": self.prompt.clone(),
+                "agents_states": self.agents_states.clone(),
+                "collab_tool": collab_tool_name(&self.tool),
+            })),
+        }
+    }
+}
+
 impl ToNormalizedEntry for PatchEntry {
     fn to_normalized_entry(&self) -> NormalizedEntry {
         let content = self.path.clone();
@@ -219,6 +319,7 @@ struct LogState {
     plans: HashMap<String, PlanState>,
     commands: HashMap<String, CommandState>,
     mcp_tools: HashMap<String, McpToolState>,
+    collab_tools: HashMap<String, CollabToolState>,
     patches: HashMap<String, PatchState>,
     web_searches: HashMap<String, WebSearchState>,
     image_views: HashMap<String, usize>,
@@ -239,6 +340,7 @@ impl LogState {
             plans: HashMap::new(),
             commands: HashMap::new(),
             mcp_tools: HashMap::new(),
+            collab_tools: HashMap::new(),
             patches: HashMap::new(),
             web_searches: HashMap::new(),
             image_views: HashMap::new(),
@@ -397,6 +499,129 @@ fn mcp_status_to_tool_status(status: &AppMcpToolCallStatus) -> ToolStatus {
         AppMcpToolCallStatus::InProgress => ToolStatus::Created,
         AppMcpToolCallStatus::Completed => ToolStatus::Success,
         AppMcpToolCallStatus::Failed => ToolStatus::Failed,
+    }
+}
+
+fn collab_status_to_tool_status(
+    status: &AppCollabAgentToolCallStatus,
+    tool: &AppCollabAgentTool,
+    agents_states: &HashMap<String, AppCollabAgentState>,
+) -> ToolStatus {
+    match status {
+        AppCollabAgentToolCallStatus::InProgress => ToolStatus::Created,
+        AppCollabAgentToolCallStatus::Completed => {
+            if matches!(tool, AppCollabAgentTool::Wait) && agents_states.is_empty() {
+                ToolStatus::TimedOut
+            } else {
+                ToolStatus::Success
+            }
+        }
+        AppCollabAgentToolCallStatus::Failed => ToolStatus::Failed,
+    }
+}
+
+fn collab_tool_name(tool: &AppCollabAgentTool) -> &'static str {
+    match tool {
+        AppCollabAgentTool::SpawnAgent => "spawn_agent",
+        AppCollabAgentTool::SendInput => "send_input",
+        AppCollabAgentTool::ResumeAgent => "resume_agent",
+        AppCollabAgentTool::Wait => "wait_agent",
+        AppCollabAgentTool::CloseAgent => "close_agent",
+    }
+}
+
+fn collab_agent_status_label(status: &AppCollabAgentStatus) -> &'static str {
+    match status {
+        AppCollabAgentStatus::PendingInit => "pending_init",
+        AppCollabAgentStatus::Running => "running",
+        AppCollabAgentStatus::Completed => "completed",
+        AppCollabAgentStatus::Errored => "errored",
+        AppCollabAgentStatus::Shutdown => "shutdown",
+        AppCollabAgentStatus::NotFound => "not_found",
+    }
+}
+
+fn trimmed_prompt(prompt: &Option<String>) -> Option<String> {
+    prompt
+        .as_ref()
+        .map(|text| text.trim())
+        .filter(|text| !text.is_empty())
+        .map(str::to_string)
+}
+
+fn sort_thread_ids(ids: &[String]) -> Vec<String> {
+    let mut sorted = ids.to_vec();
+    sorted.sort();
+    sorted
+}
+
+fn preview_message(message: &str) -> String {
+    let trimmed = message.trim();
+    if trimmed.is_empty() {
+        return String::new();
+    }
+
+    let single_line = trimmed.split_whitespace().collect::<Vec<_>>().join(" ");
+    let mut preview = String::new();
+    let mut chars = single_line.chars();
+    for _ in 0..120 {
+        if let Some(ch) = chars.next() {
+            preview.push(ch);
+        } else {
+            return preview;
+        }
+    }
+    if chars.next().is_some() {
+        preview.push_str("...");
+    }
+    preview
+}
+
+fn sorted_agent_lines(agents_states: &HashMap<String, AppCollabAgentState>) -> Vec<String> {
+    let mut items: Vec<_> = agents_states.iter().collect();
+    items.sort_by(|(id_a, _), (id_b, _)| id_a.cmp(id_b));
+    items
+        .into_iter()
+        .map(|(thread_id, state)| {
+            let mut line = format!(
+                "- {thread_id}: {}",
+                collab_agent_status_label(&state.status)
+            );
+            if let Some(message) = &state.message {
+                let preview = preview_message(message);
+                if !preview.is_empty() {
+                    line.push_str(&format!(" - {preview}"));
+                }
+            }
+            line
+        })
+        .collect()
+}
+
+fn collab_result_markdown(
+    tool: &AppCollabAgentTool,
+    status: &ToolStatus,
+    agents_states: &HashMap<String, AppCollabAgentState>,
+) -> String {
+    match tool {
+        AppCollabAgentTool::Wait => {
+            if matches!(status, ToolStatus::TimedOut) {
+                "Timed out waiting for agents.".to_string()
+            } else if agents_states.is_empty() {
+                "Waiting for agents.".to_string()
+            } else {
+                let lines = sorted_agent_lines(agents_states);
+                format!("Waited for {} agent(s).\n{}", lines.len(), lines.join("\n"))
+            }
+        }
+        _ => {
+            let lines = sorted_agent_lines(agents_states);
+            if lines.is_empty() {
+                "No agent status updates.".to_string()
+            } else {
+                lines.join("\n")
+            }
+        }
     }
 }
 
@@ -618,6 +843,45 @@ fn handle_v2_item_started(
                     mcp_tool_state.to_normalized_entry(),
                 );
                 mcp_tool_state.index = Some(index);
+            }
+        }
+        AppThreadItem::CollabAgentToolCall {
+            id,
+            tool,
+            status,
+            sender_thread_id,
+            receiver_thread_ids,
+            prompt,
+            agents_states,
+        } => {
+            state.assistant = None;
+            state.thinking = None;
+            let collab_state = state
+                .collab_tools
+                .entry(id.clone())
+                .or_insert_with(|| CollabToolState {
+                    index: None,
+                    call_id: id.clone(),
+                    tool: tool.clone(),
+                    status: ToolStatus::Created,
+                    sender_thread_id: sender_thread_id.clone(),
+                    receiver_thread_ids: receiver_thread_ids.clone(),
+                    prompt: prompt.clone(),
+                    agents_states: agents_states.clone(),
+                });
+            collab_state.tool = tool;
+            collab_state.status = collab_status_to_tool_status(&status, &collab_state.tool, &agents_states);
+            collab_state.sender_thread_id = sender_thread_id;
+            collab_state.receiver_thread_ids = receiver_thread_ids;
+            collab_state.prompt = prompt;
+            collab_state.agents_states = agents_states;
+
+            if let Some(index) = collab_state.index {
+                replace_normalized_entry(&msg_store, index, collab_state.to_normalized_entry());
+            } else {
+                let index =
+                    add_normalized_entry(&msg_store, &entry_index, collab_state.to_normalized_entry());
+                collab_state.index = Some(index);
             }
         }
         AppThreadItem::WebSearch { id, query, action } => {
@@ -892,6 +1156,43 @@ fn handle_v2_item_completed(
                     &entry_index,
                     mcp_tool_state.to_normalized_entry(),
                 );
+            }
+        }
+        AppThreadItem::CollabAgentToolCall {
+            id,
+            tool,
+            status,
+            sender_thread_id,
+            receiver_thread_ids,
+            prompt,
+            agents_states,
+        } => {
+            let collab_state = state
+                .collab_tools
+                .entry(id.clone())
+                .or_insert_with(|| CollabToolState {
+                    index: None,
+                    call_id: id.clone(),
+                    tool: tool.clone(),
+                    status: ToolStatus::Created,
+                    sender_thread_id: sender_thread_id.clone(),
+                    receiver_thread_ids: receiver_thread_ids.clone(),
+                    prompt: prompt.clone(),
+                    agents_states: agents_states.clone(),
+                });
+            collab_state.tool = tool;
+            collab_state.status = collab_status_to_tool_status(&status, &collab_state.tool, &agents_states);
+            collab_state.sender_thread_id = sender_thread_id;
+            collab_state.receiver_thread_ids = receiver_thread_ids;
+            collab_state.prompt = prompt;
+            collab_state.agents_states = agents_states;
+
+            if let Some(index) = collab_state.index {
+                replace_normalized_entry(&msg_store, index, collab_state.to_normalized_entry());
+            } else {
+                let index =
+                    add_normalized_entry(&msg_store, &entry_index, collab_state.to_normalized_entry());
+                collab_state.index = Some(index);
             }
         }
         AppThreadItem::WebSearch { id, query, action } => {
@@ -1438,7 +1739,7 @@ mod tests {
     use crate::{
         approvals::ToolCallMetadata,
         logs::{
-            ActionType, NormalizedEntryType, ToolStatus,
+            ActionType, NormalizedEntryType, ToolResultValueType, ToolStatus,
             utils::patch::extract_normalized_entry_from_patch,
         },
     };
@@ -1481,6 +1782,18 @@ mod tests {
 
     fn push_json_line(msg_store: &MsgStore, value: Value) {
         msg_store.push_stdout(format!("{value}\n"));
+    }
+
+    async fn wait_for_tool_call_id(msg_store: &MsgStore, call_id: &str) -> NormalizedEntry {
+        wait_for_entry(msg_store, |entry| {
+            entry
+                .metadata
+                .as_ref()
+                .and_then(|metadata| metadata.get("call_id"))
+                .and_then(Value::as_str)
+                == Some(call_id)
+        })
+        .await
     }
 
     #[tokio::test]
@@ -1855,6 +2168,477 @@ mod tests {
             }
             other => panic!("expected tool_use, got {other:?}"),
         }
+        msg_store.push_finished();
+    }
+
+    #[tokio::test]
+    async fn v2_collab_spawn_started_and_completed_success_upsert_task_create() {
+        let worktree = create_temp_dir("v2-collab-spawn-success");
+        let msg_store = Arc::new(MsgStore::new());
+        normalize_logs(msg_store.clone(), &worktree);
+
+        push_json_line(
+            msg_store.as_ref(),
+            json!({
+                "method": "item/started",
+                "params": {
+                    "threadId": "thread-1",
+                    "turnId": "turn-1",
+                    "item": {
+                        "type": "collabAgentToolCall",
+                        "id": "collab-spawn-1",
+                        "tool": "spawnAgent",
+                        "status": "inProgress",
+                        "senderThreadId": "thread-root",
+                        "receiverThreadIds": [],
+                        "prompt": "  Investigate flaky tests  ",
+                        "agentsStates": {}
+                    }
+                }
+            }),
+        );
+
+        push_json_line(
+            msg_store.as_ref(),
+            json!({
+                "method": "item/completed",
+                "params": {
+                    "threadId": "thread-1",
+                    "turnId": "turn-1",
+                    "item": {
+                        "type": "collabAgentToolCall",
+                        "id": "collab-spawn-1",
+                        "tool": "spawnAgent",
+                        "status": "completed",
+                        "senderThreadId": "thread-root",
+                        "receiverThreadIds": ["thread-sub-1"],
+                        "prompt": "  Investigate flaky tests  ",
+                        "agentsStates": {
+                            "thread-sub-1": { "status": "running", "message": null }
+                        }
+                    }
+                }
+            }),
+        );
+
+        let entry = wait_for_tool_call_id(msg_store.as_ref(), "collab-spawn-1").await;
+        let entries = collect_entries(msg_store.as_ref());
+        let collab_entries = entries
+            .iter()
+            .filter(|entry| {
+                entry
+                    .metadata
+                    .as_ref()
+                    .and_then(|metadata| metadata.get("call_id"))
+                    .and_then(Value::as_str)
+                    == Some("collab-spawn-1")
+            })
+            .count();
+        assert_eq!(collab_entries, 1, "spawn should upsert a single entry");
+
+        assert_eq!(entry.content, "Task: `Investigate flaky tests`");
+        match entry.entry_type {
+            NormalizedEntryType::ToolUse {
+                tool_name,
+                action_type,
+                status,
+            } => {
+                assert_eq!(tool_name, "spawn_agent");
+                assert!(matches!(status, ToolStatus::Success));
+                match action_type {
+                    ActionType::TaskCreate { description } => {
+                        assert_eq!(description, "Investigate flaky tests");
+                    }
+                    other => panic!("expected task create, got {other:?}"),
+                }
+            }
+            other => panic!("expected tool_use, got {other:?}"),
+        }
+
+        msg_store.push_finished();
+    }
+
+    #[tokio::test]
+    async fn v2_collab_spawn_completed_failure_keeps_single_failed_entry() {
+        let worktree = create_temp_dir("v2-collab-spawn-failed");
+        let msg_store = Arc::new(MsgStore::new());
+        normalize_logs(msg_store.clone(), &worktree);
+
+        push_json_line(
+            msg_store.as_ref(),
+            json!({
+                "method": "item/started",
+                "params": {
+                    "threadId": "thread-1",
+                    "turnId": "turn-1",
+                    "item": {
+                        "type": "collabAgentToolCall",
+                        "id": "collab-spawn-2",
+                        "tool": "spawnAgent",
+                        "status": "inProgress",
+                        "senderThreadId": "thread-root",
+                        "receiverThreadIds": [],
+                        "prompt": "",
+                        "agentsStates": {}
+                    }
+                }
+            }),
+        );
+
+        push_json_line(
+            msg_store.as_ref(),
+            json!({
+                "method": "item/completed",
+                "params": {
+                    "threadId": "thread-1",
+                    "turnId": "turn-1",
+                    "item": {
+                        "type": "collabAgentToolCall",
+                        "id": "collab-spawn-2",
+                        "tool": "spawnAgent",
+                        "status": "failed",
+                        "senderThreadId": "thread-root",
+                        "receiverThreadIds": [],
+                        "prompt": "",
+                        "agentsStates": {}
+                    }
+                }
+            }),
+        );
+
+        let entry = wait_for_tool_call_id(msg_store.as_ref(), "collab-spawn-2").await;
+        let entries = collect_entries(msg_store.as_ref());
+        let collab_entries = entries
+            .iter()
+            .filter(|entry| {
+                entry
+                    .metadata
+                    .as_ref()
+                    .and_then(|metadata| metadata.get("call_id"))
+                    .and_then(Value::as_str)
+                    == Some("collab-spawn-2")
+            })
+            .count();
+        assert_eq!(collab_entries, 1, "spawn failure should not duplicate entries");
+
+        assert_eq!(entry.content, "Task");
+        match entry.entry_type {
+            NormalizedEntryType::ToolUse {
+                tool_name,
+                action_type,
+                status,
+            } => {
+                assert_eq!(tool_name, "spawn_agent");
+                assert!(matches!(status, ToolStatus::Failed));
+                match action_type {
+                    ActionType::TaskCreate { description } => {
+                        assert_eq!(description, "Spawn agent");
+                    }
+                    other => panic!("expected task create, got {other:?}"),
+                }
+            }
+            other => panic!("expected tool_use, got {other:?}"),
+        }
+
+        msg_store.push_finished();
+    }
+
+    #[tokio::test]
+    async fn v2_collab_send_input_success_normalizes_tool_with_arguments_and_result() {
+        let worktree = create_temp_dir("v2-collab-send-input");
+        let msg_store = Arc::new(MsgStore::new());
+        normalize_logs(msg_store.clone(), &worktree);
+
+        push_json_line(
+            msg_store.as_ref(),
+            json!({
+                "method": "item/completed",
+                "params": {
+                    "threadId": "thread-1",
+                    "turnId": "turn-1",
+                    "item": {
+                        "type": "collabAgentToolCall",
+                        "id": "collab-send-1",
+                        "tool": "sendInput",
+                        "status": "completed",
+                        "senderThreadId": "thread-root",
+                        "receiverThreadIds": ["thread-sub-1"],
+                        "prompt": "Continue with the fix",
+                        "agentsStates": {
+                            "thread-sub-1": { "status": "completed", "message": "Fixed and pushed" }
+                        }
+                    }
+                }
+            }),
+        );
+
+        let entry = wait_for_tool_call_id(msg_store.as_ref(), "collab-send-1").await;
+        match entry.entry_type {
+            NormalizedEntryType::ToolUse {
+                tool_name,
+                action_type,
+                status,
+            } => {
+                assert_eq!(tool_name, "send_input");
+                assert!(matches!(status, ToolStatus::Success));
+                match action_type {
+                    ActionType::Tool {
+                        tool_name,
+                        arguments,
+                        result,
+                    } => {
+                        assert_eq!(tool_name, "send_input");
+                        let arguments = arguments.expect("send_input arguments");
+                        assert_eq!(
+                            arguments,
+                            json!({
+                                "receiver_thread_ids": ["thread-sub-1"],
+                                "prompt": "Continue with the fix"
+                            })
+                        );
+                        let result = result.expect("send_input result");
+                        assert!(matches!(result.r#type, ToolResultValueType::Markdown));
+                        assert_eq!(
+                            result.value,
+                            Value::String("- thread-sub-1: completed - Fixed and pushed".to_string())
+                        );
+                    }
+                    other => panic!("expected generic tool action, got {other:?}"),
+                }
+            }
+            other => panic!("expected tool_use, got {other:?}"),
+        }
+        assert_eq!(entry.content, "Send input: `Continue with the fix`");
+
+        msg_store.push_finished();
+    }
+
+    #[tokio::test]
+    async fn v2_collab_wait_success_sorts_receivers_and_markdown_rows() {
+        let worktree = create_temp_dir("v2-collab-wait-success");
+        let msg_store = Arc::new(MsgStore::new());
+        normalize_logs(msg_store.clone(), &worktree);
+
+        push_json_line(
+            msg_store.as_ref(),
+            json!({
+                "method": "item/completed",
+                "params": {
+                    "threadId": "thread-1",
+                    "turnId": "turn-1",
+                    "item": {
+                        "type": "collabAgentToolCall",
+                        "id": "collab-wait-1",
+                        "tool": "wait",
+                        "status": "completed",
+                        "senderThreadId": "thread-root",
+                        "receiverThreadIds": ["thread-b", "thread-a"],
+                        "prompt": null,
+                        "agentsStates": {
+                            "thread-b": { "status": "running", "message": null },
+                            "thread-a": { "status": "completed", "message": "Done" }
+                        }
+                    }
+                }
+            }),
+        );
+
+        let entry = wait_for_tool_call_id(msg_store.as_ref(), "collab-wait-1").await;
+        match entry.entry_type {
+            NormalizedEntryType::ToolUse {
+                tool_name,
+                action_type,
+                status,
+            } => {
+                assert_eq!(tool_name, "wait_agent");
+                assert!(matches!(status, ToolStatus::Success));
+                match action_type {
+                    ActionType::Tool {
+                        tool_name,
+                        arguments,
+                        result,
+                    } => {
+                        assert_eq!(tool_name, "wait_agent");
+                        assert_eq!(
+                            arguments.expect("wait arguments"),
+                            json!({ "receiver_thread_ids": ["thread-a", "thread-b"] })
+                        );
+                        let result = result.expect("wait result");
+                        assert!(matches!(result.r#type, ToolResultValueType::Markdown));
+                        assert_eq!(
+                            result.value,
+                            Value::String(
+                                "Waited for 2 agent(s).\n- thread-a: completed - Done\n- thread-b: running"
+                                    .to_string()
+                            )
+                        );
+                    }
+                    other => panic!("expected generic tool action, got {other:?}"),
+                }
+            }
+            other => panic!("expected tool_use, got {other:?}"),
+        }
+        assert_eq!(entry.content, "Wait for 2 agent(s)");
+
+        msg_store.push_finished();
+    }
+
+    #[tokio::test]
+    async fn v2_collab_wait_timeout_maps_to_timed_out_status_and_result() {
+        let worktree = create_temp_dir("v2-collab-wait-timeout");
+        let msg_store = Arc::new(MsgStore::new());
+        normalize_logs(msg_store.clone(), &worktree);
+
+        push_json_line(
+            msg_store.as_ref(),
+            json!({
+                "method": "item/completed",
+                "params": {
+                    "threadId": "thread-1",
+                    "turnId": "turn-1",
+                    "item": {
+                        "type": "collabAgentToolCall",
+                        "id": "collab-wait-2",
+                        "tool": "wait",
+                        "status": "completed",
+                        "senderThreadId": "thread-root",
+                        "receiverThreadIds": ["thread-a"],
+                        "prompt": null,
+                        "agentsStates": {}
+                    }
+                }
+            }),
+        );
+
+        let entry = wait_for_tool_call_id(msg_store.as_ref(), "collab-wait-2").await;
+        match entry.entry_type {
+            NormalizedEntryType::ToolUse {
+                action_type, status, ..
+            } => {
+                assert!(matches!(status, ToolStatus::TimedOut));
+                match action_type {
+                    ActionType::Tool { result, .. } => {
+                        let result = result.expect("wait timeout result");
+                        assert_eq!(
+                            result.value,
+                            Value::String("Timed out waiting for agents.".to_string())
+                        );
+                    }
+                    other => panic!("expected generic tool action, got {other:?}"),
+                }
+            }
+            other => panic!("expected tool_use, got {other:?}"),
+        }
+
+        msg_store.push_finished();
+    }
+
+    #[tokio::test]
+    async fn v2_collab_resume_and_close_cover_success_and_failure() {
+        let worktree = create_temp_dir("v2-collab-resume-close");
+        let msg_store = Arc::new(MsgStore::new());
+        normalize_logs(msg_store.clone(), &worktree);
+
+        push_json_line(
+            msg_store.as_ref(),
+            json!({
+                "method": "item/completed",
+                "params": {
+                    "threadId": "thread-1",
+                    "turnId": "turn-1",
+                    "item": {
+                        "type": "collabAgentToolCall",
+                        "id": "collab-resume-1",
+                        "tool": "resumeAgent",
+                        "status": "completed",
+                        "senderThreadId": "thread-root",
+                        "receiverThreadIds": ["thread-x"],
+                        "prompt": null,
+                        "agentsStates": {
+                            "thread-x": { "status": "running", "message": null }
+                        }
+                    }
+                }
+            }),
+        );
+
+        push_json_line(
+            msg_store.as_ref(),
+            json!({
+                "method": "item/completed",
+                "params": {
+                    "threadId": "thread-1",
+                    "turnId": "turn-1",
+                    "item": {
+                        "type": "collabAgentToolCall",
+                        "id": "collab-close-1",
+                        "tool": "closeAgent",
+                        "status": "failed",
+                        "senderThreadId": "thread-root",
+                        "receiverThreadIds": ["thread-y"],
+                        "prompt": null,
+                        "agentsStates": {
+                            "thread-y": { "status": "errored", "message": "session not found" }
+                        }
+                    }
+                }
+            }),
+        );
+
+        let resume_entry = wait_for_tool_call_id(msg_store.as_ref(), "collab-resume-1").await;
+        match resume_entry.entry_type {
+            NormalizedEntryType::ToolUse {
+                tool_name,
+                action_type,
+                status,
+            } => {
+                assert_eq!(tool_name, "resume_agent");
+                assert!(matches!(status, ToolStatus::Success));
+                match action_type {
+                    ActionType::Tool { arguments, result, .. } => {
+                        assert_eq!(
+                            arguments.expect("resume arguments"),
+                            json!({ "receiver_thread_ids": ["thread-x"] })
+                        );
+                        assert_eq!(
+                            result.expect("resume result").value,
+                            Value::String("- thread-x: running".to_string())
+                        );
+                    }
+                    other => panic!("expected generic tool action, got {other:?}"),
+                }
+            }
+            other => panic!("expected tool_use, got {other:?}"),
+        }
+        assert_eq!(resume_entry.content, "Resume agent thread-x");
+
+        let close_entry = wait_for_tool_call_id(msg_store.as_ref(), "collab-close-1").await;
+        match close_entry.entry_type {
+            NormalizedEntryType::ToolUse {
+                tool_name,
+                action_type,
+                status,
+            } => {
+                assert_eq!(tool_name, "close_agent");
+                assert!(matches!(status, ToolStatus::Failed));
+                match action_type {
+                    ActionType::Tool { arguments, result, .. } => {
+                        assert_eq!(
+                            arguments.expect("close arguments"),
+                            json!({ "receiver_thread_ids": ["thread-y"] })
+                        );
+                        assert_eq!(
+                            result.expect("close result").value,
+                            Value::String("- thread-y: errored - session not found".to_string())
+                        );
+                    }
+                    other => panic!("expected generic tool action, got {other:?}"),
+                }
+            }
+            other => panic!("expected tool_use, got {other:?}"),
+        }
+        assert_eq!(close_entry.content, "Close agent thread-y");
+
         msg_store.push_finished();
     }
 
