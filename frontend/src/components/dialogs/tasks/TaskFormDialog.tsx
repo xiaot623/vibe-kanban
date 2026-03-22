@@ -24,7 +24,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from '@/components/ui/select';
-import WYSIWYGEditor from '@/components/ui/wysiwyg';
+import TaskDescriptionEditor from '@/components/ui/task-description-editor';
 import type { LocalImageMetadata } from '@/components/ui/wysiwyg/context/task-attempt-context';
 import BranchSelector from '@/components/tasks/BranchSelector';
 import RepoBranchSelector from '@/components/tasks/RepoBranchSelector';
@@ -86,7 +86,6 @@ type TaskFormValues = {
 const TaskFormDialogImpl = NiceModal.create<TaskFormDialogProps>((props) => {
   const { mode, projectId } = props;
   const editMode = mode === 'edit';
-  const canToggleFullscreen = !editMode;
   const modal = useModal();
   const { t } = useTranslation(['tasks', 'common']);
   const { createTask, createAndStart, updateTask } =
@@ -248,6 +247,34 @@ const TaskFormDialogImpl = NiceModal.create<TaskFormDialogProps>((props) => {
     setImages(taskImages);
   }, [taskImages]);
 
+  const handleImageUploaded = useCallback((img: ImageResponse) => {
+    setImages((prev) => {
+      if (prev.some((existing) => existing.id === img.id)) {
+        return prev;
+      }
+      return [...prev, img];
+    });
+
+    setNewlyUploadedImageIds((prev) => {
+      if (prev.includes(img.id)) {
+        return prev;
+      }
+      return [...prev, img.id];
+    });
+  }, []);
+
+  const appendImageMarkdown = useCallback(
+    (img: ImageResponse) => {
+      const markdownText = `![${img.original_name}](${img.file_path})`;
+      form.setFieldValue('description', (prev) =>
+        prev.trim() === ''
+          ? markdownText
+          : `${prev.trimEnd()}\n\n${markdownText}`
+      );
+    },
+    [form]
+  );
+
   const onDrop = useCallback(
     async (files: File[]) => {
       for (const file of files) {
@@ -258,27 +285,24 @@ const TaskFormDialogImpl = NiceModal.create<TaskFormDialogProps>((props) => {
             ? await uploadForTask(props.task.id, file)
             : await upload(file);
 
-          // Add markdown image reference to description
-          const markdownText = `![${img.original_name}](${img.file_path})`;
-          form.setFieldValue('description', (prev) =>
-            prev.trim() === '' ? markdownText : `${prev} ${markdownText}`
-          );
-          setImages((prev) => [...prev, img]);
-          setNewlyUploadedImageIds((prev) => [...prev, img.id]);
+          handleImageUploaded(img);
+          appendImageMarkdown(img);
         } catch {
           // Silently ignore upload errors for now
         }
       }
     },
-    [editMode, props, upload, uploadForTask, form]
+    [
+      appendImageMarkdown,
+      editMode,
+      handleImageUploaded,
+      props,
+      upload,
+      uploadForTask,
+    ]
   );
 
-  const {
-    getRootProps,
-    getInputProps,
-    isDragActive,
-    open: dropzoneOpen,
-  } = useDropzone({
+  const { getRootProps, getInputProps, isDragActive } = useDropzone({
     onDrop: onDrop,
     accept: { 'image/*': [] },
     disabled: isSubmitting,
@@ -405,40 +429,34 @@ const TaskFormDialogImpl = NiceModal.create<TaskFormDialogProps>((props) => {
         open={modal.visible}
         onOpenChange={handleDialogClose}
         uncloseable={showDiscardWarning}
-        className={cn(
-          isFullscreen &&
-            canToggleFullscreen &&
-            '!max-w-none !my-0 h-[calc(100dvh-2rem)]'
-        )}
-      >
-        {canToggleFullscreen && (
-          <button
+        topRightActions={
+          <Button
             type="button"
-            className="absolute right-12 top-4 rounded-sm opacity-70 ring-offset-background transition-opacity hover:opacity-100 focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2 z-10"
-            onClick={() => setIsFullscreen((prev) => !prev)}
+            variant="ghost"
+            size="icon"
+            className="h-8 w-8 opacity-70 hover:opacity-100"
             aria-label={
               isFullscreen ? 'Exit fullscreen mode' : 'Enter fullscreen mode'
             }
-            title={
-              isFullscreen ? 'Exit fullscreen mode' : 'Enter fullscreen mode'
-            }
+            title={isFullscreen ? 'Exit fullscreen mode' : 'Enter fullscreen mode'}
+            onClick={() => setIsFullscreen((prev) => !prev)}
           >
             {isFullscreen ? (
               <Minimize2 className="h-4 w-4" />
             ) : (
               <Maximize2 className="h-4 w-4" />
             )}
-            <span className="sr-only">
-              {isFullscreen ? 'Exit fullscreen mode' : 'Enter fullscreen mode'}
-            </span>
-          </button>
+          </Button>
+        }
+        className={cn(
+          isFullscreen && '!max-w-none !my-0 h-[calc(100dvh-2rem)]'
         )}
-
+      >
         <div
           {...getRootProps()}
           className={cn(
             'h-full flex flex-col gap-4 p-4 relative min-h-0',
-            isFullscreen && canToggleFullscreen && 'overflow-y-auto'
+            isFullscreen && 'overflow-y-auto'
           )}
         >
           <input {...getInputProps()} />
@@ -473,29 +491,22 @@ const TaskFormDialogImpl = NiceModal.create<TaskFormDialogProps>((props) => {
           {/* Description */}
           <form.Field name="description">
             {(field) => (
-              <div
-                className={cn(
-                  'border p-3',
-                  isFullscreen && canToggleFullscreen && 'flex-1 min-h-0'
-                )}
-              >
-                <WYSIWYGEditor
+              <div className={cn('min-h-0', isFullscreen && 'flex-1')}>
+                <TaskDescriptionEditor
                   placeholder={t('taskFormDialog.descriptionPlaceholder')}
                   className={cn(
-                    'w-full overflow-auto',
-                    isFullscreen && canToggleFullscreen
-                      ? 'h-[calc(100dvh-26rem)] min-h-[18rem]'
-                      : 'h-24'
+                    'w-full',
+                    isFullscreen ? 'h-[calc(100dvh-26rem)] min-h-[18rem]' : ''
                   )}
+                  isFullscreen={isFullscreen}
                   value={field.state.value}
                   onChange={(desc) => field.handleChange(desc)}
                   disabled={isSubmitting}
-                  projectId={projectId}
-                  onPasteFiles={onDrop}
                   onCmdEnter={primaryAction}
                   onShiftCmdEnter={handleSubmitCreateOnly}
                   taskId={editMode ? props.task.id : undefined}
                   localImages={localImages}
+                  onImageUploaded={handleImageUploaded}
                 />
               </div>
             )}
@@ -651,20 +662,7 @@ const TaskFormDialogImpl = NiceModal.create<TaskFormDialogProps>((props) => {
           )}
 
           {/* Actions */}
-          <div className="flex items-center justify-between gap-3">
-            {/* Attach Image*/}
-            <div className="flex items-center gap-2">
-              <Button
-                variant="outline"
-                size="sm"
-                onClick={dropzoneOpen}
-                className="h-9 w-9 p-0 rounded-none"
-                aria-label={t('taskFormDialog.attachImage')}
-              >
-                <ImageIcon className="h-4 w-4" />
-              </Button>
-            </div>
-
+          <div className="flex items-center justify-end gap-3">
             {/* Autostart switch */}
             <div className="flex items-center gap-3">
               {!editMode && (
