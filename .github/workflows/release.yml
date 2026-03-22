@@ -4,8 +4,6 @@ on:
   push:
     tags:
       - "v[0-9]*.[0-9]*.[0-9]*"
-    tags-ignore:
-      - "*-*"
 
 concurrency:
   group: release-${{ github.ref }}
@@ -23,6 +21,7 @@ env:
 
 jobs:
   build-desktop:
+    if: ${{ !contains(github.ref_name, '-') }}
     name: Build ${{ matrix.platform }}-${{ matrix.arch }}
     runs-on: ${{ matrix.runs_on }}
     strategy:
@@ -149,6 +148,7 @@ jobs:
           if-no-files-found: error
 
   publish-release:
+    if: ${{ !contains(github.ref_name, '-') }}
     name: Publish GitHub release
     runs-on: ubuntu-latest
     needs: build-desktop
