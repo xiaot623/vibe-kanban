@@ -39,7 +39,7 @@ use sdk::{LogWriter, RunConfig, run_session};
 static CODEX_COMMAND: LazyLock<String> =
     LazyLock::new(|| env_command_or_default("VK_OPENCODE", "opencode"));
 
-const FALLBACK_CODEX_COMMAND: &str = "npx -y opencode-ai@1.2.26";
+const FALLBACK_CODEX_COMMAND: &str = "npx -y opencode-ai@1.3.13";
 
 pub fn base_command() -> &'static str {
     CODEX_COMMAND.as_str()

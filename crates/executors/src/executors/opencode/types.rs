@@ -43,6 +43,7 @@ pub(super) enum SdkEvent {
     QuestionReplied(QuestionRepliedEvent),
     QuestionRejected,
     SessionIdle,
+    SessionUpdated(SessionUpdatedEvent),
     SessionStatus(SessionStatusEvent),
     SessionDiff,
     SessionCompacted,
@@ -81,6 +82,9 @@ impl SdkEvent {
             }
             "question.rejected" => SdkEvent::QuestionRejected,
             "session.idle" => SdkEvent::SessionIdle,
+            "session.updated" => {
+                SdkEvent::SessionUpdated(serde_json::from_value(envelope.properties).ok()?)
+            }
             "session.status" => {
                 SdkEvent::SessionStatus(serde_json::from_value(envelope.properties).ok()?)
             }
@@ -279,6 +283,15 @@ pub(super) struct QuestionRepliedEvent {
 }
 
 #[derive(Debug, Deserialize)]
+pub(super) struct SessionUpdatedEvent {
+    #[serde(rename = "sessionID")]
+    #[allow(dead_code)]
+    pub(super) session_id: String,
+    #[allow(dead_code)]
+    pub(super) info: Value,
+}
+
+#[derive(Debug, Deserialize)]
 pub(super) struct SessionStatusEvent {
     pub(super) status: SessionStatus,
 }
@@ -427,7 +440,7 @@ impl<'de> Deserialize<'de> for SdkError {
 
 #[cfg(test)]
 mod tests {
-    use serde_json::json;
+    use serde_json::{Value, json};
 
     use super::SdkEvent;
 
@@ -493,6 +506,33 @@ mod tests {
         assert_eq!(
             event.tool.as_ref().map(|tool| tool.call_id.as_str()),
             Some("tool-call-1")
+        );
+    }
+
+    #[test]
+    fn parses_session_updated_event() {
+        let raw = json!({
+            "type": "session.updated",
+            "properties": {
+                "sessionID": "ses_123",
+                "info": {
+                    "id": "ses_123",
+                    "slug": "nimble-forest",
+                    "version": "1.3.13"
+                }
+            }
+        });
+
+        let event = SdkEvent::parse(&raw).expect("session.updated should parse");
+        let SdkEvent::SessionUpdated(event) = event else {
+            panic!("expected session.updated variant");
+        };
+
+        assert_eq!(event.session_id, "ses_123");
+        assert_eq!(event.info.get("id").and_then(Value::as_str), Some("ses_123"));
+        assert_eq!(
+            event.info.get("slug").and_then(Value::as_str),
+            Some("nimble-forest")
         );
     }
 }

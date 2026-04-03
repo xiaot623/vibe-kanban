@@ -207,10 +207,10 @@ impl LogState {
             SdkEvent::TodoUpdated(event) => {
                 self.handle_todo_updated(&event.todos, msg_store);
             }
+            SdkEvent::SessionIdle | SdkEvent::SessionUpdated(_) => {}
             SdkEvent::SessionStatus(event) => {
                 self.handle_session_status(event.status);
             }
-            SdkEvent::SessionIdle => {}
             SdkEvent::SessionCompacted => {
                 self.add_normalized_entry(system_message("Session compacted".to_string()));
             }
@@ -2184,6 +2184,43 @@ mod tests {
             .expect("todo entry should be present");
 
         assert_eq!(entry.content, "TODO list updated");
+        assert!(!entries.iter().any(|entry| {
+            matches!(entry.entry_type, NormalizedEntryType::SystemMessage)
+                && entry.content.contains("Unrecognized OpenCode SDK event")
+        }));
+    }
+
+    #[tokio::test]
+    async fn session_updated_is_ignored_without_unrecognized_event_message() {
+        let (mut state, msg_store) = new_state();
+        let worktree_path = Path::new("/tmp");
+
+        state
+            .handle_sdk_event(
+                &json!({
+                    "type": "session.updated",
+                    "properties": {
+                        "sessionID": "ses_2ac5898b4ffenPeALw8QaicAqa",
+                        "info": {
+                            "id": "ses_2ac5898b4ffenPeALw8QaicAqa",
+                            "slug": "nimble-forest",
+                            "projectID": "ea65d2f433cf63cf7c5b6683e5562db26a9d773e",
+                            "directory": "/tmp/worktree",
+                            "title": "New session - 2026-04-03T14:02:53.131Z",
+                            "version": "1.3.13",
+                            "time": {
+                                "created": 1775224973131_u64,
+                                "updated": 1775224973189_u64
+                            }
+                        }
+                    }
+                }),
+                worktree_path,
+                &msg_store,
+            )
+            .await;
+
+        let entries = collect_entries(&msg_store);
         assert!(!entries.iter().any(|entry| {
             matches!(entry.entry_type, NormalizedEntryType::SystemMessage)
                 && entry.content.contains("Unrecognized OpenCode SDK event")
