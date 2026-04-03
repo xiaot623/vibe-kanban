@@ -459,8 +459,7 @@ impl AcpAgentHarness {
                                 }
                                 Err(e) => {
                                     tracing::debug!("error {} {e} {:?}", e.code, e.data);
-                                    if e.code
-                                        == agent_client_protocol::ErrorCode::InternalError
+                                    if e.code == agent_client_protocol::ErrorCode::InternalError
                                         && e.data
                                             .as_ref()
                                             .is_some_and(|d| d == "server shut down unexpectedly")

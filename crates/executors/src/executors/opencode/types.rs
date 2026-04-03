@@ -529,7 +529,10 @@ mod tests {
         };
 
         assert_eq!(event.session_id, "ses_123");
-        assert_eq!(event.info.get("id").and_then(Value::as_str), Some("ses_123"));
+        assert_eq!(
+            event.info.get("id").and_then(Value::as_str),
+            Some("ses_123")
+        );
         assert_eq!(
             event.info.get("slug").and_then(Value::as_str),
             Some("nimble-forest")

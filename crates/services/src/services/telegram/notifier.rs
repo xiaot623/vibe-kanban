@@ -410,6 +410,17 @@ impl TelegramHandler for TaskFinishedHandler {
 
     async fn handle_with_context(&self, tg: &TelegramContext, transition: &TaskStateTransition) {
         let task = &transition.task;
+        let configured_daily_project_id = {
+            let config = tg.config.read().await;
+            config.daily_mode.project_id.clone()
+        };
+        if !should_send_task_finished_notification(
+            Some(task.project_id),
+            configured_daily_project_id.as_deref(),
+        ) {
+            return;
+        }
+
         let short_id = ShortIdMapping::get_or_create(&tg.db.pool, task.id)
             .await
             .unwrap_or_else(|_| "????".to_string());
@@ -1183,25 +1194,38 @@ fn stage_summary_keyboard(
 }
 
 async fn is_daily_project_task(tg: &TelegramContext, task_project_id: Option<Uuid>) -> bool {
-    let Some(task_project_id) = task_project_id else {
-        return false;
-    };
-
-    let daily_project_id = {
+    let configured_daily_project_id = {
         let config = tg.config.read().await;
         config.daily_mode.project_id.clone()
     };
 
-    let Some(daily_project_id) = daily_project_id else {
+    is_configured_daily_project_task(task_project_id, configured_daily_project_id.as_deref())
+}
+
+fn should_send_task_finished_notification(
+    task_project_id: Option<Uuid>,
+    configured_daily_project_id: Option<&str>,
+) -> bool {
+    !is_configured_daily_project_task(task_project_id, configured_daily_project_id)
+}
+
+fn is_configured_daily_project_task(
+    task_project_id: Option<Uuid>,
+    configured_daily_project_id: Option<&str>,
+) -> bool {
+    let Some(task_project_id) = task_project_id else {
+        return false;
+    };
+    let Some(configured_daily_project_id) = configured_daily_project_id else {
         return false;
     };
 
-    match Uuid::parse_str(&daily_project_id) {
+    match Uuid::parse_str(configured_daily_project_id) {
         Ok(daily_project_id) => task_project_id == daily_project_id,
         Err(err) => {
             tracing::warn!(
                 "Invalid daily_mode.project_id in config: {} ({})",
-                daily_project_id,
+                configured_daily_project_id,
                 err
             );
             false
@@ -1613,6 +1637,58 @@ mod tests {
             stage_summary_keyboard(SummaryTrigger::NextAction, Some(Uuid::new_v4()), true)
                 .is_none()
         );
+    }
+
+    #[test]
+    fn configured_daily_project_helper_matches_valid_daily_project_id() {
+        let daily_project_id = Uuid::new_v4();
+
+        assert!(is_configured_daily_project_task(
+            Some(daily_project_id),
+            Some(&daily_project_id.to_string())
+        ));
+    }
+
+    #[test]
+    fn configured_daily_project_helper_returns_false_for_non_match_missing_or_invalid_config() {
+        let task_project_id = Uuid::new_v4();
+
+        assert!(!is_configured_daily_project_task(
+            Some(task_project_id),
+            Some(&Uuid::new_v4().to_string())
+        ));
+        assert!(!is_configured_daily_project_task(
+            Some(task_project_id),
+            None
+        ));
+        assert!(!is_configured_daily_project_task(
+            Some(task_project_id),
+            Some("not-a-uuid")
+        ));
+        assert!(!is_configured_daily_project_task(
+            None,
+            Some(&task_project_id.to_string())
+        ));
+    }
+
+    #[test]
+    fn task_finished_notification_filter_skips_daily_tasks_only() {
+        let daily_project_id = Uuid::new_v4();
+        let non_daily_project_id = Uuid::new_v4();
+        let configured_daily_project_id = daily_project_id.to_string();
+
+        assert!(!should_send_task_finished_notification(
+            Some(daily_project_id),
+            Some(&configured_daily_project_id)
+        ));
+        assert!(should_send_task_finished_notification(
+            Some(non_daily_project_id),
+            Some(&configured_daily_project_id)
+        ));
+        assert!(should_send_task_finished_notification(
+            Some(daily_project_id),
+            Some("invalid")
+        ));
     }
 
     fn entry(entry_type: NormalizedEntryType, content: &str) -> NormalizedEntry {

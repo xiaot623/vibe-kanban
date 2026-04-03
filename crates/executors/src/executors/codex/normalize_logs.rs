@@ -216,7 +216,8 @@ impl ToNormalizedEntry for CollabToolState {
 
         let entry_type = match self.tool {
             AppCollabAgentTool::SpawnAgent => {
-                let description = trimmed_prompt(&prompt).unwrap_or_else(|| "Spawn agent".to_string());
+                let description =
+                    trimmed_prompt(&prompt).unwrap_or_else(|| "Spawn agent".to_string());
                 NormalizedEntryType::ToolUse {
                     tool_name: tool_name.clone(),
                     action_type: ActionType::TaskCreate { description },
@@ -413,7 +414,10 @@ impl LogState {
         self.streaming_text_update(content, type_, UpdateMode::Set)
     }
 
-    fn assistant_message_append(&mut self, content: String) -> Option<(NormalizedEntry, usize, bool)> {
+    fn assistant_message_append(
+        &mut self,
+        content: String,
+    ) -> Option<(NormalizedEntry, usize, bool)> {
         self.streaming_text_append(content, StreamingTextKind::Assistant)
     }
 
@@ -856,21 +860,23 @@ fn handle_v2_item_started(
         } => {
             state.assistant = None;
             state.thinking = None;
-            let collab_state = state
-                .collab_tools
-                .entry(id.clone())
-                .or_insert_with(|| CollabToolState {
-                    index: None,
-                    call_id: id.clone(),
-                    tool: tool.clone(),
-                    status: ToolStatus::Created,
-                    sender_thread_id: sender_thread_id.clone(),
-                    receiver_thread_ids: receiver_thread_ids.clone(),
-                    prompt: prompt.clone(),
-                    agents_states: agents_states.clone(),
-                });
+            let collab_state =
+                state
+                    .collab_tools
+                    .entry(id.clone())
+                    .or_insert_with(|| CollabToolState {
+                        index: None,
+                        call_id: id.clone(),
+                        tool: tool.clone(),
+                        status: ToolStatus::Created,
+                        sender_thread_id: sender_thread_id.clone(),
+                        receiver_thread_ids: receiver_thread_ids.clone(),
+                        prompt: prompt.clone(),
+                        agents_states: agents_states.clone(),
+                    });
             collab_state.tool = tool;
-            collab_state.status = collab_status_to_tool_status(&status, &collab_state.tool, &agents_states);
+            collab_state.status =
+                collab_status_to_tool_status(&status, &collab_state.tool, &agents_states);
             collab_state.sender_thread_id = sender_thread_id;
             collab_state.receiver_thread_ids = receiver_thread_ids;
             collab_state.prompt = prompt;
@@ -879,8 +885,11 @@ fn handle_v2_item_started(
             if let Some(index) = collab_state.index {
                 replace_normalized_entry(&msg_store, index, collab_state.to_normalized_entry());
             } else {
-                let index =
-                    add_normalized_entry(&msg_store, &entry_index, collab_state.to_normalized_entry());
+                let index = add_normalized_entry(
+                    &msg_store,
+                    &entry_index,
+                    collab_state.to_normalized_entry(),
+                );
                 collab_state.index = Some(index);
             }
         }
@@ -1167,21 +1176,23 @@ fn handle_v2_item_completed(
             prompt,
             agents_states,
         } => {
-            let collab_state = state
-                .collab_tools
-                .entry(id.clone())
-                .or_insert_with(|| CollabToolState {
-                    index: None,
-                    call_id: id.clone(),
-                    tool: tool.clone(),
-                    status: ToolStatus::Created,
-                    sender_thread_id: sender_thread_id.clone(),
-                    receiver_thread_ids: receiver_thread_ids.clone(),
-                    prompt: prompt.clone(),
-                    agents_states: agents_states.clone(),
-                });
+            let collab_state =
+                state
+                    .collab_tools
+                    .entry(id.clone())
+                    .or_insert_with(|| CollabToolState {
+                        index: None,
+                        call_id: id.clone(),
+                        tool: tool.clone(),
+                        status: ToolStatus::Created,
+                        sender_thread_id: sender_thread_id.clone(),
+                        receiver_thread_ids: receiver_thread_ids.clone(),
+                        prompt: prompt.clone(),
+                        agents_states: agents_states.clone(),
+                    });
             collab_state.tool = tool;
-            collab_state.status = collab_status_to_tool_status(&status, &collab_state.tool, &agents_states);
+            collab_state.status =
+                collab_status_to_tool_status(&status, &collab_state.tool, &agents_states);
             collab_state.sender_thread_id = sender_thread_id;
             collab_state.receiver_thread_ids = receiver_thread_ids;
             collab_state.prompt = prompt;
@@ -1190,8 +1201,11 @@ fn handle_v2_item_completed(
             if let Some(index) = collab_state.index {
                 replace_normalized_entry(&msg_store, index, collab_state.to_normalized_entry());
             } else {
-                let index =
-                    add_normalized_entry(&msg_store, &entry_index, collab_state.to_normalized_entry());
+                let index = add_normalized_entry(
+                    &msg_store,
+                    &entry_index,
+                    collab_state.to_normalized_entry(),
+                );
                 collab_state.index = Some(index);
             }
         }
@@ -1268,8 +1282,11 @@ fn handle_server_notification(
                 event.token_usage.total.total_tokens
             }
             .max(0) as u32;
-            let model_context_window =
-                event.token_usage.model_context_window.unwrap_or_default().max(0) as u32;
+            let model_context_window = event
+                .token_usage
+                .model_context_window
+                .unwrap_or_default()
+                .max(0) as u32;
 
             add_normalized_entry(
                 msg_store,
@@ -2319,7 +2336,10 @@ mod tests {
                     == Some("collab-spawn-2")
             })
             .count();
-        assert_eq!(collab_entries, 1, "spawn failure should not duplicate entries");
+        assert_eq!(
+            collab_entries, 1,
+            "spawn failure should not duplicate entries"
+        );
 
         assert_eq!(entry.content, "Task");
         match entry.entry_type {
@@ -2400,7 +2420,9 @@ mod tests {
                         assert!(matches!(result.r#type, ToolResultValueType::Markdown));
                         assert_eq!(
                             result.value,
-                            Value::String("- thread-sub-1: completed - Fixed and pushed".to_string())
+                            Value::String(
+                                "- thread-sub-1: completed - Fixed and pushed".to_string()
+                            )
                         );
                     }
                     other => panic!("expected generic tool action, got {other:?}"),
@@ -2513,7 +2535,9 @@ mod tests {
         let entry = wait_for_tool_call_id(msg_store.as_ref(), "collab-wait-2").await;
         match entry.entry_type {
             NormalizedEntryType::ToolUse {
-                action_type, status, ..
+                action_type,
+                status,
+                ..
             } => {
                 assert!(matches!(status, ToolStatus::TimedOut));
                 match action_type {
@@ -2595,7 +2619,9 @@ mod tests {
                 assert_eq!(tool_name, "resume_agent");
                 assert!(matches!(status, ToolStatus::Success));
                 match action_type {
-                    ActionType::Tool { arguments, result, .. } => {
+                    ActionType::Tool {
+                        arguments, result, ..
+                    } => {
                         assert_eq!(
                             arguments.expect("resume arguments"),
                             json!({ "receiver_thread_ids": ["thread-x"] })
@@ -2622,7 +2648,9 @@ mod tests {
                 assert_eq!(tool_name, "close_agent");
                 assert!(matches!(status, ToolStatus::Failed));
                 match action_type {
-                    ActionType::Tool { arguments, result, .. } => {
+                    ActionType::Tool {
+                        arguments, result, ..
+                    } => {
                         assert_eq!(
                             arguments.expect("close arguments"),
                             json!({ "receiver_thread_ids": ["thread-y"] })
@@ -2691,5 +2719,4 @@ mod tests {
         assert_eq!(entry.content, "Tokens used: 321 / Context window: 128000");
         msg_store.push_finished();
     }
-
 }
