@@ -49,7 +49,7 @@ pub(super) async fn handle_dialogue_text(
                     &bot,
                     msg.chat.id,
                     &err,
-                    Some(keyboard::home_only_keyboard()),
+                    Some(super::ui::empty_inline_keyboard()),
                 )
                 .await?;
             }

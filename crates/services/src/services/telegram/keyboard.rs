@@ -124,7 +124,6 @@ pub fn task_detail_keyboard(task_id: Uuid, status: &TaskStatus) -> InlineKeyboar
         }
     }
 
-    rows.push(vec![btn("🏠 Home", CallbackAction::Home)]);
     InlineKeyboardMarkup::new(rows)
 }
 
@@ -318,11 +317,6 @@ pub fn skip_cancel_keyboard() -> InlineKeyboardMarkup {
     ]])
 }
 
-/// Build a "go home" keyboard for error/terminal states.
-pub fn home_only_keyboard() -> InlineKeyboardMarkup {
-    InlineKeyboardMarkup::new(vec![vec![btn("🏠 Home", CallbackAction::Home)]])
-}
-
 // --- helpers ---
 
 fn btn(text: &str, action: CallbackAction) -> InlineKeyboardButton {
@@ -349,6 +343,53 @@ mod tests {
             .get("callback_data")
             .and_then(Value::as_str)
             .expect("callback_data should be present")
+    }
+
+    fn has_home_callback(keyboard: &InlineKeyboardMarkup) -> bool {
+        let value = serde_json::to_value(keyboard).expect("keyboard should serialize");
+        value["inline_keyboard"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_array)
+            .flatten()
+            .any(|button| CallbackAction::decode(callback_data(button)) == Some(CallbackAction::Home))
+    }
+
+    #[test]
+    fn list_navigation_keyboards_include_home() {
+        let project_id = Uuid::new_v4();
+        let task_id = Uuid::new_v4();
+        let project = Project {
+            id: project_id,
+            name: "Demo".to_string(),
+            default_agent_working_dir: None,
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        };
+
+        assert!(has_home_callback(&project_list_keyboard(&[project], false)));
+        assert!(has_home_callback(&status_filter_keyboard(project_id)));
+        assert!(has_home_callback(&task_list_keyboard(
+            &[(task_id, "ABCD".to_string(), "Task title".to_string())],
+            project_id,
+            0,
+            false,
+        )));
+    }
+
+    #[test]
+    fn task_detail_keyboard_excludes_home_for_all_statuses() {
+        let task_id = Uuid::new_v4();
+        for status in [
+            TaskStatus::Todo,
+            TaskStatus::InProgress,
+            TaskStatus::InReview,
+            TaskStatus::Done,
+            TaskStatus::Cancelled,
+        ] {
+            assert!(!has_home_callback(&task_detail_keyboard(task_id, &status)));
+        }
     }
 
     #[test]

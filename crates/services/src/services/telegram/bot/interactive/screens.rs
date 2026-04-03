@@ -26,7 +26,7 @@ pub(super) async fn show_projects_for_browsing(
                 chat_id,
                 card_context,
                 "No projects found.",
-                Some(keyboard::home_only_keyboard()),
+                Some(super::ui::empty_inline_keyboard()),
             )
             .await?;
         }
@@ -46,7 +46,7 @@ pub(super) async fn show_projects_for_browsing(
                 chat_id,
                 card_context,
                 format!("Failed to load projects: {e}"),
-                Some(keyboard::home_only_keyboard()),
+                Some(super::ui::empty_inline_keyboard()),
             )
             .await?;
         }
@@ -67,7 +67,7 @@ pub(super) async fn show_projects_for_new_task(
                 chat_id,
                 card_context,
                 "No projects found. Create a project first.",
-                Some(keyboard::home_only_keyboard()),
+                Some(super::ui::empty_inline_keyboard()),
             )
             .await?;
         }
@@ -87,7 +87,7 @@ pub(super) async fn show_projects_for_new_task(
                 chat_id,
                 card_context,
                 format!("Failed to load projects: {e}"),
-                Some(keyboard::home_only_keyboard()),
+                Some(super::ui::empty_inline_keyboard()),
             )
             .await?;
         }
@@ -113,7 +113,7 @@ pub(super) async fn show_pending_approvals(
             chat_id,
             card_context,
             "No pending approvals.",
-            Some(keyboard::home_only_keyboard()),
+            Some(super::ui::empty_inline_keyboard()),
         )
         .await?;
         return Ok(());
@@ -214,7 +214,7 @@ pub(super) async fn show_task_list(
                     chat_id,
                     card_context,
                     format!("Failed to load tasks: {e}"),
-                    Some(keyboard::home_only_keyboard()),
+                    Some(super::ui::empty_inline_keyboard()),
                 )
                 .await?;
                 return Ok(());
@@ -237,7 +237,7 @@ pub(super) async fn show_task_list(
             chat_id,
             card_context,
             format!("No {} tasks in {}.", status_label, project.name),
-            Some(keyboard::home_only_keyboard()),
+            Some(super::ui::empty_inline_keyboard()),
         )
         .await?;
         return Ok(());

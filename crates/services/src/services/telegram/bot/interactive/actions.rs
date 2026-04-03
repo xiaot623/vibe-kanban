@@ -107,7 +107,7 @@ pub(super) async fn handle_tool_approval_callback(
                 chat_id,
                 card_context,
                 &format!("Failed to process approval: {e}"),
-                Some(keyboard::home_only_keyboard()),
+                Some(super::ui::empty_inline_keyboard()),
             )
             .await?;
         }
@@ -181,7 +181,7 @@ async fn send_running_message(
     let message =
         format!("🏃 Running\nTask: {task_title}\nExecutor: {executor_label}\nMode: {mode_label}");
 
-    match format::send_rich_then_plain(bot, chat_id, &message, Some(keyboard::home_only_keyboard()))
+    match format::send_rich_then_plain(bot, chat_id, &message, Some(super::ui::empty_inline_keyboard()))
         .await
     {
         Ok(sent) => {
@@ -268,7 +268,7 @@ pub(super) async fn handle_run_with_executor_mode(
 async fn run_failure_keyboard(service: &TelegramBotService, task_id: Uuid) -> InlineKeyboardMarkup {
     match Task::find_by_id(&service.db.pool, task_id).await {
         Ok(Some(task)) => keyboard::task_detail_keyboard(task_id, &task.status),
-        _ => keyboard::home_only_keyboard(),
+        _ => super::ui::empty_inline_keyboard(),
     }
 }
 
@@ -336,7 +336,7 @@ pub(super) async fn handle_approve(
             chat_id,
             card_context,
             "No pending plan approval found. It may have expired.",
-            Some(keyboard::home_only_keyboard()),
+            Some(super::ui::empty_inline_keyboard()),
         )
         .await?;
         return Ok(());
@@ -372,7 +372,7 @@ pub(super) async fn handle_approve(
                 chat_id,
                 card_context,
                 format!("Failed to approve plan: {e}"),
-                Some(keyboard::home_only_keyboard()),
+                Some(super::ui::empty_inline_keyboard()),
             )
             .await?;
         }
@@ -421,7 +421,7 @@ pub(super) async fn handle_reject_finish(
             chat_id,
             card_context,
             "No pending plan approval found. It may have expired.",
-            Some(keyboard::home_only_keyboard()),
+            Some(super::ui::empty_inline_keyboard()),
         )
         .await?;
         return Ok(false);
@@ -460,7 +460,7 @@ pub(super) async fn handle_reject_finish(
                 chat_id,
                 card_context,
                 format!("Failed to reject plan: {e}"),
-                Some(keyboard::home_only_keyboard()),
+                Some(super::ui::empty_inline_keyboard()),
             )
             .await?;
         }
@@ -527,7 +527,7 @@ pub(super) async fn handle_follow_up_reply_finish(
                 chat_id,
                 card_context,
                 format!("Failed to send reply: {err}"),
-                Some(keyboard::home_only_keyboard()),
+                Some(super::ui::empty_inline_keyboard()),
             )
             .await?;
         }
@@ -566,7 +566,7 @@ pub(super) async fn handle_done_task(
             chat_id,
             card_context,
             "Daily Mode is not configured.",
-            Some(keyboard::home_only_keyboard()),
+            Some(super::ui::empty_inline_keyboard()),
         )
         .await?;
         return Ok(());
@@ -580,7 +580,7 @@ pub(super) async fn handle_done_task(
                 chat_id,
                 card_context,
                 format!("Daily Mode project id is invalid. Please reconfigure it: {e}"),
-                Some(keyboard::home_only_keyboard()),
+                Some(super::ui::empty_inline_keyboard()),
             )
             .await?;
             return Ok(());
@@ -593,7 +593,7 @@ pub(super) async fn handle_done_task(
             chat_id,
             card_context,
             "Done is only available for Daily Project tasks from this card.",
-            Some(keyboard::home_only_keyboard()),
+            Some(super::ui::empty_inline_keyboard()),
         )
         .await?;
         return Ok(());
@@ -617,7 +617,7 @@ pub(super) async fn handle_done_task(
         chat_id,
         card_context,
         format_done_task_status_message(&task.title, status_updated, &status_errors),
-        Some(keyboard::home_only_keyboard()),
+        Some(super::ui::empty_inline_keyboard()),
     )
     .await?;
     Ok(())
@@ -744,7 +744,7 @@ pub(super) async fn handle_edit_start(
             chat_id,
             card_context,
             format!("Task is {:?}. Only Todo tasks can be edited.", task.status),
-            Some(keyboard::home_only_keyboard()),
+            Some(super::ui::empty_inline_keyboard()),
         )
         .await?;
         return Ok(());
@@ -798,7 +798,7 @@ pub(super) async fn handle_edit_task_finish(
                 chat_id,
                 card_context,
                 format!("Failed to locate API server: {e}"),
-                Some(keyboard::home_only_keyboard()),
+                Some(super::ui::empty_inline_keyboard()),
             )
             .await?;
             return Ok(false);
@@ -819,7 +819,7 @@ pub(super) async fn handle_edit_task_finish(
                 chat_id,
                 card_context,
                 format!("Failed to edit task: {e}"),
-                Some(keyboard::home_only_keyboard()),
+                Some(super::ui::empty_inline_keyboard()),
             )
             .await?;
             return Ok(false);
@@ -834,7 +834,7 @@ pub(super) async fn handle_edit_task_finish(
                 chat_id,
                 card_context,
                 format!("Failed to parse response: {e}"),
-                Some(keyboard::home_only_keyboard()),
+                Some(super::ui::empty_inline_keyboard()),
             )
             .await?;
             return Ok(false);
@@ -867,7 +867,7 @@ pub(super) async fn handle_edit_task_finish(
                 chat_id,
                 card_context,
                 msg,
-                Some(keyboard::home_only_keyboard()),
+                Some(super::ui::empty_inline_keyboard()),
             )
             .await?;
         }
@@ -950,7 +950,7 @@ pub(super) async fn handle_create_task_finish(
                 chat_id,
                 card_context,
                 format!("Failed to create task: {e}"),
-                Some(keyboard::home_only_keyboard()),
+                Some(super::ui::empty_inline_keyboard()),
             )
             .await?;
         }

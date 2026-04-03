@@ -6,7 +6,7 @@ use teloxide::{
 use uuid::Uuid;
 
 use super::{BotDialogue, CardRenderContext};
-use crate::services::telegram::{callback::CallbackAction, format, keyboard, notifier};
+use crate::services::telegram::{callback::CallbackAction, format, notifier};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct CompletionCleanupPlan {
@@ -110,7 +110,7 @@ pub(super) async fn load_project_or_render_error(
                 chat_id,
                 card_context,
                 not_found_text,
-                Some(keyboard::home_only_keyboard()),
+                Some(empty_inline_keyboard()),
             )
             .await?;
             Ok(None)
@@ -121,7 +121,7 @@ pub(super) async fn load_project_or_render_error(
                 chat_id,
                 card_context,
                 format!("{error_prefix}: {err}"),
-                Some(keyboard::home_only_keyboard()),
+                Some(empty_inline_keyboard()),
             )
             .await?;
             Ok(None)
@@ -146,7 +146,7 @@ pub(super) async fn load_task_or_render_error(
                 chat_id,
                 card_context,
                 not_found_text,
-                Some(keyboard::home_only_keyboard()),
+                Some(empty_inline_keyboard()),
             )
             .await?;
             Ok(None)
@@ -157,7 +157,7 @@ pub(super) async fn load_task_or_render_error(
                 chat_id,
                 card_context,
                 format!("{error_prefix}: {err}"),
-                Some(keyboard::home_only_keyboard()),
+                Some(empty_inline_keyboard()),
             )
             .await?;
             Ok(None)
@@ -177,7 +177,7 @@ pub(super) async fn finalize_completion_result(
 
     if let Some(text) = completion_text {
         if cleanup.send_result_as_new_message {
-            format::send_rich_then_plain(bot, chat_id, text, Some(keyboard::home_only_keyboard()))
+            format::send_rich_then_plain(bot, chat_id, text, Some(empty_inline_keyboard()))
                 .await?;
         } else {
             render_or_send_card(
@@ -185,7 +185,7 @@ pub(super) async fn finalize_completion_result(
                 chat_id,
                 card_context,
                 text,
-                Some(keyboard::home_only_keyboard()),
+                Some(empty_inline_keyboard()),
             )
             .await?;
         }

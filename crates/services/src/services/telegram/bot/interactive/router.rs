@@ -122,7 +122,7 @@ pub(super) async fn handle_callback(
                 chat_id,
                 card_context,
                 "Invalid action. Please try again.",
-                Some(keyboard::home_only_keyboard()),
+                Some(super::ui::empty_inline_keyboard()),
             )
             .await?;
             return Ok(());
