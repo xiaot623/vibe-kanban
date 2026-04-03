@@ -207,7 +207,7 @@ impl LogState {
             SdkEvent::TodoUpdated(event) => {
                 self.handle_todo_updated(&event.todos, msg_store);
             }
-            SdkEvent::SessionIdle | SdkEvent::SessionUpdated(_) => {}
+            SdkEvent::SessionIdle | SdkEvent::SessionUpdated => {}
             SdkEvent::SessionStatus(event) => {
                 self.handle_session_status(event.status);
             }

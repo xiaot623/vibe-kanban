@@ -21,7 +21,7 @@ use workspace_utils::approvals::ApprovalStatus;
 
 use super::{
     EXIT_PLAN_MODE_NAME,
-    plan_mode::{REQUEST_USER_INPUT_TOOL_NAME, detect_plan_exit_question},
+    plan_mode::{PlanExitQuestion, REQUEST_USER_INPUT_TOOL_NAME, detect_plan_exit_question},
     types::{OpencodeExecutorEvent, QuestionAskedEvent},
 };
 use crate::{
@@ -883,7 +883,6 @@ async fn process_event_stream(
                 let tool_call_id = question_tool_call_id(&question);
                 let plan_exit = detect_plan_exit_question(&question.questions).map(|plan_exit| {
                     PlanExitQuestion {
-                        tool_call_id: tool_call_id.clone(),
                         plan_relative_path: plan_exit.plan_relative_path,
                     }
                 });
@@ -1009,12 +1008,6 @@ fn event_matches_session(event_type: &str, event: &Value, session_id: &str) -> b
     };
 
     extracted == Some(session_id)
-}
-
-#[derive(Debug)]
-struct PlanExitQuestion {
-    tool_call_id: String,
-    plan_relative_path: Option<String>,
 }
 
 fn parse_question_asked_event(event: &Value) -> Option<QuestionAskedEvent> {
@@ -1341,11 +1334,7 @@ mod tests {
     }
 
     fn detect_plan_exit_for_test(question: &QuestionAskedEvent) -> Option<PlanExitQuestion> {
-        let tool_call_id = question_tool_call_id(question);
-        detect_plan_exit_question(&question.questions).map(|plan_exit| PlanExitQuestion {
-            tool_call_id,
-            plan_relative_path: plan_exit.plan_relative_path,
-        })
+        detect_plan_exit_question(&question.questions)
     }
 
     #[test]
@@ -1378,7 +1367,7 @@ mod tests {
     fn detect_plan_exit_question_parses_absolute_plan_path() {
         let question = sample_plan_question_event(true);
         let detected = detect_plan_exit_for_test(&question).expect("plan exit should be detected");
-        assert_eq!(detected.tool_call_id, "call-plan-1");
+        assert_eq!(question_tool_call_id(&question), "call-plan-1");
         assert_eq!(
             detected.plan_relative_path.as_deref(),
             Some(".opencode/plans/plan-1.md")
@@ -1389,7 +1378,7 @@ mod tests {
     fn detect_plan_exit_question_falls_back_to_question_id_when_tool_missing() {
         let question = sample_plan_question_event(false);
         let detected = detect_plan_exit_for_test(&question).expect("plan exit should be detected");
-        assert_eq!(detected.tool_call_id, "question-plan-1");
+        assert_eq!(question_tool_call_id(&question), "question-plan-1");
         assert_eq!(
             detected.plan_relative_path.as_deref(),
             Some(".opencode/plans/plan-1.md")

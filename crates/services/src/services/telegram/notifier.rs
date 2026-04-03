@@ -483,7 +483,7 @@ struct ToolSummaryStats {
 struct StageSummaryData {
     user_first: Option<String>,
     user_latest: Option<String>,
-    assistant_latest: Option<String>,
+    assistant_messages: Vec<String>,
     model_latest: Option<String>,
     tool_stats: ToolSummaryStats,
     system_count: usize,
@@ -510,6 +510,8 @@ struct RunFeedAccumulator {
     execution_process_id: Option<Uuid>,
     sent_pending_approvals: HashSet<String>,
     sent_terminal_tool_updates: HashSet<(usize, &'static str)>,
+    active_assistant_entry_index: Option<usize>,
+    active_assistant_message_id: Option<MessageId>,
 }
 
 impl RunFeedAccumulator {
@@ -525,37 +527,23 @@ impl RunFeedAccumulator {
         })
     }
 
-    fn changed_entries_since_last_summary(&self) -> Vec<(usize, NormalizedEntry)> {
-        let mut changed: Vec<_> = self
-            .update_seq_by_index
+    fn iter_entries_for_summary(&self, changed_only: bool) -> Vec<(usize, NormalizedEntry)> {
+        self.entries_by_index
             .iter()
-            .filter_map(|(idx, seq)| {
-                (*seq > self.last_summary_seq)
-                    .then_some(
-                        self.entries_by_index
-                            .get(idx)
-                            .cloned()
-                            .map(|entry| (*seq, entry)),
-                    )
-                    .flatten()
+            .filter(|(idx, _)| {
+                !changed_only
+                    || self
+                        .update_seq_by_index
+                        .get(idx)
+                        .is_some_and(|seq| *seq > self.last_summary_seq)
             })
-            .collect();
-        changed.sort_by_key(|(seq, _)| *seq);
-        changed
+            .map(|(idx, entry)| (*idx, entry.clone()))
+            .collect()
     }
 
     fn collect_summary_data(&self, changed_only: bool) -> StageSummaryData {
-        let entries: Vec<NormalizedEntry> = if changed_only {
-            self.changed_entries_since_last_summary()
-                .into_iter()
-                .map(|(_, entry)| entry)
-                .collect()
-        } else {
-            self.entries_by_index.values().cloned().collect()
-        };
-
         let mut data = StageSummaryData::default();
-        for entry in entries {
+        for (_, entry) in self.iter_entries_for_summary(changed_only) {
             match entry.entry_type {
                 NormalizedEntryType::UserMessage => {
                     if data.user_first.is_none() {
@@ -564,7 +552,7 @@ impl RunFeedAccumulator {
                     data.user_latest = Some(entry.content);
                 }
                 NormalizedEntryType::AssistantMessage => {
-                    data.assistant_latest = Some(entry.content);
+                    data.assistant_messages.push(entry.content);
                 }
                 NormalizedEntryType::ToolUse { status, .. } => {
                     data.tool_stats.total += 1;
@@ -605,7 +593,44 @@ impl RunFeedAccumulator {
     }
 
     fn remember_execution_process(&mut self, execution_process_id: Uuid) {
-        self.execution_process_id = Some(execution_process_id);
+        if self.execution_process_id != Some(execution_process_id) {
+            self.reset_execution_process_state();
+            self.execution_process_id = Some(execution_process_id);
+        }
+    }
+
+    fn reset_execution_process_state(&mut self) {
+        self.entries_by_index.clear();
+        self.update_seq_by_index.clear();
+        self.current_seq = 0;
+        self.last_summary_seq = 0;
+        self.sent_pending_approvals.clear();
+        self.sent_terminal_tool_updates.clear();
+        self.clear_active_assistant();
+    }
+
+    fn clear_active_assistant(&mut self) {
+        self.active_assistant_entry_index = None;
+        self.active_assistant_message_id = None;
+    }
+
+    fn active_assistant_message_id(&self) -> Option<MessageId> {
+        self.active_assistant_message_id
+    }
+
+    fn set_active_assistant_message_id(&mut self, message_id: MessageId) {
+        self.active_assistant_entry_index = None;
+        self.active_assistant_message_id = Some(message_id);
+    }
+
+    fn track_active_assistant_entry(&mut self, entry_index: usize) {
+        self.active_assistant_entry_index = Some(entry_index);
+    }
+
+    fn take_active_assistant_message_id(&mut self) -> Option<MessageId> {
+        let message_id = self.active_assistant_message_id.take();
+        self.active_assistant_entry_index = None;
+        message_id
     }
 }
 
@@ -626,9 +651,9 @@ fn classify_entry_behavior(entry: &NormalizedEntry) -> EntryDeliveryBehavior {
             }
         },
         NormalizedEntryType::UserMessage
-        | NormalizedEntryType::AssistantMessage
         | NormalizedEntryType::SystemMessage
         | NormalizedEntryType::TokenUsageInfo(_) => EntryDeliveryBehavior::SummaryOnly,
+        NormalizedEntryType::AssistantMessage => EntryDeliveryBehavior::RealtimeAndSummary,
     }
 }
 
@@ -868,9 +893,19 @@ async fn process_run_feed_patch(
         return;
     };
 
+    if matches!(
+        update.current.entry_type,
+        NormalizedEntryType::AssistantMessage
+    ) {
+        accumulator.track_active_assistant_entry(update.index);
+        return;
+    }
+
     if !emit_realtime {
         return;
     }
+
+    flush_completed_assistant_card(tg, accumulator).await;
 
     let behavior = classify_entry_behavior(&update.current);
     match behavior {
@@ -888,6 +923,26 @@ async fn process_run_feed_patch(
     }
 }
 
+async fn flush_completed_assistant_card(
+    tg: &TelegramContext,
+    accumulator: &mut RunFeedAccumulator,
+) {
+    let Some(entry_index) = accumulator.active_assistant_entry_index else {
+        return;
+    };
+
+    let Some(content) = accumulator
+        .entries_by_index
+        .get(&entry_index)
+        .filter(|entry| matches!(entry.entry_type, NormalizedEntryType::AssistantMessage))
+        .map(|entry| entry.content.clone())
+    else {
+        return;
+    };
+
+    emit_realtime_assistant_card(tg, accumulator, &content).await;
+}
+
 async fn emit_pending_approval_catch_up_cards(
     tg: &TelegramContext,
     accumulator: &mut RunFeedAccumulator,
@@ -903,6 +958,50 @@ async fn emit_pending_approval_catch_up_cards(
         {
             send_tool_pending_approval_card(tg, approval_id, tool_name, &entry.content).await;
         }
+    }
+}
+
+async fn emit_realtime_assistant_card(
+    tg: &TelegramContext,
+    accumulator: &mut RunFeedAccumulator,
+    content: &str,
+) {
+    let message = format!(
+        "🤖 Assistant\n{}",
+        truncate_for_telegram(content, TELEGRAM_MESSAGE_LIMIT * 2)
+    );
+    let source_message_id = accumulator.active_assistant_message_id();
+    match format::edit_or_send_rich_then_plain(
+        &tg.bot,
+        tg.chat_id,
+        source_message_id,
+        &message,
+        None,
+    )
+    .await
+    {
+        Ok(message) => accumulator.set_active_assistant_message_id(message.id),
+        Err(err) => {
+            tracing::warn!("Failed to upsert telegram assistant card: {err}");
+        }
+    }
+}
+
+async fn delete_active_assistant_message(
+    tg: &TelegramContext,
+    accumulator: &mut RunFeedAccumulator,
+) {
+    let Some(message_id) = accumulator.take_active_assistant_message_id() else {
+        return;
+    };
+
+    if let Err(err) = tg.bot.delete_message(tg.chat_id, message_id).await {
+        tracing::debug!(
+            "Failed to delete Telegram assistant message {} in chat {}: {}",
+            message_id.0,
+            tg.chat_id.0,
+            err
+        );
     }
 }
 
@@ -1072,10 +1171,11 @@ async fn emit_stage_summary(
     accumulator: &mut RunFeedAccumulator,
     trigger: SummaryTrigger,
 ) {
+    delete_active_assistant_message(tg, accumulator).await;
+
     let changed = accumulator.collect_summary_data(true);
     let overall = accumulator.collect_summary_data(false);
 
-    let assistant_latest = changed.assistant_latest.or(overall.assistant_latest);
     let model_latest = changed.model_latest.or(overall.model_latest);
     let token_usage = changed.token_usage.or(overall.token_usage);
 
@@ -1095,13 +1195,13 @@ async fn emit_stage_summary(
             .unwrap_or_else(|| "n/a".to_string())
     ));
 
-    if let Some(assistant) = assistant_latest {
-        lines.push(format!(
-            "Assistant final reply:\n{}",
-            truncate_for_telegram(&assistant, STAGE_SUMMARY_ASSISTANT_MAX_CHARS)
-        ));
+    if changed.assistant_messages.is_empty() {
+        lines.push("Assistant replies: n/a".to_string());
     } else {
-        lines.push("Assistant final reply: n/a".to_string());
+        lines.push("Assistant replies:".to_string());
+        for (index, assistant) in changed.assistant_messages.iter().enumerate() {
+            lines.push(format!("{}. {}", index + 1, assistant));
+        }
     }
 
     if let Some(model) = model_latest {
@@ -1368,7 +1468,6 @@ const TELEGRAM_MESSAGE_LIMIT: usize = format::TELEGRAM_MESSAGE_LIMIT;
 const TELEGRAM_CHUNK_INDEX_PREFIX_RESERVE: usize = 20;
 const STAGE_SUMMARY_TASK_TITLE_MAX_CHARS: usize = 180;
 const STAGE_SUMMARY_MODEL_MAX_CHARS: usize = 280;
-const STAGE_SUMMARY_ASSISTANT_MAX_CHARS: usize = TELEGRAM_MESSAGE_LIMIT * 3;
 
 fn split_plan(plan: &str) -> Vec<String> {
     if plan.is_empty() {
@@ -1721,7 +1820,7 @@ mod tests {
             ),
             (
                 entry(NormalizedEntryType::AssistantMessage, "assistant"),
-                EntryDeliveryBehavior::SummaryOnly,
+                EntryDeliveryBehavior::RealtimeAndSummary,
             ),
             (
                 entry(
@@ -1912,14 +2011,153 @@ mod tests {
 
         let summary = acc.collect_summary_data(true);
         assert_eq!(
-            summary.assistant_latest.as_deref(),
-            Some("Latest assistant summary")
+            summary.assistant_messages,
+            vec!["Latest assistant summary".to_string()]
         );
         assert_eq!(summary.system_count, 1);
         assert_eq!(summary.tool_stats.total, 2);
         assert_eq!(summary.tool_stats.success, 1);
         assert_eq!(summary.tool_stats.pending_approval, 1);
         assert_eq!(summary.token_usage.map(|u| u.total_tokens), Some(321));
+    }
+
+    #[test]
+    fn summary_collects_all_changed_assistant_messages_in_entry_order() {
+        let mut acc = RunFeedAccumulator::default();
+
+        let patches = vec![
+            executors::logs::utils::patch::ConversationPatch::add_normalized_entry(
+                0,
+                entry(NormalizedEntryType::AssistantMessage, "First reply"),
+            ),
+            executors::logs::utils::patch::ConversationPatch::add_normalized_entry(
+                1,
+                entry(NormalizedEntryType::AssistantMessage, "Second reply"),
+            ),
+        ];
+
+        for patch in patches {
+            let _ = acc.apply_patch(&patch);
+        }
+
+        assert_eq!(
+            acc.collect_summary_data(true).assistant_messages,
+            vec!["First reply".to_string(), "Second reply".to_string()]
+        );
+    }
+
+    #[test]
+    fn summary_keeps_only_latest_text_for_replaced_assistant_entry() {
+        let mut acc = RunFeedAccumulator::default();
+
+        let patches = vec![
+            executors::logs::utils::patch::ConversationPatch::add_normalized_entry(
+                0,
+                entry(NormalizedEntryType::AssistantMessage, "Draft"),
+            ),
+            executors::logs::utils::patch::ConversationPatch::replace(
+                0,
+                entry(NormalizedEntryType::AssistantMessage, "Final"),
+            ),
+        ];
+
+        for patch in patches {
+            let _ = acc.apply_patch(&patch);
+        }
+
+        assert_eq!(
+            acc.collect_summary_data(true).assistant_messages,
+            vec!["Final".to_string()]
+        );
+    }
+
+    #[test]
+    fn stage_summary_preserves_full_assistant_reply_content() {
+        let assistant = "a".repeat(TELEGRAM_MESSAGE_LIMIT * 3 + 17);
+        let lines = {
+            let mut lines = vec!["🧾 Stage summary (execution_finished)".to_string()];
+            lines.push("Assistant replies:".to_string());
+            lines.push(format!("1. {}", assistant));
+            lines
+        };
+
+        let rendered = lines.join("\n");
+        assert!(rendered.contains(&assistant));
+        assert!(!rendered.contains('…'));
+    }
+
+    #[test]
+    fn same_assistant_entry_reuses_existing_message() {
+        let mut acc = RunFeedAccumulator::default();
+        let message_id = MessageId(101);
+
+        acc.set_active_assistant_message_id(message_id);
+
+        assert_eq!(acc.active_assistant_message_id(), Some(message_id));
+        assert_eq!(acc.active_assistant_entry_index, None);
+    }
+
+    #[test]
+    fn track_assistant_entry_without_message_for_history_replay() {
+        let mut acc = RunFeedAccumulator::default();
+        acc.track_active_assistant_entry(1);
+
+        assert_eq!(acc.active_assistant_entry_index, Some(1));
+        assert_eq!(acc.active_assistant_message_id, None);
+    }
+
+    #[test]
+    fn tracking_new_assistant_entry_keeps_previous_message_id_for_edit_reuse() {
+        let mut acc = RunFeedAccumulator::default();
+        acc.set_active_assistant_message_id(MessageId(101));
+
+        acc.track_active_assistant_entry(2);
+
+        assert_eq!(acc.active_assistant_entry_index, Some(2));
+        assert_eq!(acc.active_assistant_message_id, Some(MessageId(101)));
+    }
+
+    #[test]
+    fn new_execution_process_resets_active_assistant_state() {
+        let mut acc = RunFeedAccumulator::default();
+        let process_a = Uuid::new_v4();
+        let process_b = Uuid::new_v4();
+
+        acc.remember_execution_process(process_a);
+        acc.set_active_assistant_message_id(MessageId(101));
+        acc.remember_execution_process(process_a);
+        assert_eq!(acc.active_assistant_entry_index, None);
+        assert_eq!(acc.active_assistant_message_id, Some(MessageId(101)));
+
+        acc.remember_execution_process(process_b);
+        assert_eq!(acc.active_assistant_entry_index, None);
+        assert_eq!(acc.active_assistant_message_id, None);
+    }
+
+    #[test]
+    fn new_execution_process_resets_process_scoped_accumulator_state() {
+        let mut acc = RunFeedAccumulator::default();
+        let process_a = Uuid::new_v4();
+        let process_b = Uuid::new_v4();
+
+        acc.remember_execution_process(process_a);
+        let _ = acc.apply_patch(&executors::logs::utils::patch::ConversationPatch::add_normalized_entry(
+            0,
+            entry(NormalizedEntryType::AssistantMessage, "draft"),
+        ));
+        acc.sent_pending_approvals.insert("approval-a".to_string());
+        acc.sent_terminal_tool_updates.insert((0, "denied"));
+        acc.finalize_stage();
+
+        acc.remember_execution_process(process_b);
+
+        assert!(acc.entries_by_index.is_empty());
+        assert!(acc.update_seq_by_index.is_empty());
+        assert_eq!(acc.current_seq, 0);
+        assert_eq!(acc.last_summary_seq, 0);
+        assert!(acc.sent_pending_approvals.is_empty());
+        assert!(acc.sent_terminal_tool_updates.is_empty());
+        assert_eq!(acc.execution_process_id, Some(process_b));
     }
 
     #[test]

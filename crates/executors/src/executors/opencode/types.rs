@@ -43,7 +43,7 @@ pub(super) enum SdkEvent {
     QuestionReplied(QuestionRepliedEvent),
     QuestionRejected,
     SessionIdle,
-    SessionUpdated(SessionUpdatedEvent),
+    SessionUpdated,
     SessionStatus(SessionStatusEvent),
     SessionDiff,
     SessionCompacted,
@@ -83,7 +83,8 @@ impl SdkEvent {
             "question.rejected" => SdkEvent::QuestionRejected,
             "session.idle" => SdkEvent::SessionIdle,
             "session.updated" => {
-                SdkEvent::SessionUpdated(serde_json::from_value(envelope.properties).ok()?)
+                let _: SessionUpdatedEvent = serde_json::from_value(envelope.properties).ok()?;
+                SdkEvent::SessionUpdated
             }
             "session.status" => {
                 SdkEvent::SessionStatus(serde_json::from_value(envelope.properties).ok()?)
@@ -524,18 +525,8 @@ mod tests {
         });
 
         let event = SdkEvent::parse(&raw).expect("session.updated should parse");
-        let SdkEvent::SessionUpdated(event) = event else {
+        let SdkEvent::SessionUpdated = event else {
             panic!("expected session.updated variant");
         };
-
-        assert_eq!(event.session_id, "ses_123");
-        assert_eq!(
-            event.info.get("id").and_then(Value::as_str),
-            Some("ses_123")
-        );
-        assert_eq!(
-            event.info.get("slug").and_then(Value::as_str),
-            Some("nimble-forest")
-        );
     }
 }
