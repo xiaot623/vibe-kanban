@@ -262,8 +262,6 @@ mod tests {
         InlineKeyboardMarkup, MediaKind, MediaText, Message, MessageCommon, MessageId, MessageKind,
         User, UserId,
     };
-    use uuid::Uuid;
-
     use super::{
         CompletionFailurePolicy, dialogue_completion_decision,
         extract_flow_token_from_inline_keyboard, extract_stage_summary_flow_token_from_reply,

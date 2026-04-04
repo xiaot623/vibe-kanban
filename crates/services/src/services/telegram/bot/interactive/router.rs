@@ -21,6 +21,10 @@ pub enum Command {
     Pending,
     #[command(description = "cancel current operation")]
     Cancel,
+    #[command(description = "pin a project for quick task creation")]
+    Pin,
+    #[command(description = "unpin the current project")]
+    Unpin,
 }
 
 pub(super) async fn handle_command(
@@ -44,9 +48,19 @@ pub(super) async fn handle_command(
 
     match cmd {
         Command::Start => {
-            let text = "Welcome to Vibe Kanban! Choose an action:";
-            format::send_rich_then_plain(&bot, msg.chat.id, text, Some(keyboard::home_keyboard()))
-                .await?;
+            let pin = service.resolve_pin().await;
+            let text = if let Some(ref pin) = pin {
+                format!("Welcome to Vibe Kanban! 📍 Pinned: {}\nChoose an action:", pin.project_name)
+            } else {
+                "Welcome to Vibe Kanban! Choose an action:".to_string()
+            };
+            format::send_rich_then_plain(
+                &bot,
+                msg.chat.id,
+                &text,
+                Some(keyboard::home_keyboard(pin.is_some())),
+            )
+            .await?;
         }
         Command::Help => {
             let help = format!(
@@ -59,7 +73,8 @@ pub(super) async fn handle_command(
             super::screens::show_projects_for_browsing(&bot, msg.chat.id, &service, None).await?;
         }
         Command::New => {
-            super::screens::show_projects_for_new_task(&bot, msg.chat.id, &service, None).await?;
+            super::screens::show_new_task_or_pinned(&bot, msg.chat.id, &service, &dialogue, None)
+                .await?;
         }
         Command::Pending => {
             super::screens::show_pending_approvals(&bot, msg.chat.id, &service, None).await?;
@@ -76,13 +91,20 @@ pub(super) async fn handle_command(
                 .await;
             }
             dialogue.reset().await.ok();
+            let pin = service.resolve_pin().await;
             format::send_rich_then_plain(
                 &bot,
                 msg.chat.id,
                 "Cancelled.",
-                Some(keyboard::home_keyboard()),
+                Some(keyboard::home_keyboard(pin.is_some())),
             )
             .await?;
+        }
+        Command::Pin => {
+            super::screens::show_projects_for_pinning(&bot, msg.chat.id, &service, None).await?;
+        }
+        Command::Unpin => {
+            super::screens::handle_unpin(&bot, msg.chat.id, &service, None).await?;
         }
     }
 
@@ -149,12 +171,18 @@ pub(super) async fn handle_callback(
     match action {
         CallbackAction::Home => {
             dialogue.reset().await.ok();
+            let pin = service.resolve_pin().await;
+            let text = if let Some(ref pin) = pin {
+                format!("Choose an action: 📍 {}", pin.project_name)
+            } else {
+                "Choose an action:".to_string()
+            };
             super::ui::render_or_send_card(
                 &bot,
                 chat_id,
                 card_context,
-                "Choose an action:",
-                Some(keyboard::home_keyboard()),
+                text,
+                Some(keyboard::home_keyboard(pin.is_some())),
             )
             .await?;
         }
@@ -163,7 +191,7 @@ pub(super) async fn handle_callback(
                 .await?;
         }
         CallbackAction::NewTask => {
-            super::screens::show_projects_for_new_task(&bot, chat_id, &service, card_context)
+            super::screens::show_new_task_or_pinned(&bot, chat_id, &service, &dialogue, card_context)
                 .await?;
         }
         CallbackAction::Pending => {
@@ -401,6 +429,37 @@ pub(super) async fn handle_callback(
             )
             .await?;
         }
+        CallbackAction::PinMenu => {
+            super::screens::show_projects_for_pinning(&bot, chat_id, &service, card_context)
+                .await?;
+        }
+        CallbackAction::Unpin => {
+            super::screens::handle_unpin(&bot, chat_id, &service, card_context).await?;
+        }
+        CallbackAction::PinProject { project_id } => {
+            super::actions::handle_pin_project_select(
+                &bot,
+                chat_id,
+                &service,
+                project_id,
+                card_context,
+            )
+            .await?;
+        }
+        CallbackAction::PinDuration {
+            project_id,
+            minutes,
+        } => {
+            super::actions::handle_pin_duration_select(
+                &bot,
+                chat_id,
+                &service,
+                project_id,
+                minutes,
+                card_context,
+            )
+            .await?;
+        }
         CallbackAction::DismissInteraction
         | CallbackAction::Cancel
         | CallbackAction::Skip
@@ -447,6 +506,7 @@ async fn handle_immediate_callback_action(
                 .flatten()
                 .and_then(|state| state.prompt_message_id());
             dialogue.reset().await.ok();
+            let pin = service.resolve_pin().await;
             if let Some(prompt_message_id) = prompt_message_id {
                 super::ui::delete_message_best_effort(bot, chat_id, MessageId(prompt_message_id))
                     .await;
@@ -455,7 +515,7 @@ async fn handle_immediate_callback_action(
                     chat_id,
                     None,
                     "Cancelled.",
-                    Some(keyboard::home_keyboard()),
+                    Some(keyboard::home_keyboard(pin.is_some())),
                 )
                 .await?;
             } else {
@@ -464,7 +524,7 @@ async fn handle_immediate_callback_action(
                     chat_id,
                     card_context,
                     "Cancelled.",
-                    Some(keyboard::home_keyboard()),
+                    Some(keyboard::home_keyboard(pin.is_some())),
                 )
                 .await?;
             }
@@ -558,6 +618,11 @@ mod tests {
             Command::parse("/cancel", bot_name),
             Ok(Command::Cancel)
         ));
+        assert!(matches!(Command::parse("/pin", bot_name), Ok(Command::Pin)));
+        assert!(matches!(
+            Command::parse("/unpin", bot_name),
+            Ok(Command::Unpin)
+        ));
     }
 
     #[test]
@@ -570,7 +635,16 @@ mod tests {
 
         assert_eq!(
             names,
-            vec!["/start", "/help", "/tasks", "/new", "/pending", "/cancel"]
+            vec![
+                "/start",
+                "/help",
+                "/tasks",
+                "/new",
+                "/pending",
+                "/cancel",
+                "/pin",
+                "/unpin"
+            ]
         );
     }
 

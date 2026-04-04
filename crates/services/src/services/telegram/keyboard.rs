@@ -7,7 +7,15 @@ use uuid::Uuid;
 use super::callback::CallbackAction;
 
 /// Build the home screen keyboard shown after `/start`.
-pub fn home_keyboard() -> InlineKeyboardMarkup {
+///
+/// `has_active_pin` controls whether the bottom-right button shows
+/// "📌 Pin" (no active pin) or "📍 Unpin" (active pin present).
+pub fn home_keyboard(has_active_pin: bool) -> InlineKeyboardMarkup {
+    let pin_btn = if has_active_pin {
+        btn("📍 Unpin", CallbackAction::Unpin)
+    } else {
+        btn("📌 Pin", CallbackAction::PinMenu)
+    };
     InlineKeyboardMarkup::new(vec![
         vec![
             btn("📋 Tasks", CallbackAction::Projects),
@@ -15,7 +23,7 @@ pub fn home_keyboard() -> InlineKeyboardMarkup {
         ],
         vec![
             btn("⏳ Pending", CallbackAction::Pending),
-            btn("❓ Help", CallbackAction::Noop), // help is shown as text, button is for discoverability
+            pin_btn,
         ],
     ])
 }
@@ -39,6 +47,49 @@ pub fn project_list_keyboard(projects: &[Project], for_new_task: bool) -> Inline
 
     rows.push(vec![btn("🏠 Home", CallbackAction::Home)]);
     InlineKeyboardMarkup::new(rows)
+}
+
+/// Build a project picker keyboard for the pin flow.
+pub fn pin_project_picker_keyboard(projects: &[Project]) -> InlineKeyboardMarkup {
+    let mut rows: Vec<Vec<InlineKeyboardButton>> = projects
+        .iter()
+        .map(|p| {
+            vec![btn(
+                &p.name,
+                CallbackAction::PinProject { project_id: p.id },
+            )]
+        })
+        .collect();
+    rows.push(vec![btn("🏠 Home", CallbackAction::Home)]);
+    InlineKeyboardMarkup::new(rows)
+}
+
+/// Build a duration picker keyboard for the pin flow.
+/// Durations: 30min, 1h, 3h, 6h, 12h.
+pub fn pin_duration_keyboard(project_id: Uuid) -> InlineKeyboardMarkup {
+    let durations: &[(&str, u32)] = &[
+        ("30min", 30),
+        ("1h", 60),
+        ("3h", 180),
+        ("6h", 360),
+        ("12h", 720),
+    ];
+    let buttons: Vec<InlineKeyboardButton> = durations
+        .iter()
+        .map(|(label, minutes)| {
+            btn(
+                label,
+                CallbackAction::PinDuration {
+                    project_id,
+                    minutes: *minutes,
+                },
+            )
+        })
+        .collect();
+    InlineKeyboardMarkup::new(vec![
+        buttons,
+        vec![btn("🏠 Home", CallbackAction::Home)],
+    ])
 }
 
 /// Build status filter buttons for a project's task list.
@@ -433,6 +484,79 @@ mod tests {
         )));
     }
 
+    fn has_callback(keyboard: &InlineKeyboardMarkup, expected: &CallbackAction) -> bool {
+        let value = serde_json::to_value(keyboard).expect("keyboard should serialize");
+        value["inline_keyboard"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_array)
+            .flatten()
+            .any(|button| {
+                CallbackAction::decode(callback_data(button)).as_ref() == Some(expected)
+            })
+    }
+
+    #[test]
+    fn home_keyboard_no_pin_shows_pin_button() {
+        let keyboard = home_keyboard(false);
+        assert!(has_callback(&keyboard, &CallbackAction::PinMenu));
+        assert!(!has_callback(&keyboard, &CallbackAction::Unpin));
+    }
+
+    #[test]
+    fn home_keyboard_with_pin_shows_unpin_button() {
+        let keyboard = home_keyboard(true);
+        assert!(has_callback(&keyboard, &CallbackAction::Unpin));
+        assert!(!has_callback(&keyboard, &CallbackAction::PinMenu));
+    }
+
+    #[test]
+    fn pin_duration_keyboard_contains_five_durations() {
+        let project_id = Uuid::new_v4();
+        let keyboard = pin_duration_keyboard(project_id);
+        let value = serde_json::to_value(&keyboard).expect("keyboard should serialize");
+        let row = value["inline_keyboard"]
+            .get(0)
+            .and_then(Value::as_array)
+            .expect("first row should exist");
+
+        assert_eq!(row.len(), 5, "expected exactly 5 duration buttons");
+
+        let expected_minutes = [30u32, 60, 180, 360, 720];
+        for (i, &minutes) in expected_minutes.iter().enumerate() {
+            let decoded = CallbackAction::decode(callback_data(&row[i]));
+            assert_eq!(
+                decoded,
+                Some(CallbackAction::PinDuration { project_id, minutes }),
+                "button {i} should encode {minutes}min"
+            );
+        }
+    }
+
+    #[test]
+    fn pin_project_picker_keyboard_includes_home() {
+        let project_id = Uuid::new_v4();
+        let project = Project {
+            id: project_id,
+            name: "Test Project".to_string(),
+            default_agent_working_dir: None,
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        };
+        let keyboard = pin_project_picker_keyboard(&[project]);
+        assert!(has_home_callback(&keyboard));
+
+        let value = serde_json::to_value(&keyboard).expect("keyboard should serialize");
+        let first_row = value["inline_keyboard"]
+            .get(0)
+            .and_then(Value::as_array)
+            .expect("first row should exist");
+        assert_eq!(
+            CallbackAction::decode(callback_data(&first_row[0])),
+            Some(CallbackAction::PinProject { project_id })
+        );
+    }
     #[test]
     fn task_detail_keyboard_excludes_home_for_all_statuses() {
         let task_id = Uuid::new_v4();
@@ -508,7 +632,7 @@ mod tests {
         assert_eq!(row[0]["text"], "✅ Confirm");
         assert_eq!(
             CallbackAction::decode(callback_data(&row[0])),
-            Some(CallbackAction::CreateReviewTaskConfirm { task_id })
+            Some(CallbackAction::LegacyCreateReviewTaskConfirm { task_id })
         );
         assert_eq!(row[1]["text"], "❌ Cancel");
         assert_eq!(

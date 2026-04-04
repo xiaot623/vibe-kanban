@@ -145,6 +145,19 @@ pub enum CallbackAction {
     Skip,
     /// No-op acknowledgement (for already-handled buttons)
     Noop,
+    /// Show project picker for pinning
+    PinMenu,
+    /// Unpin the currently pinned project
+    Unpin,
+    /// Select a project to pin
+    PinProject {
+        project_id: Uuid,
+    },
+    /// Select a duration (in minutes) for the pinned project
+    PinDuration {
+        project_id: Uuid,
+        minutes: u32,
+    },
 }
 
 /// Short action tags used in the wire format.
@@ -188,6 +201,10 @@ impl CallbackAction {
             Self::Cancel => "ca",
             Self::Skip => "sk",
             Self::Noop => "no",
+            Self::PinMenu => "pm",
+            Self::Unpin => "pu",
+            Self::PinProject { .. } => "pp",
+            Self::PinDuration { .. } => "pd",
         }
     }
 
@@ -201,7 +218,9 @@ impl CallbackAction {
             | Self::DismissInteraction
             | Self::Cancel
             | Self::Skip
-            | Self::Noop => {
+            | Self::Noop
+            | Self::PinMenu
+            | Self::Unpin => {
                 format!("v1|{}", self.tag())
             }
             Self::Tasks { project_id, status } => {
@@ -263,6 +282,15 @@ impl CallbackAction {
             Self::TaskPage { project_id, page } => {
                 format!("v1|{}|{}|{}", self.tag(), short_uuid(project_id), page)
             }
+            Self::PinProject { project_id } => {
+                format!("v1|{}|{}", self.tag(), short_uuid(project_id))
+            }
+            Self::PinDuration {
+                project_id,
+                minutes,
+            } => {
+                format!("v1|{}|{}|{}", self.tag(), short_uuid(project_id), minutes)
+            }
         }
     }
 
@@ -283,6 +311,8 @@ impl CallbackAction {
             "ca" => Some(Self::Cancel),
             "sk" => Some(Self::Skip),
             "no" => Some(Self::Noop),
+            "pm" => Some(Self::PinMenu),
+            "pu" => Some(Self::Unpin),
             "ts" => {
                 let project_id = parse_short_uuid(parts.get(2)?)?;
                 let status = parts.get(3).map(|s| s.to_string());
@@ -386,6 +416,14 @@ impl CallbackAction {
                 let page: u16 = parts.get(3)?.parse().ok()?;
                 Some(Self::TaskPage { project_id, page })
             }
+            "pp" => Some(Self::PinProject {
+                project_id: parse_short_uuid(parts.get(2)?)?,
+            }),
+            "pd" => {
+                let project_id = parse_short_uuid(parts.get(2)?)?;
+                let minutes: u32 = parts.get(3)?.parse().ok()?;
+                Some(Self::PinDuration { project_id, minutes })
+            }
             _ => None,
         }
     }
@@ -446,6 +484,8 @@ mod tests {
             CallbackAction::Cancel,
             CallbackAction::Skip,
             CallbackAction::Noop,
+            CallbackAction::PinMenu,
+            CallbackAction::Unpin,
         ] {
             let encoded = action.encode();
             assert!(encoded.len() <= 64, "encoded too long: {encoded}");
@@ -674,6 +714,13 @@ mod tests {
                 project_id: id,
                 page: 999,
             },
+            CallbackAction::PinMenu,
+            CallbackAction::Unpin,
+            CallbackAction::PinProject { project_id: id },
+            CallbackAction::PinDuration {
+                project_id: id,
+                minutes: 720,
+            },
         ];
         for action in all_actions {
             let encoded = action.encode();
@@ -683,6 +730,29 @@ mod tests {
                 action,
                 encoded.len()
             );
+        }
+    }
+
+    #[test]
+    fn roundtrip_pin_project() {
+        let id = Uuid::new_v4();
+        let action = CallbackAction::PinProject { project_id: id };
+        let encoded = action.encode();
+        assert!(encoded.len() <= 64);
+        assert_eq!(CallbackAction::decode(&encoded).unwrap(), action);
+    }
+
+    #[test]
+    fn roundtrip_pin_duration() {
+        let id = Uuid::new_v4();
+        for minutes in [30u32, 60, 180, 360, 720] {
+            let action = CallbackAction::PinDuration {
+                project_id: id,
+                minutes,
+            };
+            let encoded = action.encode();
+            assert!(encoded.len() <= 64, "encoded too long for {minutes}m: {encoded}");
+            assert_eq!(CallbackAction::decode(&encoded).unwrap(), action);
         }
     }
 }

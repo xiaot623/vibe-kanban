@@ -343,3 +343,115 @@ pub(super) async fn show_task_detail(
     .await?;
     Ok(())
 }
+
+/// Show the `/new` or `➕ New` action.
+/// If there is an active pin, skip project selection and jump straight to task
+/// creation for the pinned project; otherwise fall through to the standard
+/// project picker.
+pub(super) async fn show_new_task_or_pinned(
+    bot: &Bot,
+    chat_id: ChatId,
+    service: &TelegramBotService,
+    dialogue: &super::BotDialogue,
+    card_context: Option<CardRenderContext>,
+) -> ResponseResult<()> {
+    if let Some(pin) = service.resolve_pin().await {
+        // Verify the pinned project still exists.
+        match Project::find_by_id(&service.db.pool, pin.project_id).await {
+            Ok(Some(_)) => {
+                // Jump straight to task creation for the pinned project.
+                super::actions::handle_new_task_project_for_pin_full(
+                    bot,
+                    chat_id,
+                    service,
+                    pin.project_id,
+                    &pin.project_name,
+                    dialogue,
+                    card_context,
+                )
+                .await?;
+                return Ok(());
+            }
+            _ => {
+                // Project no longer exists — clear the stale pin and fall back.
+                service.clear_pin().await;
+                super::ui::render_or_send_card(
+                    bot,
+                    chat_id,
+                    card_context,
+                    "Pinned project no longer exists. Pin cleared.",
+                    Some(super::ui::empty_inline_keyboard()),
+                )
+                .await?;
+            }
+        }
+    }
+    show_projects_for_new_task(bot, chat_id, service, card_context).await
+}
+
+/// Show a project picker for the `/pin` command.
+pub(super) async fn show_projects_for_pinning(
+    bot: &Bot,
+    chat_id: ChatId,
+    service: &TelegramBotService,
+    card_context: Option<CardRenderContext>,
+) -> ResponseResult<()> {
+    match Project::find_all(&service.db.pool).await {
+        Ok(projects) if projects.is_empty() => {
+            super::ui::render_or_send_card(
+                bot,
+                chat_id,
+                card_context,
+                "No projects found.",
+                Some(super::ui::empty_inline_keyboard()),
+            )
+            .await?;
+        }
+        Ok(projects) => {
+            super::ui::render_or_send_card(
+                bot,
+                chat_id,
+                card_context,
+                "📌 Select a project to pin:",
+                Some(keyboard::pin_project_picker_keyboard(&projects)),
+            )
+            .await?;
+        }
+        Err(e) => {
+            super::ui::render_or_send_card(
+                bot,
+                chat_id,
+                card_context,
+                format!("Failed to load projects: {e}"),
+                Some(super::ui::empty_inline_keyboard()),
+            )
+            .await?;
+        }
+    }
+    Ok(())
+}
+
+/// Handle the Unpin action (from `/unpin` or the `📍 Unpin` button).
+pub(super) async fn handle_unpin(
+    bot: &Bot,
+    chat_id: ChatId,
+    service: &TelegramBotService,
+    card_context: Option<CardRenderContext>,
+) -> ResponseResult<()> {
+    let had_pin = service.resolve_pin().await.is_some();
+    service.clear_pin().await;
+    let text = if had_pin {
+        "📌 Pin cleared. /new will show the project picker again."
+    } else {
+        "No active pin to clear."
+    };
+    super::ui::render_or_send_card(
+        bot,
+        chat_id,
+        card_context,
+        text,
+        Some(keyboard::home_keyboard(false)),
+    )
+    .await?;
+    Ok(())
+}

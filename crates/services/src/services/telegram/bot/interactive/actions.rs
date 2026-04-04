@@ -1,5 +1,6 @@
 use std::str::FromStr;
 
+use chrono::Utc;
 use db::models::{
     short_id_mapping::ShortIdMapping,
     task::{CreateTask, Task, TaskStatus, UpdateTask},
@@ -21,7 +22,9 @@ use super::{
 };
 use crate::services::{
     approvals::{ApprovalError, PendingApprovalInfo},
-    telegram::{flow, format, keyboard, notifier, state::DialogueState},
+    telegram::{
+        bot::PinnedProjectState, flow, format, keyboard, notifier, state::DialogueState,
+    },
 };
 
 pub(super) async fn handle_tool_approval_callback(
@@ -1131,6 +1134,126 @@ pub(super) async fn handle_create_review_task_confirm(
         Some(keyboard::review_confirm_flow_keyboard(flow_token)),
     )
     .await?;
+    Ok(())
+}
+
+/// Show a duration picker for the selected project during pinning.
+pub(super) async fn handle_pin_project_select(
+    bot: &Bot,
+    chat_id: ChatId,
+    service: &TelegramBotService,
+    project_id: Uuid,
+    card_context: Option<CardRenderContext>,
+) -> ResponseResult<()> {
+    let project_name = match db::models::project::Project::find_by_id(&service.db.pool, project_id).await {
+        Ok(Some(p)) => p.name,
+        _ => {
+            super::ui::render_or_send_card(
+                bot,
+                chat_id,
+                card_context,
+                "Project not found.",
+                Some(super::ui::empty_inline_keyboard()),
+            )
+            .await?;
+            return Ok(());
+        }
+    };
+
+    super::ui::render_or_send_card(
+        bot,
+        chat_id,
+        card_context,
+        format!("📌 Pin **{}** — select duration:", project_name),
+        Some(keyboard::pin_duration_keyboard(project_id)),
+    )
+    .await?;
+    Ok(())
+}
+
+/// Apply the selected pin (project + duration) and show confirmation.
+pub(super) async fn handle_pin_duration_select(
+    bot: &Bot,
+    chat_id: ChatId,
+    service: &TelegramBotService,
+    project_id: Uuid,
+    minutes: u32,
+    card_context: Option<CardRenderContext>,
+) -> ResponseResult<()> {
+    let project_name = match db::models::project::Project::find_by_id(&service.db.pool, project_id).await {
+        Ok(Some(p)) => p.name,
+        _ => {
+            super::ui::render_or_send_card(
+                bot,
+                chat_id,
+                card_context,
+                "Project not found. Pin not set.",
+                Some(super::ui::empty_inline_keyboard()),
+            )
+            .await?;
+            return Ok(());
+        }
+    };
+
+    let expires_at = Utc::now() + chrono::Duration::minutes(i64::from(minutes));
+    let duration_label = format_duration_label(minutes);
+    service
+        .set_pin(PinnedProjectState {
+            project_id,
+            project_name: project_name.clone(),
+            expires_at,
+        })
+        .await;
+
+    let confirmation = format!(
+        "📍 Pinned **{project_name}** for {duration_label}.\n\n/new and ➕ New will now skip project selection.",
+    );
+    super::ui::render_or_send_card(
+        bot,
+        chat_id,
+        card_context,
+        confirmation,
+        Some(keyboard::home_keyboard(true)),
+    )
+    .await?;
+    Ok(())
+}
+
+fn format_duration_label(minutes: u32) -> String {
+    if minutes < 60 {
+        format!("{minutes}min")
+    } else {
+        format!("{}h", minutes / 60)
+    }
+}
+
+/// Enter task-creation dialogue for a pinned project without showing the
+/// project picker. Requires the dialogue handle for state update.
+pub(super) async fn handle_new_task_project_for_pin_full(
+    bot: &Bot,
+    chat_id: ChatId,
+    _service: &TelegramBotService,
+    project_id: Uuid,
+    project_name: &str,
+    dialogue: &BotDialogue,
+    card_context: Option<CardRenderContext>,
+) -> ResponseResult<()> {
+    let prompt_message_id = super::ui::render_or_send_card(
+        bot,
+        chat_id,
+        card_context,
+        format_new_task_message_prompt(project_name),
+        Some(keyboard::cancel_keyboard()),
+    )
+    .await?;
+
+    dialogue
+        .update(build_creating_task_message_state(
+            project_id,
+            prompt_message_id.0,
+        ))
+        .await
+        .ok();
     Ok(())
 }
 

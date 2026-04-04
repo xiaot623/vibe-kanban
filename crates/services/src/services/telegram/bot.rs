@@ -4,9 +4,11 @@
 
 use std::sync::Arc;
 
+use chrono::{DateTime, Utc};
 use db::DBService;
 use teloxide::prelude::{Bot, ChatId};
 use tokio::sync::RwLock;
+use uuid::Uuid;
 
 use super::notifier::TelegramContext;
 use crate::services::{
@@ -16,6 +18,14 @@ use crate::services::{
 mod interactive;
 mod shared;
 
+/// Runtime-only pinned project state. Cleared on bot restart.
+#[derive(Debug, Clone)]
+pub struct PinnedProjectState {
+    pub project_id: Uuid,
+    pub project_name: String,
+    pub expires_at: DateTime<Utc>,
+}
+
 /// Telegram bot service for handling commands and notifications.
 pub struct TelegramBotService {
     db: DBService,
@@ -23,6 +33,8 @@ pub struct TelegramBotService {
     config: Arc<RwLock<Config>>,
     approvals: Approvals,
     task_state: TaskStateService,
+    /// Runtime-only pin state; `None` means no active pin.
+    pin_state: Arc<RwLock<Option<PinnedProjectState>>>,
 }
 
 impl TelegramBotService {
@@ -55,6 +67,7 @@ impl TelegramBotService {
             config,
             approvals,
             task_state,
+            pin_state: Arc::new(RwLock::new(None)),
         };
 
         Some(tokio::spawn(async move {
@@ -94,6 +107,93 @@ impl Clone for TelegramBotService {
             config: self.config.clone(),
             approvals: self.approvals.clone(),
             task_state: self.task_state.clone(),
+            pin_state: self.pin_state.clone(),
         }
+    }
+}
+
+impl TelegramBotService {
+    /// Set the active pin, overwriting any existing one.
+    pub async fn set_pin(&self, state: PinnedProjectState) {
+        *self.pin_state.write().await = Some(state);
+    }
+
+    /// Clear the active pin.
+    pub async fn clear_pin(&self) {
+        *self.pin_state.write().await = None;
+    }
+
+    /// Resolve the active pin, auto-clearing it if it has expired.
+    /// Returns `None` when there is no pin or the pin has expired.
+    pub async fn resolve_pin(&self) -> Option<PinnedProjectState> {
+        let mut guard = self.pin_state.write().await;
+        if let Some(ref pin) = *guard {
+            if Utc::now() >= pin.expires_at {
+                *guard = None;
+                return None;
+            }
+        }
+        guard.clone()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use chrono::Duration;
+
+    use super::*;
+
+    /// Build a minimal pin-state holder for unit testing helpers.
+    fn pin_state(initial: Option<PinnedProjectState>) -> Arc<RwLock<Option<PinnedProjectState>>> {
+        Arc::new(RwLock::new(initial))
+    }
+
+    async fn resolve(state: &Arc<RwLock<Option<PinnedProjectState>>>) -> Option<PinnedProjectState> {
+        let mut guard = state.write().await;
+        if let Some(ref pin) = *guard {
+            if Utc::now() >= pin.expires_at {
+                *guard = None;
+                return None;
+            }
+        }
+        guard.clone()
+    }
+
+    #[tokio::test]
+    async fn resolve_pin_returns_none_when_no_pin() {
+        let state = pin_state(None);
+        assert!(resolve(&state).await.is_none());
+    }
+
+    #[tokio::test]
+    async fn resolve_pin_returns_valid_pin() {
+        let state = pin_state(Some(PinnedProjectState {
+            project_id: Uuid::new_v4(),
+            project_name: "Demo".to_string(),
+            expires_at: Utc::now() + Duration::hours(1),
+        }));
+        assert!(resolve(&state).await.is_some());
+    }
+
+    #[tokio::test]
+    async fn resolve_pin_auto_clears_expired_pin() {
+        let state = pin_state(Some(PinnedProjectState {
+            project_id: Uuid::new_v4(),
+            project_name: "Expired".to_string(),
+            expires_at: Utc::now() - Duration::seconds(1),
+        }));
+        assert!(resolve(&state).await.is_none());
+        assert!(state.read().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn clearing_pin_removes_active_pin() {
+        let state = pin_state(Some(PinnedProjectState {
+            project_id: Uuid::new_v4(),
+            project_name: "Active".to_string(),
+            expires_at: Utc::now() + Duration::hours(1),
+        }));
+        *state.write().await = None;
+        assert!(state.read().await.is_none());
     }
 }
