@@ -14,7 +14,7 @@ This document preserves the fork-specific roadmap and status checklist that prev
 - [x] add auto-switch color theme
 - [x] refactor the native notice(using script before)
 - [x] refactor the executor profile loading for better use
-- [x] add integration telegram
+- [x] add integration telegram (better experience)
 - [x] add powermode manage feature
 - [x] add local network visting with auth
 - [x] create a global context bus for sharing between different agent (P0)
@@ -22,11 +22,10 @@ This document preserves the fork-specific roadmap and status checklist that prev
 - [x] skills manager (P0)
 - [x] better experience of telegram bot(interactive mode refactor)
 - [x] perf for long task log
-- [ ] configure sync (by using git repo) (P1)
-- [ ] acp protocol wrapper to link with any agent (P0)
+- [x] migrate to acp protocol for opencode
 - [ ] mobile app support with auto-detection
-- [ ] open workspace in system default terminal (p1)
-- [ ] add support for more user-friendly pages to modify or submit a task
+- [x] add support for more user-friendly pages to modify or submit a task (MDXEditor)
+- [x] running log pages view by using telegraph
 - [ ] ...
 
 ## Remove
