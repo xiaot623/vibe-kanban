@@ -1,5 +1,5 @@
 use db::models::{
-    execution_process::ExecutionProcess, project::Project, short_id_mapping::ShortIdMapping,
+    execution_process::ExecutionProcess, project::Project,
     task::Task,
 };
 use teloxide::{prelude::*, types::InlineKeyboardMarkup};
@@ -126,24 +126,20 @@ pub(super) async fn show_pending_approvals(
         let ctx =
             ExecutionProcess::load_context(&service.db.pool, approval.execution_process_id).await;
         if let Ok(ctx) = ctx {
-            let short_id = ShortIdMapping::get_or_create(&service.db.pool, ctx.task.id)
-                .await
-                .unwrap_or_else(|_| "????".to_string());
             text.push_str(&format!(
-                "\n[{}] {}",
-                short_id,
+                "\n{}",
                 truncate_text(&ctx.task.title, 40)
             ));
             rows.push(vec![
                 teloxide::types::InlineKeyboardButton::callback(
-                    format!("✅ [{}]", short_id),
+                    "✅ Approve".to_string(),
                     CallbackAction::ApproveConfirm {
                         task_id: ctx.task.id,
                     }
                     .encode(),
                 ),
                 teloxide::types::InlineKeyboardButton::callback(
-                    format!("📝 [{}]", short_id),
+                    "📝 Reject".to_string(),
                     CallbackAction::RejectInput {
                         task_id: ctx.task.id,
                     }
@@ -250,10 +246,7 @@ pub(super) async fn show_task_list(
 
     let mut task_buttons = Vec::new();
     for task in page_tasks {
-        let short_id = ShortIdMapping::get_or_create(&service.db.pool, task.id)
-            .await
-            .unwrap_or_else(|_| "????".to_string());
-        task_buttons.push((task.id, short_id, task.title.clone()));
+        task_buttons.push((task.id, task.title.clone()));
     }
 
     let status_label = status_filter.unwrap_or("all");
@@ -306,18 +299,13 @@ pub(super) async fn show_task_detail(
         _ => "Unknown project".to_string(),
     };
 
-    let short_id = ShortIdMapping::get_or_create(&service.db.pool, task.id)
-        .await
-        .unwrap_or_else(|_| "????".to_string());
-
     let description = task
         .description
         .clone()
         .unwrap_or_else(|| "No description.".to_string());
 
     let mut message = format!(
-        "[{}] {:?}\nProject: {}\nTitle: {}\n\n{}",
-        short_id,
+        "{:?}\nProject: {}\nTitle: {}\n\n{}",
         task.status,
         project_name,
         task.title,

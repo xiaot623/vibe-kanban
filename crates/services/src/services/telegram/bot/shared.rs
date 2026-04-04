@@ -605,10 +605,9 @@ pub(super) fn parse_message_as_task(message: &str) -> Option<(String, Option<Str
 
 /// Format the user-facing success message for a newly-created review task.
 pub(super) fn format_review_task_created_message(
-    short_id: &str,
     has_in_progress_attempt: bool,
 ) -> String {
-    let mut message = format!("✅ Review task created: [{short_id}]");
+    let mut message = "✅ Review task created".to_string();
     if !has_in_progress_attempt {
         message.push_str("\n⚠️ Created but not auto-started. Open the task and run it manually.");
     }
@@ -644,15 +643,15 @@ mod tests {
 
     #[test]
     fn format_review_task_created_message_with_auto_started_attempt() {
-        let msg = format_review_task_created_message("ab12", true);
-        assert_eq!(msg, "✅ Review task created: [ab12]");
+        let msg = format_review_task_created_message(true);
+        assert_eq!(msg, "✅ Review task created");
         assert!(!msg.contains("not auto-started"));
     }
 
     #[test]
     fn format_review_task_created_message_without_auto_started_attempt() {
-        let msg = format_review_task_created_message("zz99", false);
-        assert!(msg.starts_with("✅ Review task created: [zz99]"));
+        let msg = format_review_task_created_message(false);
+        assert!(msg.starts_with("✅ Review task created"));
         assert!(msg.contains("not auto-started"));
     }
 }

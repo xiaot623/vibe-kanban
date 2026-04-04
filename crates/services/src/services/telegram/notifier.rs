@@ -14,7 +14,6 @@ use db::{
     DBService,
     models::{
         execution_process::{ExecutionProcess, ExecutionProcessRunReason, ExecutionProcessStatus},
-        short_id_mapping::ShortIdMapping,
         task::{Task, TaskStatus},
         telegram_flow_binding::TelegramFlowBinding,
         workspace::Workspace,
@@ -455,10 +454,6 @@ impl TelegramHandler for TaskFinishedHandler {
             return;
         }
 
-        let short_id = ShortIdMapping::get_or_create(&tg.db.pool, task.id)
-            .await
-            .unwrap_or_else(|_| "????".to_string());
-
         // Use stored diff stats from the task (computed before merge),
         // falling back to runtime computation if not available
         let diff_stats = match (task.diff_additions, task.diff_deletions) {
@@ -467,8 +462,7 @@ impl TelegramHandler for TaskFinishedHandler {
         };
 
         let message = format!(
-            "[{}] 🎉🎉🎉 Task {} Finished\ndiff: {}",
-            short_id,
+            "🎉🎉🎉 Task {} Finished\ndiff: {}",
             task.title,
             match diff_stats {
                 Some((added, removed)) => format!("+{} / -{}", added, removed),

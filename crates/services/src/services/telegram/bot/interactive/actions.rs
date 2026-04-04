@@ -2,7 +2,6 @@ use std::str::FromStr;
 
 use chrono::Utc;
 use db::models::{
-    short_id_mapping::ShortIdMapping,
     task::{CreateTask, Task, TaskStatus, UpdateTask},
 };
 use executors::{executors::BaseCodingAgent, profile::ExecutorConfigs};
@@ -1073,12 +1072,8 @@ pub(super) async fn handle_create_review_task(
         Ok(result) => {
             tracing::info!("Created review task {}", result.task.id);
 
-            let short_id = ShortIdMapping::get_or_create(&service.db.pool, result.task.id)
-                .await
-                .unwrap_or_else(|_| "????".to_string());
-
             let message =
-                format_review_task_created_message(&short_id, result.task.has_in_progress_attempt);
+                format_review_task_created_message(result.task.has_in_progress_attempt);
             let cleanup = review_completion_cleanup_plan(card_context);
             super::ui::finalize_completion_result(bot, chat_id, cleanup, card_context, None)
                 .await?;
@@ -1385,14 +1380,11 @@ pub(super) async fn handle_edit_task_finish(
     let error_message = api_response.message().map(String::from);
     match api_response.into_data() {
         Some(updated_task) => {
-            let short_id = ShortIdMapping::get_or_create(&service.db.pool, updated_task.id)
-                .await
-                .unwrap_or_else(|_| "????".to_string());
             super::ui::render_or_send_card(
                 bot,
                 chat_id,
                 None,
-                format!("✏️ Updated [{}]\nTitle: {}", short_id, updated_task.title),
+                format!("✏️ Updated\nTitle: {}", updated_task.title),
                 Some(keyboard::task_detail_keyboard(
                     updated_task.id,
                     &updated_task.status,

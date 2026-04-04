@@ -350,15 +350,15 @@ pub fn stage_summary_reply_done_keyboard(flow_token: &str) -> InlineKeyboardMark
 
 /// Build a task list with inline buttons for each task.
 pub fn task_list_keyboard(
-    tasks: &[(Uuid, String, String)], // (task_id, short_id, title)
+    tasks: &[(Uuid, String)], // (task_id, title)
     project_id: Uuid,
     page: u16,
     has_more: bool,
 ) -> InlineKeyboardMarkup {
     let mut rows: Vec<Vec<InlineKeyboardButton>> = tasks
         .iter()
-        .map(|(task_id, short_id, title)| {
-            let label = format!("[{}] {}", short_id, truncate(title, 30));
+        .map(|(task_id, title)| {
+            let label = truncate(title, 30);
             vec![btn(
                 &label,
                 CallbackAction::TaskDetail { task_id: *task_id },
@@ -471,7 +471,7 @@ mod tests {
         assert!(has_home_callback(&project_list_keyboard(&[project], false)));
         assert!(has_home_callback(&status_filter_keyboard(project_id)));
         assert!(has_home_callback(&task_list_keyboard(
-            &[(task_id, "ABCD".to_string(), "Task title".to_string())],
+            &[(task_id, "Task title".to_string())],
             project_id,
             0,
             false,

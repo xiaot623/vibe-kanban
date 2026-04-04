@@ -1,6 +1,5 @@
 use std::sync::Arc;
 
-use db::models::short_id_mapping::ShortIdMapping;
 use teloxide::{prelude::*, types::MessageId, utils::command::BotCommands};
 
 use super::{BotDialogue, CardRenderContext, TelegramBotService};
@@ -42,9 +41,6 @@ pub(super) async fn handle_command(
         );
         return Ok(());
     }
-
-    // Lazily clean up expired short ID mappings
-    ShortIdMapping::cleanup_expired(&service.db.pool).await;
 
     match cmd {
         Command::Start => {
@@ -168,8 +164,6 @@ pub(super) async fn handle_callback(
     {
         return Ok(());
     }
-
-    ShortIdMapping::cleanup_expired(&service.db.pool).await;
 
     match action {
         CallbackAction::Home => {
