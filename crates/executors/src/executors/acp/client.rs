@@ -17,6 +17,9 @@ use crate::{
 const EXIT_PLAN_MODE_NAME: &str = "ExitPlanMode";
 const GEMINI_EXIT_PLAN_TOOL_CALL_ID_PREFIX: &str = "exit_plan_mode-";
 const GEMINI_PLAN_APPROVAL_TITLE_PREFIX: &str = "Requesting plan approval for:";
+const OPENCODE_PLAN_EXIT_TOOL_CALL_ID_PREFIX: &str = "plan_exit-";
+const OPENCODE_PLAN_EXIT_QUESTION_PREFIX: &str = "Plan at ";
+const OPENCODE_PLAN_PATH_SEGMENT: &str = ".opencode/plans/";
 
 /// ACP client that handles agent-client protocol communication
 #[derive(Clone)]
@@ -73,8 +76,76 @@ fn is_gemini_exit_plan_tool_call(tool_call_id: &str) -> bool {
     tool_call_id.starts_with(GEMINI_EXIT_PLAN_TOOL_CALL_ID_PREFIX)
 }
 
-fn normalize_tool_name(tool_call_id: &str, fallback_title: Option<&str>) -> String {
-    if is_gemini_exit_plan_tool_call(tool_call_id) {
+fn is_opencode_plan_exit_tool_call(tool_call_id: &str) -> bool {
+    tool_call_id.starts_with(OPENCODE_PLAN_EXIT_TOOL_CALL_ID_PREFIX)
+}
+
+fn strip_prefix_ignore_ascii_case<'a>(text: &'a str, prefix: &str) -> Option<&'a str> {
+    text.get(..prefix.len())
+        .filter(|candidate| candidate.eq_ignore_ascii_case(prefix))
+        .map(|_| &text[prefix.len()..])
+}
+
+fn trim_opencode_markdown_wrappers(text: &str) -> &str {
+    text.trim_start_matches(|c| {
+        matches!(
+            c,
+            '"' | '\'' | '`' | '*' | '_' | '[' | ']' | '(' | ')' | '<' | '>'
+        )
+    })
+    .trim_end_matches(|c| {
+        matches!(
+            c,
+            '"' | '\'' | '`' | '.' | '*' | '_' | '[' | ']' | '(' | ')' | '<' | '>'
+        )
+    })
+}
+
+fn parse_embedded_opencode_plan_path(text: &str) -> Option<String> {
+    let start = text.find(OPENCODE_PLAN_PATH_SEGMENT)?;
+    let suffix = &text[start..];
+    let end = suffix
+        .find(|c: char| c.is_whitespace() || matches!(c, ')' | ']' | '}' | ',' | ';'))
+        .unwrap_or(suffix.len());
+    let candidate = trim_opencode_markdown_wrappers(&suffix[..end]);
+
+    if candidate.is_empty() {
+        None
+    } else {
+        Some(candidate.to_string())
+    }
+}
+
+fn find_matching_string_in_value(
+    value: &serde_json::Value,
+    predicate: &impl Fn(&str) -> bool,
+) -> Option<String> {
+    match value {
+        serde_json::Value::String(text) if predicate(text) => Some(text.clone()),
+        serde_json::Value::Array(items) => items
+            .iter()
+            .find_map(|item| find_matching_string_in_value(item, predicate)),
+        serde_json::Value::Object(map) => map
+            .values()
+            .find_map(|item| find_matching_string_in_value(item, predicate)),
+        _ => None,
+    }
+}
+
+fn is_exit_plan_tool_call(
+    tool_call_id: &str,
+    _title: Option<&str>,
+    _raw_input: Option<&serde_json::Value>,
+) -> bool {
+    is_gemini_exit_plan_tool_call(tool_call_id) || is_opencode_plan_exit_tool_call(tool_call_id)
+}
+
+fn normalize_tool_name(
+    tool_call_id: &str,
+    fallback_title: Option<&str>,
+    raw_input: Option<&serde_json::Value>,
+) -> String {
+    if is_exit_plan_tool_call(tool_call_id, fallback_title, raw_input) {
         EXIT_PLAN_MODE_NAME.to_string()
     } else {
         fallback_title
@@ -85,19 +156,47 @@ fn normalize_tool_name(tool_call_id: &str, fallback_title: Option<&str>) -> Stri
 }
 
 fn parse_plan_path_from_title(title: &str) -> Option<String> {
-    let raw_path = title
-        .strip_prefix(GEMINI_PLAN_APPROVAL_TITLE_PREFIX)?
-        .trim();
-    if raw_path.is_empty() {
-        return None;
+    // Gemini: "Requesting plan approval for: <path>"
+    if let Some(raw_path) = strip_prefix_ignore_ascii_case(title, GEMINI_PLAN_APPROVAL_TITLE_PREFIX)
+    {
+        let raw_path = raw_path.trim();
+        if raw_path.is_empty() {
+            return None;
+        }
+        let normalized = raw_path.trim_matches(|c| matches!(c, '"' | '\'' | '`'));
+        return if normalized.is_empty() {
+            None
+        } else {
+            Some(normalized.to_string())
+        };
     }
 
-    let normalized = raw_path.trim_matches(|c| matches!(c, '"' | '\'' | '`'));
-    if normalized.is_empty() {
-        None
-    } else {
-        Some(normalized.to_string())
+    // OpenCode: "Plan at <path> is complete. Would you like to switch to the build agent..."
+    if let Some(rest) = strip_prefix_ignore_ascii_case(title, OPENCODE_PLAN_EXIT_QUESTION_PREFIX) {
+        // rest starts with "<path> is complete..."
+        if let Some(end) = rest.to_ascii_lowercase().find(" is complete") {
+            let raw_path = rest[..end].trim();
+            if !raw_path.is_empty() {
+                let normalized = raw_path.trim_matches(|c| matches!(c, '"' | '\'' | '`'));
+                if !normalized.is_empty() {
+                    return Some(normalized.to_string());
+                }
+            }
+        }
     }
+
+    parse_embedded_opencode_plan_path(title)
+}
+
+fn parse_plan_path_from_value(value: &serde_json::Value) -> Option<String> {
+    find_matching_string_in_value(value, &|text| parse_plan_path_from_title(text).is_some())
+        .and_then(|text| parse_plan_path_from_title(&text))
+        .or_else(|| {
+            find_matching_string_in_value(value, &|text| {
+                parse_embedded_opencode_plan_path(text).is_some()
+            })
+            .and_then(|text| parse_embedded_opencode_plan_path(&text))
+        })
 }
 
 fn resolve_plan_path(plan_path: &str, worktree_path: &Path) -> PathBuf {
@@ -111,6 +210,10 @@ fn resolve_plan_path(plan_path: &str, worktree_path: &Path) -> PathBuf {
 
 fn read_plan_from_title(title: &str, worktree_path: &Path) -> Option<String> {
     let plan_path = parse_plan_path_from_title(title)?;
+    read_plan_from_path(&plan_path, worktree_path)
+}
+
+fn read_plan_from_path(plan_path: &str, worktree_path: &Path) -> Option<String> {
     let resolved_path = resolve_plan_path(&plan_path, worktree_path);
 
     match std::fs::read_to_string(&resolved_path) {
@@ -126,20 +229,39 @@ fn read_plan_from_title(title: &str, worktree_path: &Path) -> Option<String> {
     }
 }
 
+fn extract_plan_review_text(raw_input: Option<&serde_json::Value>) -> Option<String> {
+    raw_input
+        .and_then(|value| find_matching_string_in_value(value, &|text| !text.trim().is_empty()))
+}
+
 fn build_approval_input(
     tool_call: &acp::ToolCallUpdate,
     tool_call_id: &str,
     worktree_path: &Path,
 ) -> serde_json::Value {
     let mut payload = serde_json::json!({ "tool_call": tool_call });
+    let title = tool_call.fields.title.as_deref();
+    let raw_input = tool_call.fields.raw_input.as_ref();
 
-    if !is_gemini_exit_plan_tool_call(tool_call_id) {
+    if !is_exit_plan_tool_call(tool_call_id, title, raw_input) {
         return payload;
     }
 
-    let title = tool_call.fields.title.as_deref().unwrap_or_default();
-    let plan = read_plan_from_title(title, worktree_path).unwrap_or_else(|| title.to_string());
-    let plan_path = parse_plan_path_from_title(title);
+    let title = title.unwrap_or_default();
+    let (plan_path, plan) = if is_gemini_exit_plan_tool_call(tool_call_id) {
+        let plan_path = parse_plan_path_from_title(title);
+        let plan = read_plan_from_title(title, worktree_path).unwrap_or_else(|| title.to_string());
+        (plan_path, plan)
+    } else {
+        let plan_path = parse_plan_path_from_title(title)
+            .or_else(|| raw_input.and_then(parse_plan_path_from_value));
+        let plan = plan_path
+            .as_deref()
+            .and_then(|path| read_plan_from_path(path, worktree_path))
+            .or_else(|| extract_plan_review_text(raw_input))
+            .unwrap_or_else(|| title.to_string());
+        (plan_path, plan)
+    };
 
     if let Some(obj) = payload.as_object_mut() {
         obj.insert("plan".to_string(), serde_json::Value::String(plan));
@@ -186,7 +308,11 @@ impl acp::Client for AcpClient {
         }
 
         let tool_call_id = args.tool_call.tool_call_id.0.to_string();
-        let tool_name = normalize_tool_name(&tool_call_id, args.tool_call.fields.title.as_deref());
+        let tool_name = normalize_tool_name(
+            &tool_call_id,
+            args.tool_call.fields.title.as_deref(),
+            args.tool_call.fields.raw_input.as_ref(),
+        );
         let tool_input = build_approval_input(&args.tool_call, &tool_call_id, &self.worktree_path);
         let status = match self
             .approvals
@@ -253,6 +379,7 @@ impl acp::Client for AcpClient {
 
         self.send_event(AcpEvent::ApprovalResponse(ApprovalResponse {
             tool_call_id: tool_call_id.clone(),
+            tool_name: Some(tool_name),
             status: status.clone(),
         }));
 
@@ -356,7 +483,13 @@ mod tests {
 
     #[test]
     fn normalize_tool_name_maps_exit_plan_mode_prefix() {
-        let tool_name = normalize_tool_name("exit_plan_mode-42", Some("Request approval"));
+        let tool_name = normalize_tool_name("exit_plan_mode-42", Some("Request approval"), None);
+        assert_eq!(tool_name, EXIT_PLAN_MODE_NAME);
+    }
+
+    #[test]
+    fn normalize_tool_name_maps_opencode_plan_exit_prefix() {
+        let tool_name = normalize_tool_name("plan_exit-1", Some("Build Agent"), None);
         assert_eq!(tool_name, EXIT_PLAN_MODE_NAME);
     }
 
@@ -379,6 +512,61 @@ mod tests {
             payload["plan_path"].as_str(),
             Some(plan_path.to_string_lossy().as_ref())
         );
+    }
+
+    #[test]
+    fn build_approval_input_reads_plan_from_title_path_case_insensitively() {
+        let worktree_path = create_temp_dir("read-plan-case-insensitive");
+        let plan_path = worktree_path.join("plan.md");
+        let plan_text = "# Plan\n- Step 1\n";
+        fs::write(&plan_path, plan_text).expect("write plan file");
+
+        let title = format!("REQUESTING PLAN APPROVAL FOR: {}", plan_path.display());
+        let tool_call = acp::ToolCallUpdate::new(
+            "exit_plan_mode-301",
+            acp::ToolCallUpdateFields::new().title(title),
+        );
+
+        let payload = build_approval_input(&tool_call, "exit_plan_mode-301", &worktree_path);
+        assert_eq!(payload["plan"].as_str(), Some(plan_text));
+    }
+
+    #[test]
+    fn build_approval_input_opencode_reads_plan_from_question() {
+        let worktree_path = create_temp_dir("opencode-read-plan");
+        let plan_path = worktree_path.join("PLAN.md");
+        let plan_text = "# OpenCode Plan\n- Step A\n- Step B\n";
+        fs::write(&plan_path, plan_text).expect("write plan file");
+
+        let title = format!(
+            "Plan at {} is complete. Would you like to switch to the build agent and start implementing?",
+            plan_path.display()
+        );
+        let tool_call =
+            acp::ToolCallUpdate::new("plan_exit-1", acp::ToolCallUpdateFields::new().title(title));
+
+        let payload = build_approval_input(&tool_call, "plan_exit-1", &worktree_path);
+        assert_eq!(payload["plan"].as_str(), Some(plan_text));
+        assert_eq!(
+            payload["plan_path"].as_str(),
+            Some(plan_path.to_string_lossy().as_ref())
+        );
+    }
+
+    #[test]
+    fn build_approval_input_opencode_falls_back_to_title_when_plan_file_missing() {
+        let worktree_path = create_temp_dir("opencode-plan-fallback");
+        let title =
+            "Plan at missing-plan.md is complete. Would you like to switch to the build agent?"
+                .to_string();
+        let tool_call = acp::ToolCallUpdate::new(
+            "plan_exit-2",
+            acp::ToolCallUpdateFields::new().title(title.clone()),
+        );
+
+        let payload = build_approval_input(&tool_call, "plan_exit-2", &worktree_path);
+        assert_eq!(payload["plan"].as_str(), Some(title.as_str()));
+        assert_eq!(payload["plan_path"].as_str(), Some("missing-plan.md"));
     }
 
     #[test]

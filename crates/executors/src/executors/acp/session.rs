@@ -72,6 +72,7 @@ impl SessionManager {
 
         match event {
             AcpEvent::SessionStart(..)
+            | AcpEvent::ModelInfo(..)
             | AcpEvent::Error(..)
             | AcpEvent::Done(..)
             | AcpEvent::Other(..) => return None,

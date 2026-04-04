@@ -25,6 +25,9 @@ use crate::{
 const EXIT_PLAN_MODE_NAME: &str = "ExitPlanMode";
 const GEMINI_EXIT_PLAN_TOOL_CALL_ID_PREFIX: &str = "exit_plan_mode-";
 const GEMINI_PLAN_APPROVAL_TITLE_PREFIX: &str = "Requesting plan approval for:";
+const OPENCODE_PLAN_EXIT_TOOL_CALL_ID_PREFIX: &str = "plan_exit-";
+const OPENCODE_PLAN_EXIT_QUESTION_PREFIX: &str = "Plan at ";
+const OPENCODE_PLAN_PATH_SEGMENT: &str = ".opencode/plans/";
 
 pub fn normalize_logs(msg_store: Arc<MsgStore>, worktree_path: &Path) {
     // stderr normalization
@@ -51,6 +54,16 @@ pub fn normalize_logs(msg_store: Arc<MsgStore>, worktree_path: &Path) {
                             msg_store.push_session_id(id);
                             stored_session_id = true;
                         }
+                    }
+                    AcpEvent::ModelInfo(model) => {
+                        let idx = entry_index.next();
+                        let entry = NormalizedEntry {
+                            timestamp: None,
+                            entry_type: NormalizedEntryType::SystemMessage,
+                            content: format!("model: {model}"),
+                            metadata: None,
+                        };
+                        msg_store.push_patch(ConversationPatch::add_normalized_entry(idx, entry));
                     }
                     AcpEvent::Error(msg) => {
                         let idx = entry_index.next();
@@ -316,7 +329,7 @@ pub fn normalize_logs(msg_store: Arc<MsgStore>, worktree_path: &Path) {
         }
 
         fn map_to_action_type(tc: &PartialToolCallData, worktree_path: &Path) -> ActionType {
-            if is_gemini_exit_plan_tool_call(tc.id.0.as_ref()) {
+            if is_exit_plan_tool_call(tc) {
                 return ActionType::PlanPresentation {
                     plan: resolve_exit_plan_content(tc, worktree_path),
                 };
@@ -550,7 +563,7 @@ pub fn normalize_logs(msg_store: Arc<MsgStore>, worktree_path: &Path) {
         }
 
         fn get_tool_content(tc: &PartialToolCallData, worktree_path: &Path) -> String {
-            if is_gemini_exit_plan_tool_call(tc.id.0.as_ref()) {
+            if is_exit_plan_tool_call(tc) {
                 return resolve_exit_plan_content(tc, worktree_path);
             }
 
@@ -636,7 +649,7 @@ pub fn normalize_logs(msg_store: Arc<MsgStore>, worktree_path: &Path) {
 }
 
 fn derive_tool_use_name(tc: &PartialToolCallData) -> String {
-    if is_gemini_exit_plan_tool_call(tc.id.0.as_ref()) {
+    if is_exit_plan_tool_call(tc) {
         EXIT_PLAN_MODE_NAME.to_string()
     } else {
         tc.title.clone()
@@ -644,7 +657,14 @@ fn derive_tool_use_name(tc: &PartialToolCallData) -> String {
 }
 
 fn resolve_exit_plan_content(tc: &PartialToolCallData, worktree_path: &Path) -> String {
-    read_plan_from_title(&tc.title, worktree_path)
+    if is_gemini_exit_plan_tool_call(tc.id.0.as_ref()) {
+        return read_plan_from_title(&tc.title, worktree_path).unwrap_or_else(|| tc.title.clone());
+    }
+
+    parse_plan_path_from_title(&tc.title)
+        .or_else(|| tc.raw_input.as_ref().and_then(parse_plan_path_from_value))
+        .and_then(|path| read_plan_from_path(&path, worktree_path))
+        .or_else(|| extract_plan_review_text(tc.raw_input.as_ref()))
         .or_else(|| collect_text_content_from_tool_call(tc))
         .unwrap_or_else(|| tc.title.clone())
 }
@@ -668,20 +688,97 @@ fn is_gemini_exit_plan_tool_call(tool_call_id: &str) -> bool {
     tool_call_id.starts_with(GEMINI_EXIT_PLAN_TOOL_CALL_ID_PREFIX)
 }
 
-fn parse_plan_path_from_title(title: &str) -> Option<String> {
-    let raw_path = title
-        .strip_prefix(GEMINI_PLAN_APPROVAL_TITLE_PREFIX)?
-        .trim();
-    if raw_path.is_empty() {
-        return None;
-    }
+fn is_opencode_plan_exit_tool_call(tool_call_id: &str) -> bool {
+    tool_call_id.starts_with(OPENCODE_PLAN_EXIT_TOOL_CALL_ID_PREFIX)
+}
 
-    let normalized = raw_path.trim_matches(|c| matches!(c, '"' | '\'' | '`'));
-    if normalized.is_empty() {
+fn strip_prefix_ignore_ascii_case<'a>(text: &'a str, prefix: &str) -> Option<&'a str> {
+    text.get(..prefix.len())
+        .filter(|candidate| candidate.eq_ignore_ascii_case(prefix))
+        .map(|_| &text[prefix.len()..])
+}
+
+fn trim_opencode_markdown_wrappers(text: &str) -> &str {
+    text.trim_start_matches(|c| {
+        matches!(
+            c,
+            '"' | '\'' | '`' | '*' | '_' | '[' | ']' | '(' | ')' | '<' | '>'
+        )
+    })
+    .trim_end_matches(|c| {
+        matches!(
+            c,
+            '"' | '\'' | '`' | '.' | '*' | '_' | '[' | ']' | '(' | ')' | '<' | '>'
+        )
+    })
+}
+
+fn parse_embedded_opencode_plan_path(text: &str) -> Option<String> {
+    let start = text.find(OPENCODE_PLAN_PATH_SEGMENT)?;
+    let suffix = &text[start..];
+    let end = suffix
+        .find(|c: char| c.is_whitespace() || matches!(c, ')' | ']' | '}' | ',' | ';'))
+        .unwrap_or(suffix.len());
+    let candidate = trim_opencode_markdown_wrappers(&suffix[..end]);
+
+    if candidate.is_empty() {
         None
     } else {
-        Some(normalized.to_string())
+        Some(candidate.to_string())
     }
+}
+
+fn find_matching_string_in_value(
+    value: &serde_json::Value,
+    predicate: &impl Fn(&str) -> bool,
+) -> Option<String> {
+    match value {
+        serde_json::Value::String(text) if predicate(text) => Some(text.clone()),
+        serde_json::Value::Array(items) => items
+            .iter()
+            .find_map(|item| find_matching_string_in_value(item, predicate)),
+        serde_json::Value::Object(map) => map
+            .values()
+            .find_map(|item| find_matching_string_in_value(item, predicate)),
+        _ => None,
+    }
+}
+
+fn is_exit_plan_tool_call(tc: &PartialToolCallData) -> bool {
+    is_gemini_exit_plan_tool_call(tc.id.0.as_ref())
+        || is_opencode_plan_exit_tool_call(tc.id.0.as_ref())
+}
+
+fn parse_plan_path_from_title(title: &str) -> Option<String> {
+    // Gemini: "Requesting plan approval for: <path>"
+    if let Some(raw_path) = strip_prefix_ignore_ascii_case(title, GEMINI_PLAN_APPROVAL_TITLE_PREFIX)
+    {
+        let raw_path = raw_path.trim();
+        if raw_path.is_empty() {
+            return None;
+        }
+        let normalized = raw_path.trim_matches(|c| matches!(c, '"' | '\'' | '`'));
+        return if normalized.is_empty() {
+            None
+        } else {
+            Some(normalized.to_string())
+        };
+    }
+
+    // OpenCode: "Plan at <path> is complete. Would you like to switch to the build agent..."
+    if let Some(rest) = strip_prefix_ignore_ascii_case(title, OPENCODE_PLAN_EXIT_QUESTION_PREFIX) {
+        if let Some(end) = rest.to_ascii_lowercase().find(" is complete") {
+            let raw_path = rest[..end].trim();
+            if !raw_path.is_empty() {
+                let normalized = raw_path.trim_matches(|c| matches!(c, '"' | '\'' | '`'));
+                if !normalized.is_empty() {
+                    return Some(normalized.to_string());
+                }
+            }
+        }
+    }
+
+    parse_embedded_opencode_plan_path(title)
 }
 
 fn resolve_plan_path(plan_path: &str, worktree_path: &Path) -> PathBuf {
@@ -695,20 +792,39 @@ fn resolve_plan_path(plan_path: &str, worktree_path: &Path) -> PathBuf {
 
 fn read_plan_from_title(title: &str, worktree_path: &Path) -> Option<String> {
     let plan_path = parse_plan_path_from_title(title)?;
+    read_plan_from_path(&plan_path, worktree_path)
+}
+
+fn parse_plan_path_from_value(value: &serde_json::Value) -> Option<String> {
+    find_matching_string_in_value(value, &|text| parse_plan_path_from_title(text).is_some())
+        .and_then(|text| parse_plan_path_from_title(&text))
+        .or_else(|| {
+            find_matching_string_in_value(value, &|text| {
+                parse_embedded_opencode_plan_path(text).is_some()
+            })
+            .and_then(|text| parse_embedded_opencode_plan_path(&text))
+        })
+}
+
+fn read_plan_from_path(plan_path: &str, worktree_path: &Path) -> Option<String> {
     let resolved_path = resolve_plan_path(&plan_path, worktree_path);
 
     match std::fs::read_to_string(&resolved_path) {
         Ok(plan) => Some(plan),
         Err(err) => {
             tracing::debug!(
-                "Failed to read Gemini plan file '{}' from title '{}': {}",
+                "Failed to read ACP plan file '{}': {}",
                 resolved_path.display(),
-                title,
                 err
             );
             None
         }
     }
+}
+
+fn extract_plan_review_text(raw_input: Option<&serde_json::Value>) -> Option<String> {
+    raw_input
+        .and_then(|value| find_matching_string_in_value(value, &|text| !text.trim().is_empty()))
 }
 
 struct PartialToolCallData {
@@ -938,6 +1054,24 @@ mod tests {
         panic!("timed out waiting for normalized token usage entry");
     }
 
+    async fn wait_for_system_message_entry(msg_store: &MsgStore) -> NormalizedEntry {
+        for _ in 0..100 {
+            if let Some(entry) = msg_store.get_history().iter().rev().find_map(|msg| {
+                if let LogMsg::JsonPatch(patch) = msg
+                    && let Some((_, entry)) = extract_normalized_entry_from_patch(patch)
+                    && matches!(entry.entry_type, NormalizedEntryType::SystemMessage)
+                {
+                    return Some(entry);
+                }
+                None
+            }) {
+                return entry;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        panic!("timed out waiting for normalized system message entry");
+    }
+
     #[tokio::test]
     async fn exit_plan_mode_tool_call_normalizes_to_plan_presentation_entry() {
         let worktree = create_temp_dir("plan-presentation");
@@ -1021,6 +1155,93 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn opencode_plan_exit_tool_call_normalizes_to_plan_presentation_entry() {
+        let worktree = create_temp_dir("opencode-plan-presentation");
+        let plan_text = "# OpenCode Plan\n- step A\n- step B\n";
+        let plan_path = worktree.join("PLAN.md");
+        fs::write(&plan_path, plan_text).expect("write plan file");
+
+        let msg_store = Arc::new(MsgStore::new());
+        normalize_logs(msg_store.clone(), &worktree);
+
+        let title = format!(
+            "Plan at {} is complete. Would you like to switch to the build agent and start implementing?",
+            plan_path.display()
+        );
+        let tool_call = agent_client_protocol::ToolCall::new("plan_exit-1", title)
+            .kind(agent_client_protocol::ToolKind::Other)
+            .status(agent_client_protocol::ToolCallStatus::Pending);
+
+        msg_store.push_stdout(format!(
+            "{}\n",
+            serde_json::to_string(&AcpEvent::ToolCall(tool_call))
+                .expect("serialize tool call event")
+        ));
+
+        let entry = wait_for_tool_use_entry(msg_store.as_ref()).await;
+        match entry.entry_type {
+            NormalizedEntryType::ToolUse {
+                tool_name,
+                action_type,
+                status,
+            } => {
+                assert_eq!(tool_name, EXIT_PLAN_MODE_NAME);
+                assert!(matches!(status, ToolStatus::Created));
+                match action_type {
+                    ActionType::PlanPresentation { plan } => assert_eq!(plan, plan_text),
+                    other => panic!("expected plan_presentation action type, got {other:?}"),
+                }
+            }
+            other => panic!("expected tool_use entry, got {other:?}"),
+        }
+        assert_eq!(entry.content, plan_text);
+        let metadata: ToolCallMetadata = serde_json::from_value(
+            entry
+                .metadata
+                .expect("tool entry should include tool_call_id metadata"),
+        )
+        .expect("metadata should deserialize");
+        assert_eq!(metadata.tool_call_id, "plan_exit-1");
+    }
+
+    #[tokio::test]
+    async fn opencode_plan_exit_falls_back_to_title_when_plan_file_cannot_be_read() {
+        let worktree = create_temp_dir("opencode-plan-fallback");
+        let msg_store = Arc::new(MsgStore::new());
+        normalize_logs(msg_store.clone(), &worktree);
+
+        let title =
+            "Plan at missing-plan.md is complete. Would you like to switch to the build agent?"
+                .to_string();
+        let tool_call = agent_client_protocol::ToolCall::new("plan_exit-2", title.clone())
+            .kind(agent_client_protocol::ToolKind::Other)
+            .status(agent_client_protocol::ToolCallStatus::Pending);
+
+        msg_store.push_stdout(format!(
+            "{}\n",
+            serde_json::to_string(&AcpEvent::ToolCall(tool_call))
+                .expect("serialize tool call event")
+        ));
+
+        let entry = wait_for_tool_use_entry(msg_store.as_ref()).await;
+        match entry.entry_type {
+            NormalizedEntryType::ToolUse {
+                tool_name,
+                action_type,
+                ..
+            } => {
+                assert_eq!(tool_name, EXIT_PLAN_MODE_NAME);
+                match action_type {
+                    ActionType::PlanPresentation { plan } => assert_eq!(plan, title),
+                    other => panic!("expected plan_presentation action type, got {other:?}"),
+                }
+            }
+            other => panic!("expected tool_use entry, got {other:?}"),
+        }
+        assert_eq!(entry.content, title);
+    }
+
+    #[tokio::test]
     async fn usage_update_normalizes_to_token_usage_entry() {
         let worktree = create_temp_dir("usage-update");
         let msg_store = Arc::new(MsgStore::new());
@@ -1041,5 +1262,25 @@ mod tests {
             other => panic!("expected token usage info entry, got {other:?}"),
         }
         assert_eq!(entry.content, "Tokens used: 321 / Context window: 1048576");
+    }
+
+    #[tokio::test]
+    async fn model_info_normalizes_to_system_message_entry() {
+        let worktree = create_temp_dir("model-info");
+        let msg_store = Arc::new(MsgStore::new());
+        normalize_logs(msg_store.clone(), &worktree);
+
+        msg_store.push_stdout(format!(
+            "{}\n",
+            serde_json::to_string(&AcpEvent::ModelInfo("gpt-5.4".to_string()))
+                .expect("serialize model info event")
+        ));
+
+        let entry = wait_for_system_message_entry(msg_store.as_ref()).await;
+        assert!(matches!(
+            entry.entry_type,
+            NormalizedEntryType::SystemMessage
+        ));
+        assert_eq!(entry.content, "model: gpt-5.4");
     }
 }

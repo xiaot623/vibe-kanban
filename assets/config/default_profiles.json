@@ -107,7 +107,7 @@
       },
       "PLAN": {
         "OPENCODE": {
-          "mode": "plan",
+          "plan": true,
           "auto_approve": true,
           "model": "opencode/big-pickle"
         }

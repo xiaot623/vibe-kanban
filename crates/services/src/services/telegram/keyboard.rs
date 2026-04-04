@@ -21,10 +21,7 @@ pub fn home_keyboard(has_active_pin: bool) -> InlineKeyboardMarkup {
             btn("📋 Tasks", CallbackAction::Projects),
             btn("➕ New", CallbackAction::NewTask),
         ],
-        vec![
-            btn("⏳ Pending", CallbackAction::Pending),
-            pin_btn,
-        ],
+        vec![btn("⏳ Pending", CallbackAction::Pending), pin_btn],
     ])
 }
 
@@ -86,10 +83,7 @@ pub fn pin_duration_keyboard(project_id: Uuid) -> InlineKeyboardMarkup {
             )
         })
         .collect();
-    InlineKeyboardMarkup::new(vec![
-        buttons,
-        vec![btn("🏠 Home", CallbackAction::Home)],
-    ])
+    InlineKeyboardMarkup::new(vec![buttons, vec![btn("🏠 Home", CallbackAction::Home)]])
 }
 
 /// Build status filter buttons for a project's task list.
@@ -492,9 +486,7 @@ mod tests {
             .flatten()
             .filter_map(Value::as_array)
             .flatten()
-            .any(|button| {
-                CallbackAction::decode(callback_data(button)).as_ref() == Some(expected)
-            })
+            .any(|button| CallbackAction::decode(callback_data(button)).as_ref() == Some(expected))
     }
 
     #[test]
@@ -528,7 +520,10 @@ mod tests {
             let decoded = CallbackAction::decode(callback_data(&row[i]));
             assert_eq!(
                 decoded,
-                Some(CallbackAction::PinDuration { project_id, minutes }),
+                Some(CallbackAction::PinDuration {
+                    project_id,
+                    minutes
+                }),
                 "button {i} should encode {minutes}min"
             );
         }

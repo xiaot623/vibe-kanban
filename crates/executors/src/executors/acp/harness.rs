@@ -2,7 +2,10 @@ use std::{
     path::{Path, PathBuf},
     process::Stdio,
     rc::Rc,
-    sync::Arc,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
 };
 
 use agent_client_protocol as proto;
@@ -324,7 +327,7 @@ impl AcpAgentHarness {
                             .await;
 
                         // Handle session creation/forking
-                        let (acp_session_id, display_session_id, prompt_to_send) =
+                        let (acp_session_id, display_session_id, prompt_to_send, initial_model_id) =
                             if let Some(existing) = existing_session {
                                 // Fork existing session
                                 let new_ui_id = uuid::Uuid::new_v4().to_string();
@@ -345,7 +348,16 @@ impl AcpAgentHarness {
                                         let resume_prompt = session_manager
                                             .generate_resume_prompt(&new_ui_id, &prompt)
                                             .unwrap_or_else(|_| prompt.clone());
-                                        (resp.session_id.0.to_string(), new_ui_id, resume_prompt)
+                                        let initial_model_id = resp
+                                            .models
+                                            .as_ref()
+                                            .map(|models| models.current_model_id.0.to_string());
+                                        (
+                                            resp.session_id.0.to_string(),
+                                            new_ui_id,
+                                            resume_prompt,
+                                            initial_model_id,
+                                        )
                                     }
                                     Err(e) => {
                                         error!("Failed to create session: {}", e);
@@ -360,7 +372,11 @@ impl AcpAgentHarness {
                                 {
                                     Ok(resp) => {
                                         let sid = resp.session_id.0.to_string();
-                                        (sid.clone(), sid, prompt)
+                                        let initial_model_id = resp
+                                            .models
+                                            .as_ref()
+                                            .map(|models| models.current_model_id.0.to_string());
+                                        (sid.clone(), sid, prompt, initial_model_id)
                                     }
                                     Err(e) => {
                                         error!("Failed to create session: {}", e);
@@ -373,15 +389,21 @@ impl AcpAgentHarness {
                         let _ = log_tx
                             .send(AcpEvent::SessionStart(display_session_id.clone()).to_string());
 
+                        if let Some(initial_model_id) = initial_model_id {
+                            let _ = log_tx.send(AcpEvent::ModelInfo(initial_model_id).to_string());
+                        }
+
                         if let Some(model) = model.clone() {
                             match conn
                                 .set_session_model(proto::SetSessionModelRequest::new(
                                     proto::SessionId::new(acp_session_id.clone()),
-                                    model,
+                                    model.clone(),
                                 ))
                                 .await
                             {
-                                Ok(_) => {}
+                                Ok(_) => {
+                                    let _ = log_tx.send(AcpEvent::ModelInfo(model).to_string());
+                                }
                                 Err(e) => error!("Failed to set session mode: {}", e),
                             }
                         }
@@ -405,8 +427,25 @@ impl AcpAgentHarness {
                         let sm_for_writer = session_manager.clone();
                         let conn_for_cancel = conn.clone();
                         let acp_session_id_for_cancel = acp_session_id.clone();
+                        let exit_after_plan_approval = Arc::new(AtomicBool::new(false));
+                        let exit_after_plan_approval_for_events = exit_after_plan_approval.clone();
                         tokio::task::spawn_local(async move {
                             while let Some(event) = event_rx.recv().await {
+                                if let AcpEvent::ApprovalResponse(resp) = &event
+                                    && matches!(&resp.status, ApprovalStatus::Approved)
+                                    && is_exit_plan_approval_response(resp)
+                                {
+                                    exit_after_plan_approval_for_events
+                                        .store(true, Ordering::SeqCst);
+                                    let _ = conn_for_cancel
+                                        .cancel(proto::CancelNotification::new(
+                                            proto::SessionId::new(
+                                                acp_session_id_for_cancel.clone(),
+                                            ),
+                                        ))
+                                        .await;
+                                }
+
                                 if let AcpEvent::ApprovalResponse(resp) = &event
                                     && let ApprovalStatus::Denied {
                                         reason: Some(reason),
@@ -458,6 +497,12 @@ impl AcpAgentHarness {
                                     let _ = log_tx.send(AcpEvent::Done(stop_reason).to_string());
                                 }
                                 Err(e) => {
+                                    if exit_after_plan_approval.load(Ordering::SeqCst) {
+                                        tracing::debug!(
+                                            "ACP session cancelled after approved plan exit"
+                                        );
+                                        break;
+                                    }
                                     tracing::debug!("error {} {e} {:?}", e.code, e.data);
                                     if e.code == agent_client_protocol::ErrorCode::InternalError
                                         && e.data
@@ -516,4 +561,10 @@ impl AcpAgentHarness {
 
         Ok(())
     }
+}
+
+fn is_exit_plan_approval_response(resp: &crate::executors::acp::ApprovalResponse) -> bool {
+    resp.tool_name.as_deref() == Some("ExitPlanMode")
+        || resp.tool_call_id.starts_with("exit_plan_mode-")
+        || resp.tool_call_id.starts_with("plan_exit-")
 }

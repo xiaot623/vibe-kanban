@@ -50,7 +50,10 @@ pub(super) async fn handle_command(
         Command::Start => {
             let pin = service.resolve_pin().await;
             let text = if let Some(ref pin) = pin {
-                format!("Welcome to Vibe Kanban! 📍 Pinned: {}\nChoose an action:", pin.project_name)
+                format!(
+                    "Welcome to Vibe Kanban! 📍 Pinned: {}\nChoose an action:",
+                    pin.project_name
+                )
             } else {
                 "Welcome to Vibe Kanban! Choose an action:".to_string()
             };
@@ -191,8 +194,14 @@ pub(super) async fn handle_callback(
                 .await?;
         }
         CallbackAction::NewTask => {
-            super::screens::show_new_task_or_pinned(&bot, chat_id, &service, &dialogue, card_context)
-                .await?;
+            super::screens::show_new_task_or_pinned(
+                &bot,
+                chat_id,
+                &service,
+                &dialogue,
+                card_context,
+            )
+            .await?;
         }
         CallbackAction::Pending => {
             super::screens::show_pending_approvals(&bot, chat_id, &service, card_context).await?;
@@ -636,14 +645,7 @@ mod tests {
         assert_eq!(
             names,
             vec![
-                "/start",
-                "/help",
-                "/tasks",
-                "/new",
-                "/pending",
-                "/cancel",
-                "/pin",
-                "/unpin"
+                "/start", "/help", "/tasks", "/new", "/pending", "/cancel", "/pin", "/unpin"
             ]
         );
     }

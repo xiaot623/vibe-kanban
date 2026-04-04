@@ -17,6 +17,7 @@ use workspace_utils::approvals::ApprovalStatus;
 pub enum AcpEvent {
     User(String),
     SessionStart(String),
+    ModelInfo(String),
     Message(agent_client_protocol::ContentBlock),
     Thought(agent_client_protocol::ContentBlock),
     ToolCall(agent_client_protocol::ToolCall),
@@ -49,5 +50,7 @@ impl FromStr for AcpEvent {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ApprovalResponse {
     pub tool_call_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_name: Option<String>,
     pub status: ApprovalStatus,
 }

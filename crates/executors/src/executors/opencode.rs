@@ -1,52 +1,45 @@
 use std::{
     path::Path,
     sync::{Arc, LazyLock},
-    time::Duration,
 };
 
 use async_trait::async_trait;
-use command_group::AsyncCommandGroup;
 use derivative::Derivative;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use tokio::{io::AsyncBufReadExt, process::Command};
 use ts_rs::TS;
 use workspace_utils::msg_store::MsgStore;
 
 use crate::{
     approvals::ExecutorApprovalService,
     command::{
-        CmdOverrides, CommandBuildError, CommandBuilder, CommandParts, apply_overrides,
-        env_command_or_default, format_command_for_log,
+        CmdOverrides, CommandBuildError, CommandBuilder, apply_overrides, env_command_or_default,
     },
     env::ExecutionEnv,
     executors::{
-        AppendPrompt, AvailabilityInfo, ExecutorError, ExecutorExitResult, SpawnedChild,
-        StandardCodingAgentExecutor, command_available,
+        AppendPrompt, AvailabilityInfo, ExecutorError, SpawnedChild, StandardCodingAgentExecutor,
+        acp::AcpAgentHarness, command_available,
     },
-    stdout_dup::create_stdout_pipe_writer,
 };
 
 mod normalize_logs;
 mod plan_mode;
 mod sdk;
-mod types;
 
 pub use plan_mode::EXIT_PLAN_MODE_NAME;
 use plan_mode::append_plan_mode_prompt_guidance;
-use sdk::{LogWriter, RunConfig, run_session};
 
-static CODEX_COMMAND: LazyLock<String> =
+static OPENCODE_COMMAND: LazyLock<String> =
     LazyLock::new(|| env_command_or_default("VK_OPENCODE", "opencode"));
 
-const FALLBACK_CODEX_COMMAND: &str = "npx -y opencode-ai@1.3.13";
+const FALLBACK_OPENCODE_COMMAND: &str = "npx -y opencode-ai@1.3.13";
 
 pub fn base_command() -> &'static str {
-    CODEX_COMMAND.as_str()
+    OPENCODE_COMMAND.as_str()
 }
 
 pub fn fallback_command() -> &'static str {
-    FALLBACK_CODEX_COMMAND
+    FALLBACK_OPENCODE_COMMAND
 }
 
 #[derive(Derivative, Clone, Serialize, Deserialize, TS, JsonSchema)]
@@ -56,9 +49,15 @@ pub struct Opencode {
     pub append_prompt: AppendPrompt,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
+    /// Whether to run in plan mode. When `true`, overrides any legacy `mode`
+    /// field and sends `"plan"` as the ACP session mode.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plan: Option<bool>,
+    /// Legacy mode string (alias "agent"). Forwarded as ACP session mode when
+    /// `plan` is not set. Canonical `plan: true` always wins.
     #[serde(default, skip_serializing_if = "Option::is_none", alias = "agent")]
     pub mode: Option<String>,
-    /// Auto-approve agent actions
+    /// Auto-approve agent actions.
     #[serde(default = "default_to_true")]
     pub auto_approve: bool,
     #[serde(flatten)]
@@ -70,14 +69,27 @@ pub struct Opencode {
 }
 
 impl Opencode {
+    /// Returns the resolved ACP session mode string, if any.
+    ///
+    /// `plan: true` wins over the legacy `mode` string.
+    fn resolved_mode(&self) -> Option<String> {
+        if self.plan.unwrap_or(false) {
+            Some("plan".to_string())
+        } else {
+            self.mode.clone()
+        }
+    }
+
+    /// Returns true when permission approvals should be skipped entirely.
+    fn skip_permissions(&self) -> bool {
+        self.auto_approve
+    }
+
     fn build_command_builder_with_base(
         &self,
         base: &str,
     ) -> Result<CommandBuilder, CommandBuildError> {
-        let builder = CommandBuilder::new(base)
-            // Pass hostname/port as separate args so OpenCode treats them as explicitly set
-            // (it checks `process.argv.includes(\"--port\")` / `\"--hostname\"`).
-            .extend_params(["serve", "--hostname", "127.0.0.1", "--port", "0"]);
+        let builder = CommandBuilder::new(base).extend_params(["acp"]);
         apply_overrides(builder, &self.cmd)
     }
 
@@ -104,142 +116,22 @@ impl Opencode {
         matches!(err, ExecutorError::ExecutableNotFound { .. })
     }
 
-    async fn spawn_inner(
-        &self,
-        current_dir: &Path,
-        prompt: &str,
-        resume_session: Option<&str>,
-        command_parts: CommandParts,
-        env: &ExecutionEnv,
-    ) -> Result<SpawnedChild, ExecutorError> {
-        let combined_prompt = append_plan_mode_prompt_guidance(
-            self.mode.as_deref(),
-            self.append_prompt.combine_prompt(prompt),
-        );
-        let (program_path, args) = command_parts.into_resolved().await?;
-        tracing::debug!(
-            command = %format_command_for_log(&program_path, &args),
-            "Spawning OpenCode command"
-        );
+    fn make_harness(&self) -> AcpAgentHarness {
+        let mut harness = AcpAgentHarness::with_session_namespace("opencode_sessions");
+        if let Some(model) = &self.model {
+            harness = harness.with_model(model.clone());
+        }
+        if let Some(mode) = self.resolved_mode() {
+            harness = harness.with_mode(mode);
+        }
+        harness
+    }
 
-        let mut command = Command::new(program_path);
-        command
-            .kill_on_drop(true)
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .current_dir(current_dir)
-            .args(&args)
-            .env("NODE_NO_WARNINGS", "1")
-            .env("NO_COLOR", "1");
-
-        env.clone()
-            .with_profile(&self.cmd)
-            .apply_to_command(&mut command);
-
-        let mut child = command.group_spawn()?;
-        let server_stdout = child.inner().stdout.take().ok_or_else(|| {
-            ExecutorError::Io(std::io::Error::other(
-                "OpenCode server missing stdout (needed to parse listening URL)",
-            ))
-        })?;
-
-        let stdout = create_stdout_pipe_writer(&mut child)?;
-        let log_writer = LogWriter::new(stdout);
-
-        let (exit_signal_tx, exit_signal_rx) = tokio::sync::oneshot::channel();
-        let (interrupt_tx, interrupt_rx) = tokio::sync::oneshot::channel();
-
-        let directory = current_dir.to_string_lossy().to_string();
-        let base_url = wait_for_server_url(server_stdout).await?;
-        let permission_approvals = if self.auto_approve {
+    fn approvals_for_spawn(&self) -> Option<Arc<dyn ExecutorApprovalService>> {
+        if self.skip_permissions() {
             None
         } else {
             self.approvals.clone()
-        };
-
-        let config = RunConfig {
-            base_url,
-            directory,
-            prompt: combined_prompt,
-            resume_session_id: resume_session.map(|s| s.to_string()),
-            model: self.model.clone(),
-            agent: self.mode.clone(),
-            permission_approvals,
-            // Plan approvals always require review when an approval service is available.
-            plan_approvals: self.approvals.clone(),
-        };
-
-        tokio::spawn(async move {
-            let result = run_session(config, log_writer.clone(), interrupt_rx).await;
-            let exit_result = match result {
-                Ok(()) => ExecutorExitResult::Success,
-                Err(err) => {
-                    let _ = log_writer
-                        .log_error(format!("OpenCode executor error: {err}"))
-                        .await;
-                    ExecutorExitResult::Failure
-                }
-            };
-            let _ = exit_signal_tx.send(exit_result);
-        });
-
-        Ok(SpawnedChild {
-            child,
-            exit_signal: Some(exit_signal_rx),
-            interrupt_sender: Some(interrupt_tx),
-        })
-    }
-}
-
-fn format_tail(captured: Vec<String>) -> String {
-    captured
-        .into_iter()
-        .rev()
-        .take(12)
-        .collect::<Vec<_>>()
-        .into_iter()
-        .rev()
-        .collect::<Vec<_>>()
-        .join("\n")
-}
-
-async fn wait_for_server_url(stdout: tokio::process::ChildStdout) -> Result<String, ExecutorError> {
-    let mut lines = tokio::io::BufReader::new(stdout).lines();
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(180);
-    let mut captured: Vec<String> = Vec::new();
-
-    loop {
-        if tokio::time::Instant::now() > deadline {
-            return Err(ExecutorError::Io(std::io::Error::other(format!(
-                "Timed out waiting for OpenCode server to print listening URL.\nServer output tail:\n{}",
-                format_tail(captured)
-            ))));
-        }
-
-        let line = match tokio::time::timeout_at(deadline, lines.next_line()).await {
-            Ok(Ok(Some(line))) => line,
-            Ok(Ok(None)) => {
-                return Err(ExecutorError::Io(std::io::Error::other(format!(
-                    "OpenCode server exited before printing listening URL.\nServer output tail:\n{}",
-                    format_tail(captured)
-                ))));
-            }
-            Ok(Err(err)) => return Err(ExecutorError::Io(err)),
-            Err(_) => continue,
-        };
-
-        if captured.len() < 64 {
-            captured.push(line.clone());
-        }
-
-        if let Some(url) = line.trim().strip_prefix("opencode server listening on ") {
-            // Keep draining stdout to avoid backpressure on the server, but don't block startup.
-            tokio::spawn(async move {
-                let mut lines = tokio::io::BufReader::new(lines.into_inner()).lines();
-                while let Ok(Some(_)) = lines.next_line().await {}
-            });
-            return Ok(url.trim().to_string());
         }
     }
 }
@@ -256,18 +148,38 @@ impl StandardCodingAgentExecutor for Opencode {
         prompt: &str,
         env: &ExecutionEnv,
     ) -> Result<SpawnedChild, ExecutorError> {
-        let env = setup_approvals_env(self.auto_approve, env);
+        let env = setup_approvals_env(self.skip_permissions(), env);
+        let combined_prompt = append_plan_mode_prompt_guidance(
+            self.resolved_mode().as_deref(),
+            self.append_prompt.combine_prompt(prompt),
+        );
+        let harness = self.make_harness();
+        let approvals = self.approvals_for_spawn();
         let command_parts = self.build_command_builder()?.build_initial()?;
-        match self
-            .spawn_inner(current_dir, prompt, None, command_parts, &env)
+        match harness
+            .spawn_with_command(
+                current_dir,
+                combined_prompt.clone(),
+                command_parts,
+                &env,
+                &self.cmd,
+                approvals.clone(),
+            )
             .await
         {
             Ok(child) => Ok(child),
             Err(err) => {
                 if self.should_fallback_to_npx(&err) {
                     let fallback_parts = self.build_fallback_command_builder()?.build_initial()?;
-                    return self
-                        .spawn_inner(current_dir, prompt, None, fallback_parts, &env)
+                    return harness
+                        .spawn_with_command(
+                            current_dir,
+                            combined_prompt,
+                            fallback_parts,
+                            &env,
+                            &self.cmd,
+                            approvals,
+                        )
                         .await;
                 }
                 Err(err)
@@ -282,18 +194,42 @@ impl StandardCodingAgentExecutor for Opencode {
         session_id: &str,
         env: &ExecutionEnv,
     ) -> Result<SpawnedChild, ExecutorError> {
-        let env = setup_approvals_env(self.auto_approve, env);
-        let command_parts = self.build_command_builder()?.build_initial()?;
-        match self
-            .spawn_inner(current_dir, prompt, Some(session_id), command_parts, &env)
+        let env = setup_approvals_env(self.skip_permissions(), env);
+        let combined_prompt = append_plan_mode_prompt_guidance(
+            self.resolved_mode().as_deref(),
+            self.append_prompt.combine_prompt(prompt),
+        );
+        let harness = self.make_harness();
+        let approvals = self.approvals_for_spawn();
+        let command_parts = self.build_command_builder()?.build_follow_up(&[])?;
+        match harness
+            .spawn_follow_up_with_command(
+                current_dir,
+                combined_prompt.clone(),
+                session_id,
+                command_parts,
+                &env,
+                &self.cmd,
+                approvals.clone(),
+            )
             .await
         {
             Ok(child) => Ok(child),
             Err(err) => {
                 if self.should_fallback_to_npx(&err) {
-                    let fallback_parts = self.build_fallback_command_builder()?.build_initial()?;
-                    return self
-                        .spawn_inner(current_dir, prompt, Some(session_id), fallback_parts, &env)
+                    let fallback_parts = self
+                        .build_fallback_command_builder()?
+                        .build_follow_up(&[])?;
+                    return harness
+                        .spawn_follow_up_with_command(
+                            current_dir,
+                            combined_prompt,
+                            session_id,
+                            fallback_parts,
+                            &env,
+                            &self.cmd,
+                            approvals,
+                        )
                         .await;
                 }
                 Err(err)
@@ -302,7 +238,7 @@ impl StandardCodingAgentExecutor for Opencode {
     }
 
     fn normalize_logs(&self, msg_store: Arc<MsgStore>, worktree_path: &Path) {
-        normalize_logs::normalize_logs(msg_store, worktree_path);
+        super::acp::normalize_logs(msg_store, worktree_path);
     }
 
     fn default_mcp_config_path(&self) -> Option<std::path::PathBuf> {
@@ -357,10 +293,15 @@ fn default_to_true() -> bool {
     true
 }
 
-fn setup_approvals_env(auto_approve: bool, env: &ExecutionEnv) -> ExecutionEnv {
+/// Inject `OPENCODE_PERMISSION` env var when permission approvals are active
+/// (i.e. `skip_permissions` is false).
+fn setup_approvals_env(skip_permissions: bool, env: &ExecutionEnv) -> ExecutionEnv {
     let mut env = env.clone();
-    if !auto_approve && !env.contains_key("OPENCODE_PERMISSION") {
-        env.insert("OPENCODE_PERMISSION", r#"{"edit": "ask", "bash": "ask", "webfetch": "ask", "doom_loop": "ask", "external_directory": "ask"}"#);
+    if !skip_permissions && !env.contains_key("OPENCODE_PERMISSION") {
+        env.insert(
+            "OPENCODE_PERMISSION",
+            r#"{"edit": "ask", "bash": "ask", "webfetch": "ask", "doom_loop": "ask", "external_directory": "ask"}"#,
+        );
     }
     env
 }
@@ -374,6 +315,7 @@ mod tests {
         Opencode {
             append_prompt: AppendPrompt::default(),
             model: None,
+            plan: None,
             mode: None,
             auto_approve: true,
             cmd: CmdOverrides {
@@ -385,11 +327,12 @@ mod tests {
         }
     }
 
+    // ── availability tests ────────────────────────────────────────────────────
+
     /// When `base_command_override` is set to an existing binary the primary
     /// command check should succeed and the fallback path must not be consulted.
     #[test]
     fn get_availability_info_uses_override_command() {
-        // Use the current test binary itself as a guaranteed-existing executable.
         let exe = std::env::current_exe()
             .expect("current_exe should resolve")
             .to_string_lossy()
@@ -409,11 +352,7 @@ mod tests {
         let opencode = make_opencode(Some(
             "vibe-kanban-nonexistent-opencode-override".to_string(),
         ));
-        // Only valid if neither config dir nor command resolves; on a CI box
-        // without opencode installed this should return NotFound.
         let info = opencode.get_availability_info();
-        // We can't guarantee config dirs don't exist on all machines, so we
-        // only assert that if both config checks fail, the result is NotFound.
         if !dirs::config_dir()
             .map(|d| d.join("opencode").exists())
             .unwrap_or(false)
@@ -429,11 +368,104 @@ mod tests {
     /// the primary `opencode` binary is absent and no config directory exists.
     #[test]
     fn get_availability_info_fallback_requires_config_or_primary() {
-        // Only meaningful on machines without `opencode` installed.
         let opencode = make_opencode(None);
-        // We're testing the logic path: if neither primary command nor config
-        // dir exists, the fallback should NOT make it available.
-        // This is a logic test; we check the function doesn't panic.
         let _info = opencode.get_availability_info();
+    }
+
+    // ── profile deserialization tests ─────────────────────────────────────────
+
+    /// Canonical `auto_approve: true` skips permission approvals.
+    #[test]
+    fn auto_approve_true_deserializes() {
+        let json = r#"{"auto_approve": true, "model": "opencode/big-pickle"}"#;
+        let oc: Opencode = serde_json::from_str(json).expect("should deserialize");
+        assert!(oc.auto_approve);
+        assert!(oc.skip_permissions());
+    }
+
+    /// Canonical `auto_approve: false` enables approvals.
+    #[test]
+    fn auto_approve_false_deserializes() {
+        let json = r#"{"auto_approve": false}"#;
+        let oc: Opencode = serde_json::from_str(json).expect("should deserialize");
+        assert!(!oc.auto_approve);
+        assert!(!oc.skip_permissions());
+    }
+
+    /// `auto_approve` remains the serialized field name.
+    #[test]
+    fn serializes_auto_approve_field_name() {
+        let oc = make_opencode(None);
+        let value = serde_json::to_value(&oc).expect("should serialize");
+        assert_eq!(
+            value.get("auto_approve"),
+            Some(&serde_json::Value::Bool(true))
+        );
+        assert!(value.get("dangerously_skip_permissions").is_none());
+    }
+
+    /// Legacy `mode: "plan"` round-trips through resolved_mode.
+    #[test]
+    fn legacy_mode_plan_resolves() {
+        let json = r#"{"mode": "plan", "auto_approve": true}"#;
+        let oc: Opencode = serde_json::from_str(json).expect("should deserialize");
+        assert_eq!(oc.resolved_mode(), Some("plan".to_string()));
+    }
+
+    /// Canonical `plan: true` wins over legacy `mode`.
+    #[test]
+    fn canonical_plan_wins_over_legacy_mode() {
+        let json = r#"{"plan": true, "mode": "other", "auto_approve": true}"#;
+        let oc: Opencode = serde_json::from_str(json).expect("should deserialize");
+        assert_eq!(oc.resolved_mode(), Some("plan".to_string()));
+    }
+
+    /// Non-plan legacy mode is forwarded as-is.
+    #[test]
+    fn non_plan_legacy_mode_forwarded() {
+        let json = r#"{"mode": "auto"}"#;
+        let oc: Opencode = serde_json::from_str(json).expect("should deserialize");
+        assert_eq!(oc.resolved_mode(), Some("auto".to_string()));
+    }
+
+    /// When neither plan nor mode is set, resolved_mode returns None.
+    #[test]
+    fn no_mode_returns_none() {
+        let oc = make_opencode(None);
+        assert_eq!(oc.resolved_mode(), None);
+    }
+
+    /// Default (no fields set) skips permissions.
+    #[test]
+    fn default_skips_permissions() {
+        let oc = make_opencode(None);
+        assert!(oc.skip_permissions());
+    }
+
+    // ── command building tests ────────────────────────────────────────────────
+
+    fn command_args(oc: &Opencode) -> Vec<String> {
+        oc.build_command_builder_with_base("opencode")
+            .expect("builder should succeed")
+            .params
+            .unwrap_or_default()
+    }
+
+    #[test]
+    fn command_builder_uses_acp_subcommand() {
+        let oc = make_opencode(None);
+        let args = command_args(&oc);
+        assert_eq!(args, vec!["acp".to_string()]);
+    }
+
+    #[test]
+    fn fallback_command_builder_uses_acp_subcommand() {
+        let oc = make_opencode(None);
+        let parts = oc
+            .build_fallback_command_builder()
+            .expect("fallback builder should succeed")
+            .params
+            .unwrap_or_default();
+        assert_eq!(parts, vec!["acp".to_string()]);
     }
 }

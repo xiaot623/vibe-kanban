@@ -22,9 +22,7 @@ use super::{
 };
 use crate::services::{
     approvals::{ApprovalError, PendingApprovalInfo},
-    telegram::{
-        bot::PinnedProjectState, flow, format, keyboard, notifier, state::DialogueState,
-    },
+    telegram::{bot::PinnedProjectState, flow, format, keyboard, notifier, state::DialogueState},
 };
 
 pub(super) async fn handle_tool_approval_callback(
@@ -1145,20 +1143,21 @@ pub(super) async fn handle_pin_project_select(
     project_id: Uuid,
     card_context: Option<CardRenderContext>,
 ) -> ResponseResult<()> {
-    let project_name = match db::models::project::Project::find_by_id(&service.db.pool, project_id).await {
-        Ok(Some(p)) => p.name,
-        _ => {
-            super::ui::render_or_send_card(
-                bot,
-                chat_id,
-                card_context,
-                "Project not found.",
-                Some(super::ui::empty_inline_keyboard()),
-            )
-            .await?;
-            return Ok(());
-        }
-    };
+    let project_name =
+        match db::models::project::Project::find_by_id(&service.db.pool, project_id).await {
+            Ok(Some(p)) => p.name,
+            _ => {
+                super::ui::render_or_send_card(
+                    bot,
+                    chat_id,
+                    card_context,
+                    "Project not found.",
+                    Some(super::ui::empty_inline_keyboard()),
+                )
+                .await?;
+                return Ok(());
+            }
+        };
 
     super::ui::render_or_send_card(
         bot,
@@ -1180,20 +1179,21 @@ pub(super) async fn handle_pin_duration_select(
     minutes: u32,
     card_context: Option<CardRenderContext>,
 ) -> ResponseResult<()> {
-    let project_name = match db::models::project::Project::find_by_id(&service.db.pool, project_id).await {
-        Ok(Some(p)) => p.name,
-        _ => {
-            super::ui::render_or_send_card(
-                bot,
-                chat_id,
-                card_context,
-                "Project not found. Pin not set.",
-                Some(super::ui::empty_inline_keyboard()),
-            )
-            .await?;
-            return Ok(());
-        }
-    };
+    let project_name =
+        match db::models::project::Project::find_by_id(&service.db.pool, project_id).await {
+            Ok(Some(p)) => p.name,
+            _ => {
+                super::ui::render_or_send_card(
+                    bot,
+                    chat_id,
+                    card_context,
+                    "Project not found. Pin not set.",
+                    Some(super::ui::empty_inline_keyboard()),
+                )
+                .await?;
+                return Ok(());
+            }
+        };
 
     let expires_at = Utc::now() + chrono::Duration::minutes(i64::from(minutes));
     let duration_label = format_duration_label(minutes);

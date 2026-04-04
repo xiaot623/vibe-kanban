@@ -148,7 +148,9 @@ mod tests {
         Arc::new(RwLock::new(initial))
     }
 
-    async fn resolve(state: &Arc<RwLock<Option<PinnedProjectState>>>) -> Option<PinnedProjectState> {
+    async fn resolve(
+        state: &Arc<RwLock<Option<PinnedProjectState>>>,
+    ) -> Option<PinnedProjectState> {
         let mut guard = state.write().await;
         if let Some(ref pin) = *guard {
             if Utc::now() >= pin.expires_at {

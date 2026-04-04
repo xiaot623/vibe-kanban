@@ -422,7 +422,10 @@ impl CallbackAction {
             "pd" => {
                 let project_id = parse_short_uuid(parts.get(2)?)?;
                 let minutes: u32 = parts.get(3)?.parse().ok()?;
-                Some(Self::PinDuration { project_id, minutes })
+                Some(Self::PinDuration {
+                    project_id,
+                    minutes,
+                })
             }
             _ => None,
         }
@@ -751,7 +754,10 @@ mod tests {
                 minutes,
             };
             let encoded = action.encode();
-            assert!(encoded.len() <= 64, "encoded too long for {minutes}m: {encoded}");
+            assert!(
+                encoded.len() <= 64,
+                "encoded too long for {minutes}m: {encoded}"
+            );
             assert_eq!(CallbackAction::decode(&encoded).unwrap(), action);
         }
     }
