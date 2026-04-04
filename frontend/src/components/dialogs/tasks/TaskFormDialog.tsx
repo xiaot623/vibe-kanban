@@ -24,8 +24,8 @@ import {
   SelectTrigger,
   SelectValue,
 } from '@/components/ui/select';
-import TaskDescriptionEditor from '@/components/ui/task-description-editor';
-import type { LocalImageMetadata } from '@/components/ui/wysiwyg/context/task-attempt-context';
+import MarkdownEditor from '@/components/ui/markdown-editor';
+import type { LocalImageMetadata } from '@/components/ui/markdown-editor';
 import BranchSelector from '@/components/tasks/BranchSelector';
 import RepoBranchSelector from '@/components/tasks/RepoBranchSelector';
 import { ExecutorProfileSelector } from '@/components/settings';
@@ -455,8 +455,8 @@ const TaskFormDialogImpl = NiceModal.create<TaskFormDialogProps>((props) => {
         <div
           {...getRootProps()}
           className={cn(
-            'h-full flex flex-col gap-4 p-4 relative min-h-0',
-            isFullscreen && 'overflow-y-auto'
+            'flex flex-col gap-4 p-4 relative',
+            isFullscreen ? 'h-full min-h-0 overflow-hidden' : ''
           )}
         >
           <input {...getInputProps()} />
@@ -491,12 +491,20 @@ const TaskFormDialogImpl = NiceModal.create<TaskFormDialogProps>((props) => {
           {/* Description */}
           <form.Field name="description">
             {(field) => (
-              <div className={cn('min-h-0', isFullscreen && 'flex-1')}>
-                <TaskDescriptionEditor
+              <div
+                className={cn(
+                  'rounded-none border border-input bg-transparent',
+                  'focus-within:ring-1 focus-within:ring-ring',
+                  isFullscreen
+                    ? 'flex-1 min-h-0 flex flex-col overflow-hidden'
+                    : 'min-h-0'
+                )}
+              >
+                <MarkdownEditor
                   placeholder={t('taskFormDialog.descriptionPlaceholder')}
                   className={cn(
                     'w-full',
-                    isFullscreen ? 'h-[calc(100dvh-26rem)] min-h-[18rem]' : ''
+                    isFullscreen ? 'flex-1 min-h-0 overflow-y-auto' : ''
                   )}
                   isFullscreen={isFullscreen}
                   value={field.state.value}

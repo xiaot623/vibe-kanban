@@ -43,7 +43,7 @@ import { VariantSelector } from '@/components/tasks/VariantSelector';
 import { useAttemptBranch } from '@/hooks/useAttemptBranch';
 import { FollowUpConflictSection } from '@/components/tasks/follow-up/FollowUpConflictSection';
 import { ClickedElementsBanner } from '@/components/tasks/ClickedElementsBanner';
-import WYSIWYGEditor from '@/components/ui/wysiwyg';
+import MarkdownEditor from '@/components/ui/markdown-editor';
 import { useRetryUi } from '@/contexts/RetryUiContext';
 import { useFollowUpSend } from '@/hooks/useFollowUpSend';
 import { AgentSelector } from '@/components/tasks/AgentSelector';
@@ -62,7 +62,7 @@ import { queueApi } from '@/lib/api';
 import type { QueueStatus } from 'shared/types';
 import { imagesApi, attemptsApi } from '@/lib/api';
 import { PrCommentsDialog } from '@/components/dialogs/tasks/PrCommentsDialog';
-import type { NormalizedComment } from '@/components/ui/wysiwyg/nodes/pr-comment-node';
+import type { NormalizedComment } from '@/components/ui/markdown-editor';
 import type { Session } from 'shared/types';
 
 interface TaskFollowUpSectionProps {
@@ -1008,7 +1008,7 @@ export function TaskFollowUpSection({
                 }
               }}
             >
-              <WYSIWYGEditor
+              <MarkdownEditor
                 placeholder={editorPlaceholder}
                 value={displayMessage}
                 onChange={handleEditorChange}

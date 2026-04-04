@@ -1,6 +1,6 @@
 import { useCallback, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import WYSIWYGEditor from '@/components/ui/wysiwyg';
+import MarkdownEditor from '@/components/ui/markdown-editor';
 import { useProject } from '@/contexts/ProjectContext';
 import { cn } from '@/lib/utils';
 import { VariantSelector } from '@/components/tasks/VariantSelector';
@@ -132,7 +132,7 @@ export function RetryEditorInline({
   return (
     <div className="space-y-2">
       <div className="relative">
-        <WYSIWYGEditor
+        <MarkdownEditor
           placeholder="Edit and resend your message..."
           value={message}
           onChange={setMessage}

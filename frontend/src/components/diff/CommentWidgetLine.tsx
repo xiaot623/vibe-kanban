@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback, useMemo } from 'react';
 import { Button } from '@/components/ui/button';
-import WYSIWYGEditor from '@/components/ui/wysiwyg';
+import MarkdownEditor from '@/components/ui/markdown-editor';
 import { useReview, type ReviewDraft } from '@/contexts/ReviewProvider';
 import { Scope, useKeyExit, useKeySubmitComment } from '@/keyboard';
 import { useHotkeysContext } from 'react-hotkeys-hook';
@@ -76,7 +76,7 @@ export function CommentWidgetLine({
 
   return (
     <div className="p-4 border-y bg-primary">
-      <WYSIWYGEditor
+      <MarkdownEditor
         value={value}
         onChange={setValue}
         placeholder="Add a comment... (type @ to search files)"

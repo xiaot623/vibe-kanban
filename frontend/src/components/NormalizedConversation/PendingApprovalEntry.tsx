@@ -22,7 +22,7 @@ import {
 } from '@/components/ui/tooltip';
 import { approvalsApi } from '@/lib/api';
 import { Check, X } from 'lucide-react';
-import WYSIWYGEditor from '@/components/ui/wysiwyg';
+import MarkdownEditor from '@/components/ui/markdown-editor';
 
 import { useHotkeysContext } from 'react-hotkeys-hook';
 import { TabNavContext } from '@/contexts/TabNavigationContext';
@@ -294,7 +294,7 @@ function DenyReasonForm({
 }) {
   return (
     <div className="flex flex-col gap-2 p-4">
-      <WYSIWYGEditor
+      <MarkdownEditor
         value={value}
         onChange={onChange}
         placeholder="Let the agent know why this request was denied... Type @ to insert tags or search files."

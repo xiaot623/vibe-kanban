@@ -10,7 +10,7 @@ import { Button } from '../ui/button';
 import { PlusIcon } from 'lucide-react';
 import { CreateAttemptDialog } from '@/components/dialogs/tasks/CreateAttemptDialog';
 import { DataTable, type ColumnDef } from '@/components/ui/table';
-import WYSIWYGEditor from '@/components/ui/wysiwyg';
+import MarkdownEditor from '@/components/ui/markdown-editor';
 
 interface TaskPanelProps {
   task: TaskWithAttemptStatus | null;
@@ -107,9 +107,9 @@ const TaskPanel = ({ task }: TaskPanelProps) => {
       <div className="h-full max-h-[calc(100vh-8rem)] overflow-y-auto p-6">
         <div className="mx-auto w-full max-w-[50rem] space-y-10">
           <div className="space-y-3">
-            <WYSIWYGEditor value={titleContent} disabled taskId={task.id} />
+            <MarkdownEditor value={titleContent} disabled taskId={task.id} />
             {descriptionContent && (
-              <WYSIWYGEditor
+              <MarkdownEditor
                 value={descriptionContent}
                 disabled
                 taskId={task.id}

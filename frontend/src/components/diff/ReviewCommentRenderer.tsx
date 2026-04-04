@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { Button } from '@/components/ui/button';
-import WYSIWYGEditor from '@/components/ui/wysiwyg';
+import MarkdownEditor from '@/components/ui/markdown-editor';
 import { useReview, type ReviewComment } from '@/contexts/ReviewProvider';
 import { cn } from '@/lib/utils';
 
@@ -41,7 +41,7 @@ export function ReviewCommentRenderer({
   if (isEditing) {
     return (
       <div className="border-y bg-background p-3">
-        <WYSIWYGEditor
+        <MarkdownEditor
           value={editText}
           onChange={setEditText}
           placeholder="Edit comment... (type @ to search files)"
@@ -108,7 +108,7 @@ export function ReviewCommentRenderer({
       </div>
 
       <div className={cn('mt-2', comment.solved && 'opacity-70')}>
-        <WYSIWYGEditor
+        <MarkdownEditor
           value={comment.text}
           disabled={true}
           className="text-sm"

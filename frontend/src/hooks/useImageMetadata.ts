@@ -1,7 +1,7 @@
 import { useMemo } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import type { ImageMetadata } from 'shared/types';
-import type { LocalImageMetadata } from '@/components/ui/wysiwyg/context/task-attempt-context';
+import type { LocalImageMetadata } from '@/components/ui/markdown-editor';
 
 export function useImageMetadata(
   taskAttemptId: string | undefined,
