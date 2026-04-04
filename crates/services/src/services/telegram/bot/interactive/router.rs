@@ -401,33 +401,6 @@ async fn handle_immediate_callback_action(
             };
 
             match state {
-                DialogueState::CreatingTaskDescription {
-                    project_id,
-                    project_name: _,
-                    title,
-                    prompt_message_id,
-                } => {
-                    let success = super::actions::handle_create_task_finish(
-                        bot,
-                        chat_id,
-                        service,
-                        project_id,
-                        &title,
-                        None,
-                        card_context,
-                    )
-                    .await?;
-                    super::ui::complete_dialogue_step(
-                        bot,
-                        chat_id,
-                        dialogue,
-                        MessageId(prompt_message_id),
-                        success,
-                        super::ui::CompletionFailurePolicy::Keep,
-                    )
-                    .await;
-                    // On failure leave dialogue state intact so the user can retry or /cancel.
-                }
                 DialogueState::EditingTaskDescription {
                     task_id,
                     title,

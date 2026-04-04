@@ -600,7 +600,7 @@ pub(super) async fn api_base_url() -> Result<String, std::io::Error> {
     Ok(format!("http://127.0.0.1:{port}/api"))
 }
 
-fn parse_message_as_task(message: &str) -> Option<(String, Option<String>)> {
+pub(super) fn parse_message_as_task(message: &str) -> Option<(String, Option<String>)> {
     let trimmed = message.trim();
     if trimmed.is_empty() {
         return None;

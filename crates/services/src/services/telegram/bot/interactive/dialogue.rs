@@ -4,7 +4,22 @@ use db::models::task::Task;
 use teloxide::{prelude::*, types::MessageId};
 
 use super::{BotDialogue, CardRenderContext, TelegramBotService};
-use crate::services::telegram::{format, keyboard, state::DialogueState};
+use crate::services::telegram::{
+    bot::shared::parse_message_as_task, format, keyboard, state::DialogueState,
+};
+
+const CREATE_TASK_MESSAGE_PARSE_ERROR: &str = "Could not parse task from message.\n\nPlease send one message:\n- First line: title\n- Remaining lines: detail\n- Single line: empty detail";
+
+fn parse_interactive_new_task_message(message: &str) -> Option<(String, Option<String>)> {
+    parse_message_as_task(message)
+}
+
+fn retry_creating_task_message_state(project_id: uuid::Uuid, prompt_message_id: i32) -> DialogueState {
+    DialogueState::CreatingTaskMessage {
+        project_id,
+        prompt_message_id,
+    }
+}
 
 pub(super) async fn handle_dialogue_text(
     bot: Bot,
@@ -18,9 +33,6 @@ pub(super) async fn handle_dialogue_text(
     }
 
     let text = msg.text().unwrap_or("").trim();
-    if text.is_empty() {
-        return Ok(());
-    }
 
     // Unknown slash commands should not auto-create tasks.
     if text.starts_with('/') {
@@ -34,6 +46,9 @@ pub(super) async fn handle_dialogue_text(
 
     match state {
         DialogueState::Idle => {
+            if text.is_empty() {
+                return Ok(());
+            }
             if let Some(task_id) = super::ui::extract_stage_summary_task_id_from_reply(&msg) {
                 super::actions::handle_follow_up_reply_finish(
                     &bot,
@@ -54,66 +69,32 @@ pub(super) async fn handle_dialogue_text(
                 .await?;
             }
         }
-        DialogueState::CreatingTaskTitle {
+        DialogueState::CreatingTaskMessage {
             project_id,
-            project_name,
             prompt_message_id,
+            ..
         } => {
-            if text.is_empty() {
+            let Some((title, description)) = parse_interactive_new_task_message(text) else {
                 let updated_prompt_id = super::ui::render_or_send_card(
                     &bot,
                     msg.chat.id,
                     Some(CardRenderContext {
                         source_message_id: MessageId(prompt_message_id),
                     }),
-                    "Title cannot be empty. Please enter a title:",
+                    CREATE_TASK_MESSAGE_PARSE_ERROR,
                     Some(keyboard::cancel_keyboard()),
                 )
                 .await?;
                 dialogue
-                    .update(DialogueState::CreatingTaskTitle {
+                    .update(retry_creating_task_message_state(
                         project_id,
-                        project_name,
-                        prompt_message_id: updated_prompt_id.0,
-                    })
+                        updated_prompt_id.0,
+                    ))
                     .await
                     .ok();
                 return Ok(());
-            }
-            let updated_prompt_id = super::ui::render_or_send_card(
-                &bot,
-                msg.chat.id,
-                Some(CardRenderContext {
-                    source_message_id: MessageId(prompt_message_id),
-                }),
-                format!(
-                    "Title: {}\n\nNow enter a description (or press Skip):",
-                    text
-                ),
-                Some(keyboard::skip_cancel_keyboard()),
-            )
-            .await?;
-            dialogue
-                .update(DialogueState::CreatingTaskDescription {
-                    project_id,
-                    project_name: project_name.clone(),
-                    title: text.to_string(),
-                    prompt_message_id: updated_prompt_id.0,
-                })
-                .await
-                .ok();
-        }
-        DialogueState::CreatingTaskDescription {
-            project_id,
-            project_name: _,
-            title,
-            prompt_message_id,
-        } => {
-            let description = if text.is_empty() {
-                None
-            } else {
-                Some(text.to_string())
             };
+
             let success = super::actions::handle_create_task_finish(
                 &bot,
                 msg.chat.id,
@@ -307,4 +288,59 @@ pub(super) async fn handle_dialogue_text(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use uuid::Uuid;
+
+    use super::{
+        CREATE_TASK_MESSAGE_PARSE_ERROR, parse_interactive_new_task_message,
+        retry_creating_task_message_state,
+    };
+    use crate::services::telegram::state::DialogueState;
+
+    #[test]
+    fn interactive_create_parse_single_line_sets_empty_description() {
+        let (title, description) = parse_interactive_new_task_message("Quick follow-up").unwrap();
+
+        assert_eq!(title, "Quick follow-up");
+        assert_eq!(description, None);
+    }
+
+    #[test]
+    fn interactive_create_parse_multiline_uses_rest_as_description() {
+        let (title, description) =
+            parse_interactive_new_task_message("Finish report\nInclude metrics\nand summary")
+                .unwrap();
+
+        assert_eq!(title, "Finish report");
+        assert_eq!(description.as_deref(), Some("Include metrics\nand summary"));
+    }
+
+    #[test]
+    fn interactive_create_parse_blank_message_fails() {
+        assert!(parse_interactive_new_task_message("   \n  ").is_none());
+    }
+
+    #[test]
+    fn interactive_create_parse_failure_keeps_single_step_state() {
+        let project_id = Uuid::new_v4();
+        let state = retry_creating_task_message_state(project_id, 77);
+
+        assert!(matches!(
+            state,
+            DialogueState::CreatingTaskMessage {
+                project_id: id,
+                prompt_message_id: 77,
+            } if id == project_id
+        ));
+    }
+
+    #[test]
+    fn interactive_create_parse_failure_message_mentions_single_message_rules() {
+        assert!(CREATE_TASK_MESSAGE_PARSE_ERROR.contains("First line: title"));
+        assert!(CREATE_TASK_MESSAGE_PARSE_ERROR.contains("Remaining lines: detail"));
+        assert!(CREATE_TASK_MESSAGE_PARSE_ERROR.contains("Single line: empty detail"));
+    }
 }

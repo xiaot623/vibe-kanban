@@ -21,7 +21,7 @@ use super::{
 };
 use crate::services::{
     approvals::{ApprovalError, PendingApprovalInfo},
-    telegram::{format, keyboard, notifier},
+    telegram::{format, keyboard, notifier, state::DialogueState},
 };
 
 pub(super) async fn handle_tool_approval_callback(
@@ -901,22 +901,29 @@ pub(super) async fn handle_new_task_project(
         bot,
         chat_id,
         card_context,
-        format!("➕ New task in {}\n\nEnter the task title:", project.name),
+        format_new_task_message_prompt(&project.name),
         Some(keyboard::cancel_keyboard()),
     )
     .await?;
 
     dialogue
-        .update(
-            crate::services::telegram::state::DialogueState::CreatingTaskTitle {
-                project_id,
-                project_name: project.name.clone(),
-                prompt_message_id: prompt_message_id.0,
-            },
-        )
+        .update(build_creating_task_message_state(project_id, prompt_message_id.0))
         .await
         .ok();
     Ok(())
+}
+
+fn format_new_task_message_prompt(project_name: &str) -> String {
+    format!(
+        "➕ New task in {project_name}\n\nSend one message to create the task:\n- First line: title\n- Remaining lines: detail\n- Single line: empty detail"
+    )
+}
+
+fn build_creating_task_message_state(project_id: Uuid, prompt_message_id: i32) -> DialogueState {
+    DialogueState::CreatingTaskMessage {
+        project_id,
+        prompt_message_id,
+    }
 }
 
 pub(super) async fn handle_create_task_finish(
@@ -966,9 +973,11 @@ mod tests {
 
     use super::{
         super::CardRenderContext, approval_completion_cleanup_plan,
-        approval_requires_structured_input, format_done_task_status_message,
+        approval_requires_structured_input, build_creating_task_message_state,
+        format_done_task_status_message, format_new_task_message_prompt,
         reject_completion_cleanup_plan, review_completion_cleanup_plan,
     };
+    use crate::services::telegram::state::DialogueState;
     use crate::services::approvals::PendingApprovalInfo;
 
     #[test]
@@ -1064,5 +1073,29 @@ mod tests {
         assert!(message.contains("Details:\n- Failed to mark task Done: database unavailable"));
         assert!(!message.contains("Merged"));
         assert!(!message.contains("No mergeable commits found."));
+    }
+
+    #[test]
+    fn new_task_project_uses_single_message_prompt_copy() {
+        let prompt = format_new_task_message_prompt("Daily");
+
+        assert!(prompt.contains("First line: title"));
+        assert!(prompt.contains("Remaining lines: detail"));
+        assert!(prompt.contains("Single line: empty detail"));
+        assert!(!prompt.contains("Enter the task title"));
+    }
+
+    #[test]
+    fn new_task_project_enters_single_step_message_state() {
+        let project_id = Uuid::new_v4();
+        let state = build_creating_task_message_state(project_id, 42);
+
+        assert!(matches!(
+            state,
+            DialogueState::CreatingTaskMessage {
+                project_id: id,
+                prompt_message_id: 42,
+            } if id == project_id
+        ));
     }
 }

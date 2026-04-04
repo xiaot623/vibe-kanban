@@ -12,18 +12,12 @@ pub enum DialogueState {
     #[default]
     Idle,
 
-    /// Creating a new task — waiting for the user to type a title.
-    CreatingTaskTitle {
+    /// Creating a new task — waiting for the user to send the task message.
+    ///
+    /// Message parsing follows Daily mode behavior:
+    /// first line is title, remaining lines are description.
+    CreatingTaskMessage {
         project_id: Uuid,
-        project_name: String,
-        prompt_message_id: i32,
-    },
-
-    /// Creating a new task — waiting for the user to type a description (or skip).
-    CreatingTaskDescription {
-        project_id: Uuid,
-        project_name: String,
-        title: String,
         prompt_message_id: i32,
     },
 
@@ -58,10 +52,7 @@ pub enum DialogueState {
 impl DialogueState {
     pub fn prompt_message_id(&self) -> Option<i32> {
         match self {
-            Self::CreatingTaskTitle {
-                prompt_message_id, ..
-            }
-            | Self::CreatingTaskDescription {
+            Self::CreatingTaskMessage {
                 prompt_message_id, ..
             }
             | Self::EditingTaskTitle {
@@ -90,20 +81,11 @@ mod tests {
     #[test]
     fn prompt_message_id_lifecycle_for_create_flow() {
         let project_id = Uuid::new_v4();
-        let entering = DialogueState::CreatingTaskTitle {
+        let entering = DialogueState::CreatingTaskMessage {
             project_id,
-            project_name: "Daily".to_string(),
             prompt_message_id: 101,
         };
         assert_eq!(entering.prompt_message_id(), Some(101));
-
-        let next = DialogueState::CreatingTaskDescription {
-            project_id,
-            project_name: "Daily".to_string(),
-            title: "Ship it".to_string(),
-            prompt_message_id: entering.prompt_message_id().unwrap_or_default(),
-        };
-        assert_eq!(next.prompt_message_id(), Some(101));
         assert_eq!(DialogueState::Idle.prompt_message_id(), None);
     }
 
