@@ -20,13 +20,22 @@ pub enum CallbackAction {
         status: Option<String>,
     },
     /// Show task details
-    TaskDetail { task_id: Uuid },
+    TaskDetail {
+        task_id: Uuid,
+    },
     /// Run a task with default executor
-    RunDefault { task_id: Uuid },
+    RunDefault {
+        task_id: Uuid,
+    },
     /// Show executor selection for a task
-    RunPick { task_id: Uuid },
+    RunPick {
+        task_id: Uuid,
+    },
     /// Run a task with a specific executor
-    RunWith { task_id: Uuid, executor: String },
+    RunWith {
+        task_id: Uuid,
+        executor: String,
+    },
     /// Run a task with specific executor + mode index
     RunWithMode {
         task_id: Uuid,
@@ -34,37 +43,102 @@ pub enum CallbackAction {
         mode_index: u16,
     },
     /// Start editing a task (enters dialogue)
-    EditTask { task_id: Uuid },
-    /// Approve plan — first click (confirmation prompt)
-    ApproveConfirm { task_id: Uuid },
-    /// Approve plan — confirmed
-    ApproveYes { task_id: Uuid },
-    /// Reject plan — enter reason input (enters dialogue)
-    RejectInput { task_id: Uuid },
+    EditTask {
+        task_id: Uuid,
+    },
+    /// Approve plan — first click (confirmation prompt) from task detail
+    ApproveConfirm {
+        task_id: Uuid,
+    },
+    /// Approve plan — confirmed from task detail
+    ApproveYes {
+        task_id: Uuid,
+    },
+    /// Reject plan — enter reason input (enters dialogue) from task detail
+    RejectInput {
+        task_id: Uuid,
+    },
+    /// Approve plan — first click (confirmation prompt) for a flow-aware card
+    FlowApproveConfirm {
+        flow_token: String,
+    },
+    /// Approve plan — confirmed for a flow-aware card
+    FlowApproveYes {
+        flow_token: String,
+    },
+    /// Reject plan — enter reason input for a flow-aware card
+    FlowRejectInput {
+        flow_token: String,
+    },
     /// Dismiss a temporary interaction message
     DismissInteraction,
     /// Approve tool execution request by approval id
-    ToolApprove { approval_id: String },
+    ToolApprove {
+        approval_id: String,
+    },
     /// Reject tool execution request by approval id
-    ToolReject { approval_id: String },
+    ToolReject {
+        approval_id: String,
+    },
     /// Show pending approvals list
     Pending,
     /// Start new task creation — pick project (enters dialogue)
     NewTask,
     /// Select project for new task creation (dialogue step)
-    NewTaskProject { project_id: Uuid },
+    NewTaskProject {
+        project_id: Uuid,
+    },
     /// Refresh / reload current view
-    Refresh { task_id: Uuid },
+    Refresh {
+        task_id: Uuid,
+    },
     /// Send a follow-up reply for a task (opens text input dialogue)
-    FollowUpReply { task_id: Uuid },
+    FollowUpReply {
+        flow_token: String,
+    },
     /// Create a review subtask for this task
-    CreateReviewTask { task_id: Uuid },
+    CreateReviewTask {
+        flow_token: String,
+    },
     /// Create a review subtask after explicit confirmation
-    CreateReviewTaskConfirm { task_id: Uuid },
+    CreateReviewTaskConfirm {
+        flow_token: String,
+    },
     /// Mark a Daily task as Done (attempt merge first when needed)
-    DoneTask { task_id: Uuid },
+    DoneTask {
+        flow_token: String,
+    },
+    /// Legacy flow-unaware follow-up action encoded with task id.
+    LegacyFollowUpReplyTask {
+        task_id: Uuid,
+    },
+    /// Legacy flow-unaware review action encoded with task id.
+    LegacyCreateReviewTask {
+        task_id: Uuid,
+    },
+    /// Legacy flow-unaware review confirmation encoded with task id.
+    LegacyCreateReviewTaskConfirm {
+        task_id: Uuid,
+    },
+    /// Legacy flow-unaware done action encoded with task id.
+    LegacyDoneTask {
+        task_id: Uuid,
+    },
+    /// Legacy flow-unaware plan approval actions encoded with task id.
+    LegacyFlowApproveConfirmTask {
+        task_id: Uuid,
+    },
+    LegacyFlowApproveYesTask {
+        task_id: Uuid,
+    },
+    LegacyFlowRejectInputTask {
+        task_id: Uuid,
+    },
     /// Pagination for task lists
-    TaskPage { project_id: Uuid, page: u16 },
+    TaskPage {
+        project_id: Uuid,
+        page: u16,
+    },
     /// Cancel current dialogue and go home
     Cancel,
     /// Skip current optional dialogue input
@@ -89,6 +163,9 @@ impl CallbackAction {
             Self::ApproveConfirm { .. } => "ac",
             Self::ApproveYes { .. } => "ay",
             Self::RejectInput { .. } => "ri",
+            Self::FlowApproveConfirm { .. } => "af",
+            Self::FlowApproveYes { .. } => "ag",
+            Self::FlowRejectInput { .. } => "ah",
             Self::DismissInteraction => "di",
             Self::ToolApprove { .. } => "ta",
             Self::ToolReject { .. } => "tr",
@@ -100,6 +177,13 @@ impl CallbackAction {
             Self::CreateReviewTask { .. } => "rv",
             Self::CreateReviewTaskConfirm { .. } => "rc",
             Self::DoneTask { .. } => "fd",
+            Self::LegacyFollowUpReplyTask { .. } => "frl",
+            Self::LegacyCreateReviewTask { .. } => "rvl",
+            Self::LegacyCreateReviewTaskConfirm { .. } => "rcl",
+            Self::LegacyDoneTask { .. } => "fdl",
+            Self::LegacyFlowApproveConfirmTask { .. } => "acl",
+            Self::LegacyFlowApproveYesTask { .. } => "ayl",
+            Self::LegacyFlowRejectInputTask { .. } => "ril",
             Self::TaskPage { .. } => "tp",
             Self::Cancel => "ca",
             Self::Skip => "sk",
@@ -135,11 +219,23 @@ impl CallbackAction {
             | Self::ApproveYes { task_id }
             | Self::RejectInput { task_id }
             | Self::Refresh { task_id }
-            | Self::FollowUpReply { task_id }
-            | Self::CreateReviewTask { task_id }
-            | Self::CreateReviewTaskConfirm { task_id }
-            | Self::DoneTask { task_id } => {
+            | Self::LegacyFollowUpReplyTask { task_id }
+            | Self::LegacyCreateReviewTask { task_id }
+            | Self::LegacyCreateReviewTaskConfirm { task_id }
+            | Self::LegacyDoneTask { task_id }
+            | Self::LegacyFlowApproveConfirmTask { task_id }
+            | Self::LegacyFlowApproveYesTask { task_id }
+            | Self::LegacyFlowRejectInputTask { task_id } => {
                 format!("v1|{}|{}", self.tag(), short_uuid(task_id))
+            }
+            Self::FlowApproveConfirm { flow_token }
+            | Self::FlowApproveYes { flow_token }
+            | Self::FlowRejectInput { flow_token }
+            | Self::FollowUpReply { flow_token }
+            | Self::CreateReviewTask { flow_token }
+            | Self::CreateReviewTaskConfirm { flow_token }
+            | Self::DoneTask { flow_token } => {
+                format!("v1|{}|{}", self.tag(), flow_token)
             }
             Self::ToolApprove { approval_id } | Self::ToolReject { approval_id } => {
                 format!("v1|{}|{}", self.tag(), approval_id)
@@ -231,6 +327,15 @@ impl CallbackAction {
             "ri" => Some(Self::RejectInput {
                 task_id: parse_short_uuid(parts.get(2)?)?,
             }),
+            "af" => Some(Self::FlowApproveConfirm {
+                flow_token: parts.get(2)?.to_string(),
+            }),
+            "ag" => Some(Self::FlowApproveYes {
+                flow_token: parts.get(2)?.to_string(),
+            }),
+            "ah" => Some(Self::FlowRejectInput {
+                flow_token: parts.get(2)?.to_string(),
+            }),
             "ta" => Some(Self::ToolApprove {
                 approval_id: parts.get(2)?.to_string(),
             }),
@@ -244,15 +349,36 @@ impl CallbackAction {
                 task_id: parse_short_uuid(parts.get(2)?)?,
             }),
             "fr" => Some(Self::FollowUpReply {
-                task_id: parse_short_uuid(parts.get(2)?)?,
+                flow_token: parts.get(2)?.to_string(),
             }),
             "rv" => Some(Self::CreateReviewTask {
-                task_id: parse_short_uuid(parts.get(2)?)?,
+                flow_token: parts.get(2)?.to_string(),
             }),
             "rc" => Some(Self::CreateReviewTaskConfirm {
-                task_id: parse_short_uuid(parts.get(2)?)?,
+                flow_token: parts.get(2)?.to_string(),
             }),
             "fd" => Some(Self::DoneTask {
+                flow_token: parts.get(2)?.to_string(),
+            }),
+            "frl" => Some(Self::LegacyFollowUpReplyTask {
+                task_id: parse_short_uuid(parts.get(2)?)?,
+            }),
+            "rvl" => Some(Self::LegacyCreateReviewTask {
+                task_id: parse_short_uuid(parts.get(2)?)?,
+            }),
+            "rcl" => Some(Self::LegacyCreateReviewTaskConfirm {
+                task_id: parse_short_uuid(parts.get(2)?)?,
+            }),
+            "fdl" => Some(Self::LegacyDoneTask {
+                task_id: parse_short_uuid(parts.get(2)?)?,
+            }),
+            "acl" => Some(Self::LegacyFlowApproveConfirmTask {
+                task_id: parse_short_uuid(parts.get(2)?)?,
+            }),
+            "ayl" => Some(Self::LegacyFlowApproveYesTask {
+                task_id: parse_short_uuid(parts.get(2)?)?,
+            }),
+            "ril" => Some(Self::LegacyFlowRejectInputTask {
                 task_id: parse_short_uuid(parts.get(2)?)?,
             }),
             "tp" => {
@@ -331,6 +457,7 @@ mod tests {
     #[test]
     fn roundtrip_uuid_actions() {
         let id = Uuid::new_v4();
+        let flow_token = "f-ab12c".to_string();
         let actions = vec![
             CallbackAction::TaskDetail { task_id: id },
             CallbackAction::RunDefault { task_id: id },
@@ -339,6 +466,15 @@ mod tests {
             CallbackAction::ApproveConfirm { task_id: id },
             CallbackAction::ApproveYes { task_id: id },
             CallbackAction::RejectInput { task_id: id },
+            CallbackAction::FlowApproveConfirm {
+                flow_token: flow_token.clone(),
+            },
+            CallbackAction::FlowApproveYes {
+                flow_token: flow_token.clone(),
+            },
+            CallbackAction::FlowRejectInput {
+                flow_token: flow_token.clone(),
+            },
             CallbackAction::ToolApprove {
                 approval_id: Uuid::new_v4().to_string(),
             },
@@ -346,11 +482,26 @@ mod tests {
                 approval_id: Uuid::new_v4().to_string(),
             },
             CallbackAction::Refresh { task_id: id },
-            CallbackAction::FollowUpReply { task_id: id },
-            CallbackAction::CreateReviewTask { task_id: id },
-            CallbackAction::CreateReviewTaskConfirm { task_id: id },
-            CallbackAction::DoneTask { task_id: id },
+            CallbackAction::FollowUpReply {
+                flow_token: flow_token.clone(),
+            },
+            CallbackAction::CreateReviewTask {
+                flow_token: flow_token.clone(),
+            },
+            CallbackAction::CreateReviewTaskConfirm {
+                flow_token: flow_token.clone(),
+            },
+            CallbackAction::DoneTask {
+                flow_token: flow_token.clone(),
+            },
             CallbackAction::NewTaskProject { project_id: id },
+            CallbackAction::LegacyFollowUpReplyTask { task_id: id },
+            CallbackAction::LegacyCreateReviewTask { task_id: id },
+            CallbackAction::LegacyCreateReviewTaskConfirm { task_id: id },
+            CallbackAction::LegacyDoneTask { task_id: id },
+            CallbackAction::LegacyFlowApproveConfirmTask { task_id: id },
+            CallbackAction::LegacyFlowApproveYesTask { task_id: id },
+            CallbackAction::LegacyFlowRejectInputTask { task_id: id },
         ];
         for action in actions {
             let encoded = action.encode();
@@ -423,8 +574,9 @@ mod tests {
 
     #[test]
     fn roundtrip_create_review_task() {
-        let id = Uuid::new_v4();
-        let action = CallbackAction::CreateReviewTask { task_id: id };
+        let action = CallbackAction::CreateReviewTask {
+            flow_token: "f-ab12c".to_string(),
+        };
         let encoded = action.encode();
         assert!(encoded.len() <= 64);
         assert_eq!(CallbackAction::decode(&encoded).unwrap(), action);
@@ -432,8 +584,9 @@ mod tests {
 
     #[test]
     fn roundtrip_create_review_task_confirm() {
-        let id = Uuid::new_v4();
-        let action = CallbackAction::CreateReviewTaskConfirm { task_id: id };
+        let action = CallbackAction::CreateReviewTaskConfirm {
+            flow_token: "f-ab12c".to_string(),
+        };
         let encoded = action.encode();
         assert!(encoded.len() <= 64);
         assert_eq!(CallbackAction::decode(&encoded).unwrap(), action);
@@ -451,6 +604,7 @@ mod tests {
     #[test]
     fn all_encodings_within_64_bytes() {
         let id = Uuid::new_v4();
+        let flow_token = "f-ab12c".to_string();
         let all_actions = vec![
             CallbackAction::Home,
             CallbackAction::Projects,
@@ -480,6 +634,15 @@ mod tests {
             CallbackAction::ApproveConfirm { task_id: id },
             CallbackAction::ApproveYes { task_id: id },
             CallbackAction::RejectInput { task_id: id },
+            CallbackAction::FlowApproveConfirm {
+                flow_token: flow_token.clone(),
+            },
+            CallbackAction::FlowApproveYes {
+                flow_token: flow_token.clone(),
+            },
+            CallbackAction::FlowRejectInput {
+                flow_token: flow_token.clone(),
+            },
             CallbackAction::ToolApprove {
                 approval_id: id.to_string(),
             },
@@ -487,11 +650,26 @@ mod tests {
                 approval_id: id.to_string(),
             },
             CallbackAction::Refresh { task_id: id },
-            CallbackAction::FollowUpReply { task_id: id },
-            CallbackAction::CreateReviewTask { task_id: id },
-            CallbackAction::CreateReviewTaskConfirm { task_id: id },
-            CallbackAction::DoneTask { task_id: id },
+            CallbackAction::FollowUpReply {
+                flow_token: flow_token.clone(),
+            },
+            CallbackAction::CreateReviewTask {
+                flow_token: flow_token.clone(),
+            },
+            CallbackAction::CreateReviewTaskConfirm {
+                flow_token: flow_token.clone(),
+            },
+            CallbackAction::DoneTask {
+                flow_token: flow_token.clone(),
+            },
             CallbackAction::NewTaskProject { project_id: id },
+            CallbackAction::LegacyFollowUpReplyTask { task_id: id },
+            CallbackAction::LegacyCreateReviewTask { task_id: id },
+            CallbackAction::LegacyCreateReviewTaskConfirm { task_id: id },
+            CallbackAction::LegacyDoneTask { task_id: id },
+            CallbackAction::LegacyFlowApproveConfirmTask { task_id: id },
+            CallbackAction::LegacyFlowApproveYesTask { task_id: id },
+            CallbackAction::LegacyFlowRejectInputTask { task_id: id },
             CallbackAction::TaskPage {
                 project_id: id,
                 page: 999,

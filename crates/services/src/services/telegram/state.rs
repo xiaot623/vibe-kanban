@@ -38,13 +38,14 @@ pub enum DialogueState {
 
     /// Rejecting a plan — waiting for the user to type a reason.
     RejectingPlan {
-        task_id: Uuid,
+        flow_token: String,
         prompt_message_id: i32,
     },
 
     /// Sending a follow-up reply — waiting for the user input text.
     ReplyingFollowUp {
-        task_id: Uuid,
+        flow_token: String,
+        session_id: Uuid,
         prompt_message_id: i32,
     },
 }
@@ -93,13 +94,14 @@ mod tests {
     fn prompt_message_id_available_for_single_step_input_states() {
         let task_id = Uuid::new_v4();
         let reject = DialogueState::RejectingPlan {
-            task_id,
+            flow_token: format!("f-{}", task_id.simple()),
             prompt_message_id: 55,
         };
         assert_eq!(reject.prompt_message_id(), Some(55));
 
         let reply = DialogueState::ReplyingFollowUp {
-            task_id,
+            flow_token: "f-abc12".to_string(),
+            session_id: task_id,
             prompt_message_id: 77,
         };
         assert_eq!(reply.prompt_message_id(), Some(77));

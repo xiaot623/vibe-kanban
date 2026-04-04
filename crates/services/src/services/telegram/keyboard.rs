@@ -197,12 +197,36 @@ pub fn approve_confirm_keyboard(task_id: Uuid) -> InlineKeyboardMarkup {
     ]])
 }
 
+pub fn flow_approve_confirm_keyboard(flow_token: &str) -> InlineKeyboardMarkup {
+    InlineKeyboardMarkup::new(vec![vec![
+        btn(
+            "✅ Yes, approve",
+            CallbackAction::FlowApproveYes {
+                flow_token: flow_token.to_string(),
+            },
+        ),
+        btn("❌ Cancel", CallbackAction::DismissInteraction),
+    ]])
+}
+
 /// Build the confirmation keyboard shown before creating a review task.
 pub fn review_confirm_keyboard(task_id: Uuid) -> InlineKeyboardMarkup {
     InlineKeyboardMarkup::new(vec![vec![
         btn(
             "✅ Confirm",
-            CallbackAction::CreateReviewTaskConfirm { task_id },
+            CallbackAction::LegacyCreateReviewTaskConfirm { task_id },
+        ),
+        btn("❌ Cancel", CallbackAction::DismissInteraction),
+    ]])
+}
+
+pub fn review_confirm_flow_keyboard(flow_token: &str) -> InlineKeyboardMarkup {
+    InlineKeyboardMarkup::new(vec![vec![
+        btn(
+            "✅ Confirm",
+            CallbackAction::CreateReviewTaskConfirm {
+                flow_token: flow_token.to_string(),
+            },
         ),
         btn("❌ Cancel", CallbackAction::DismissInteraction),
     ]])
@@ -213,6 +237,23 @@ pub fn review_notification_keyboard(task_id: Uuid) -> InlineKeyboardMarkup {
     InlineKeyboardMarkup::new(vec![vec![
         btn("✅ Approve", CallbackAction::ApproveConfirm { task_id }),
         btn("📝 Reject", CallbackAction::RejectInput { task_id }),
+    ]])
+}
+
+pub fn review_notification_flow_keyboard(flow_token: &str) -> InlineKeyboardMarkup {
+    InlineKeyboardMarkup::new(vec![vec![
+        btn(
+            "✅ Approve",
+            CallbackAction::FlowApproveConfirm {
+                flow_token: flow_token.to_string(),
+            },
+        ),
+        btn(
+            "📝 Reject",
+            CallbackAction::FlowRejectInput {
+                flow_token: flow_token.to_string(),
+            },
+        ),
     ]])
 }
 
@@ -235,18 +276,30 @@ pub fn tool_approval_keyboard(approval_id: &str) -> InlineKeyboardMarkup {
 }
 
 /// Build review buttons shown after stage summaries.
-pub fn stage_summary_reply_keyboard(task_id: Uuid) -> InlineKeyboardMarkup {
+pub fn stage_summary_reply_keyboard(flow_token: &str) -> InlineKeyboardMarkup {
     InlineKeyboardMarkup::new(vec![vec![btn(
         "🔍 Review",
-        CallbackAction::CreateReviewTask { task_id },
+        CallbackAction::CreateReviewTask {
+            flow_token: flow_token.to_string(),
+        },
     )]])
 }
 
 /// Build review + done buttons shown after Daily task stage summaries.
-pub fn stage_summary_reply_done_keyboard(task_id: Uuid) -> InlineKeyboardMarkup {
+pub fn stage_summary_reply_done_keyboard(flow_token: &str) -> InlineKeyboardMarkup {
     InlineKeyboardMarkup::new(vec![vec![
-        btn("🔍 Review", CallbackAction::CreateReviewTask { task_id }),
-        btn("✅ Done", CallbackAction::DoneTask { task_id }),
+        btn(
+            "🔍 Review",
+            CallbackAction::CreateReviewTask {
+                flow_token: flow_token.to_string(),
+            },
+        ),
+        btn(
+            "✅ Done",
+            CallbackAction::DoneTask {
+                flow_token: flow_token.to_string(),
+            },
+        ),
     ]])
 }
 
@@ -353,7 +406,9 @@ mod tests {
             .flatten()
             .filter_map(Value::as_array)
             .flatten()
-            .any(|button| CallbackAction::decode(callback_data(button)) == Some(CallbackAction::Home))
+            .any(|button| {
+                CallbackAction::decode(callback_data(button)) == Some(CallbackAction::Home)
+            })
     }
 
     #[test]
@@ -394,8 +449,8 @@ mod tests {
 
     #[test]
     fn stage_summary_reply_keyboard_contains_only_review_button() {
-        let task_id = Uuid::new_v4();
-        let keyboard = stage_summary_reply_keyboard(task_id);
+        let flow_token = "f-ab12c";
+        let keyboard = stage_summary_reply_keyboard(flow_token);
         let value = serde_json::to_value(keyboard).expect("keyboard should serialize");
         let row = value["inline_keyboard"]
             .get(0)
@@ -406,14 +461,16 @@ mod tests {
         assert_eq!(row[0]["text"], "🔍 Review");
         assert_eq!(
             CallbackAction::decode(callback_data(&row[0])),
-            Some(CallbackAction::CreateReviewTask { task_id })
+            Some(CallbackAction::CreateReviewTask {
+                flow_token: flow_token.to_string(),
+            })
         );
     }
 
     #[test]
     fn stage_summary_reply_done_keyboard_contains_review_and_done_buttons() {
-        let task_id = Uuid::new_v4();
-        let keyboard = stage_summary_reply_done_keyboard(task_id);
+        let flow_token = "f-ab12c";
+        let keyboard = stage_summary_reply_done_keyboard(flow_token);
         let value = serde_json::to_value(keyboard).expect("keyboard should serialize");
         let row = value["inline_keyboard"]
             .get(0)
@@ -424,12 +481,16 @@ mod tests {
         assert_eq!(row[0]["text"], "🔍 Review");
         assert_eq!(
             CallbackAction::decode(callback_data(&row[0])),
-            Some(CallbackAction::CreateReviewTask { task_id })
+            Some(CallbackAction::CreateReviewTask {
+                flow_token: flow_token.to_string(),
+            })
         );
         assert_eq!(row[1]["text"], "✅ Done");
         assert_eq!(
             CallbackAction::decode(callback_data(&row[1])),
-            Some(CallbackAction::DoneTask { task_id })
+            Some(CallbackAction::DoneTask {
+                flow_token: flow_token.to_string(),
+            })
         );
     }
 
@@ -458,10 +519,10 @@ mod tests {
 
     #[test]
     fn stage_summary_keyboards_callback_data_stays_within_limit() {
-        let task_id = Uuid::new_v4();
+        let flow_token = "f-ab12c";
         for keyboard in [
-            stage_summary_reply_keyboard(task_id),
-            stage_summary_reply_done_keyboard(task_id),
+            stage_summary_reply_keyboard(flow_token),
+            stage_summary_reply_done_keyboard(flow_token),
         ] {
             let value = serde_json::to_value(keyboard).expect("keyboard should serialize");
             let row = value["inline_keyboard"]

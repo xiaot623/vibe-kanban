@@ -282,15 +282,12 @@ impl TelegramBotService {
         }
     }
 
-    pub(super) async fn create_review_task(
+    pub(super) async fn create_review_task_from_workspace(
         &self,
-        task_id: Uuid,
+        source_workspace_id: Uuid,
     ) -> Result<CreateReviewTaskResult, String> {
-        let source_workspace_id = self.find_review_source_workspace_id(task_id).await?;
-
         tracing::info!(
-            "Creating review task for task {} using source workspace {}",
-            task_id,
+            "Creating review task using source workspace {}",
             source_workspace_id
         );
 
@@ -336,7 +333,7 @@ impl TelegramBotService {
 
     pub(super) async fn send_follow_up_reply(
         &self,
-        task_id: Uuid,
+        session_id: Uuid,
         prompt: &str,
     ) -> Result<Option<ExecutorProfileId>, String> {
         let prompt = prompt.trim();
@@ -344,7 +341,6 @@ impl TelegramBotService {
             return Err("Reply cannot be empty.".to_string());
         }
 
-        let session_id = self.find_latest_follow_up_session_id(task_id).await?;
         let latest_profile =
             ExecutionProcess::latest_executor_profile_for_session(&self.db.pool, session_id)
                 .await
@@ -388,7 +384,41 @@ impl TelegramBotService {
         }
     }
 
-    pub(super) async fn find_exit_plan_approval(&self, task_id: Uuid) -> Option<PlanApproval> {
+    pub(super) async fn find_exit_plan_approval_for_flow(
+        &self,
+        session_id: Uuid,
+        execution_process_id: Option<Uuid>,
+    ) -> Option<PlanApproval> {
+        for approval in self.approvals.list_pending() {
+            if approval.tool_name != EXIT_PLAN_MODE_NAME {
+                continue;
+            }
+
+            if let Some(expected_execution_process_id) = execution_process_id
+                && approval.execution_process_id != expected_execution_process_id
+            {
+                continue;
+            }
+
+            let ctx =
+                ExecutionProcess::load_context(&self.db.pool, approval.execution_process_id).await;
+            if let Ok(ctx) = ctx
+                && ctx.session.id == session_id
+            {
+                return Some(PlanApproval {
+                    approval_id: approval.id,
+                    execution_process_id: approval.execution_process_id,
+                });
+            }
+        }
+
+        None
+    }
+
+    pub(super) async fn find_exit_plan_approval_by_task(
+        &self,
+        task_id: Uuid,
+    ) -> Option<PlanApproval> {
         for approval in self.approvals.list_pending() {
             if approval.tool_name != EXIT_PLAN_MODE_NAME {
                 continue;
@@ -409,92 +439,43 @@ impl TelegramBotService {
         None
     }
 
-    async fn find_review_source_workspace_id(&self, task_id: Uuid) -> Result<Uuid, String> {
-        // Workspace::fetch_all returns workspaces ordered by created_at DESC,
-        // so workspaces[0] is always the most-recently-created attempt.
+    pub(super) async fn has_running_sibling_flow(
+        &self,
+        task_id: Uuid,
+        current_session_id: Uuid,
+    ) -> Result<bool, String> {
         let workspaces = Workspace::fetch_all(&self.db.pool, Some(task_id))
             .await
             .map_err(|e| format!("Failed to load task attempts: {e}"))?;
-        if workspaces.is_empty() {
-            return Err(
-                "No task attempts found. Run the task once before creating a review task."
-                    .to_string(),
-            );
-        }
-
-        let latest_workspace_id = workspaces[0].id;
-        let mut candidates: Vec<(Uuid, ExecutionProcessStatus, chrono::DateTime<chrono::Utc>)> =
-            Vec::new();
-
-        for workspace in &workspaces {
-            match ExecutionProcess::find_latest_by_workspace_and_run_reason(
-                &self.db.pool,
-                workspace.id,
-                &ExecutionProcessRunReason::CodingAgent,
-            )
-            .await
-            {
-                Ok(Some(process)) => {
-                    candidates.push((workspace.id, process.status, process.created_at));
-                }
-                Ok(None) => {}
-                Err(err) => {
-                    tracing::warn!(
-                        "Failed to inspect coding process for workspace {}: {}",
-                        workspace.id,
-                        err
-                    );
-                }
-            }
-        }
-
-        select_review_source(latest_workspace_id, candidates)
-    }
-
-    async fn find_latest_follow_up_session_id(&self, task_id: Uuid) -> Result<Uuid, String> {
-        let workspaces = Workspace::fetch_all(&self.db.pool, Some(task_id))
-            .await
-            .map_err(|e| format!("Failed to load task attempts: {e}"))?;
-        if workspaces.is_empty() {
-            return Err("No task attempts found. Run the task once before replying.".to_string());
-        }
-
-        let mut latest_coding_process: Option<ExecutionProcess> = None;
-        let mut latest_session: Option<Session> = None;
 
         for workspace in workspaces {
-            if let Ok(Some(process)) = ExecutionProcess::find_latest_by_workspace_and_run_reason(
-                &self.db.pool,
-                workspace.id,
-                &ExecutionProcessRunReason::CodingAgent,
-            )
-            .await
-                && latest_coding_process
-                    .as_ref()
-                    .is_none_or(|current| process.created_at > current.created_at)
-            {
-                latest_coding_process = Some(process);
+            let sessions = Session::find_by_workspace_id(&self.db.pool, workspace.id)
+                .await
+                .map_err(|e| {
+                    format!(
+                        "Failed to load sessions for workspace {}: {e}",
+                        workspace.id
+                    )
+                })?;
+            for session in sessions {
+                if session.id == current_session_id {
+                    continue;
+                }
+                if let Some(process) = ExecutionProcess::find_latest_by_session_and_run_reason(
+                    &self.db.pool,
+                    session.id,
+                    &ExecutionProcessRunReason::CodingAgent,
+                )
+                .await
+                .map_err(|e| format!("Failed to inspect execution process: {e}"))?
+                    && process.status == ExecutionProcessStatus::Running
+                {
+                    return Ok(true);
+                }
             }
-
-            if let Ok(Some(session)) =
-                Session::find_latest_by_workspace_id(&self.db.pool, workspace.id).await
-                && latest_session
-                    .as_ref()
-                    .is_none_or(|current| session.updated_at > current.updated_at)
-            {
-                latest_session = Some(session);
-            }
         }
 
-        if let Some(process) = latest_coding_process {
-            return Ok(process.session_id);
-        }
-
-        if let Some(session) = latest_session {
-            return Ok(session.id);
-        }
-
-        Err("No session found for this task. Run the task once before replying.".to_string())
+        Ok(false)
     }
 }
 
@@ -622,37 +603,6 @@ pub(super) fn parse_message_as_task(message: &str) -> Option<(String, Option<Str
     Some((title.to_string(), description))
 }
 
-/// Pure workspace-selection logic extracted for unit testing.
-///
-/// Given the fallback `latest_workspace_id` (the most-recently-created workspace,
-/// i.e. `workspaces[0]` from `Workspace::fetch_all`) and a list of
-/// `(workspace_id, status, created_at)` tuples for every workspace that has a
-/// CodingAgent `ExecutionProcess`, returns the workspace ID that should be used
-/// as the source for a review subtask.
-///
-/// Returns `Err` if the most-recently-created coding-agent process is still
-/// `Running` (we cannot review work in progress).
-fn select_review_source(
-    latest_workspace_id: Uuid,
-    mut candidates: Vec<(Uuid, ExecutionProcessStatus, chrono::DateTime<chrono::Utc>)>,
-) -> Result<Uuid, String> {
-    // Sort descending by created_at so [0] is the most-recent process.
-    candidates.sort_by(|a, b| b.2.cmp(&a.2));
-
-    if let Some((workspace_id, status, _)) = candidates.first() {
-        if *status == ExecutionProcessStatus::Running {
-            return Err(
-                "The coding agent is still running. Wait for it to finish before creating a review task."
-                    .to_string(),
-            );
-        }
-        return Ok(*workspace_id);
-    }
-
-    // No CodingAgent process found at all — fall back to newest workspace.
-    Ok(latest_workspace_id)
-}
-
 /// Format the user-facing success message for a newly-created review task.
 pub(super) fn format_review_task_created_message(
     short_id: &str,
@@ -667,11 +617,7 @@ pub(super) fn format_review_task_created_message(
 
 #[cfg(test)]
 mod tests {
-    use chrono::Utc;
-    use db::models::execution_process::ExecutionProcessStatus;
-    use uuid::Uuid;
-
-    use super::{format_review_task_created_message, parse_message_as_task, select_review_source};
+    use super::{format_review_task_created_message, parse_message_as_task};
 
     #[test]
     fn parse_message_as_task_uses_first_line_as_title() {
@@ -692,72 +638,6 @@ mod tests {
     #[test]
     fn parse_message_as_task_rejects_empty_input() {
         assert!(parse_message_as_task("   \n  ").is_none());
-    }
-
-    // ── select_review_source ─────────────────────────────────────────
-
-    #[test]
-    fn select_review_source_falls_back_to_latest_workspace_when_no_processes() {
-        let fallback_id = Uuid::new_v4();
-        let result = select_review_source(fallback_id, vec![]).unwrap();
-        assert_eq!(result, fallback_id);
-    }
-
-    #[test]
-    fn select_review_source_picks_workspace_with_most_recent_coding_process() {
-        let old_id = Uuid::new_v4();
-        let new_id = Uuid::new_v4();
-        let fallback_id = Uuid::new_v4();
-
-        let older = Utc::now() - chrono::Duration::hours(2);
-        let newer = Utc::now() - chrono::Duration::minutes(10);
-
-        let result = select_review_source(
-            fallback_id,
-            vec![
-                (old_id, ExecutionProcessStatus::Completed, older),
-                (new_id, ExecutionProcessStatus::Completed, newer),
-            ],
-        )
-        .unwrap();
-
-        assert_eq!(result, new_id);
-    }
-
-    #[test]
-    fn select_review_source_errors_when_most_recent_process_is_running() {
-        let running_id = Uuid::new_v4();
-        let done_id = Uuid::new_v4();
-        let fallback_id = Uuid::new_v4();
-
-        let older = Utc::now() - chrono::Duration::hours(1);
-        let newer = Utc::now();
-
-        let result = select_review_source(
-            fallback_id,
-            vec![
-                (done_id, ExecutionProcessStatus::Completed, older),
-                (running_id, ExecutionProcessStatus::Running, newer),
-            ],
-        );
-
-        assert!(result.is_err());
-        assert!(result.unwrap_err().contains("still running"));
-    }
-
-    #[test]
-    fn select_review_source_allows_failed_and_killed_processes() {
-        let failed_id = Uuid::new_v4();
-        let fallback_id = Uuid::new_v4();
-
-        for status in [
-            ExecutionProcessStatus::Failed,
-            ExecutionProcessStatus::Killed,
-        ] {
-            let result =
-                select_review_source(fallback_id, vec![(failed_id, status, Utc::now())]).unwrap();
-            assert_eq!(result, failed_id);
-        }
     }
 
     // ── format_review_task_created_message ───────────────────────────

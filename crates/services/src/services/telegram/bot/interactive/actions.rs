@@ -21,7 +21,7 @@ use super::{
 };
 use crate::services::{
     approvals::{ApprovalError, PendingApprovalInfo},
-    telegram::{format, keyboard, notifier, state::DialogueState},
+    telegram::{flow, format, keyboard, notifier, state::DialogueState},
 };
 
 pub(super) async fn handle_tool_approval_callback(
@@ -169,6 +169,8 @@ async fn send_running_message(
     chat_id: ChatId,
     service: &TelegramBotService,
     task_id: Uuid,
+    session_id: Option<Uuid>,
+    flow_token: Option<&str>,
     executor: &str,
     mode: &str,
 ) {
@@ -178,14 +180,25 @@ async fn send_running_message(
     };
     let executor_label = normalize_running_label(executor, "UNKNOWN");
     let mode_label = normalize_running_label(mode, "DEFAULT");
-    let message =
-        format!("🏃 Running\nTask: {task_title}\nExecutor: {executor_label}\nMode: {mode_label}");
+    let flow_label = flow_token
+        .map(|token| format!("[{executor_label} · {token}]"))
+        .unwrap_or_else(|| format!("[{executor_label}]"));
+    let message = format!(
+        "🏃 {flow_label} Running\nTask: {task_title}\nExecutor: {executor_label}\nMode: {mode_label}"
+    );
 
-    match format::send_rich_then_plain(bot, chat_id, &message, Some(super::ui::empty_inline_keyboard()))
-        .await
+    match format::send_rich_then_plain(
+        bot,
+        chat_id,
+        &message,
+        Some(super::ui::empty_inline_keyboard()),
+    )
+    .await
     {
         Ok(sent) => {
-            notifier::record_running_message_id(task_id, sent.id).await;
+            if let Some(session_id) = session_id {
+                notifier::record_running_message_id(session_id, sent.id).await;
+            }
         }
         Err(err) => {
             tracing::warn!("Failed to send Telegram running message: {err}");
@@ -249,7 +262,17 @@ pub(super) async fn handle_run_with_executor_mode(
                 super::ui::delete_message_best_effort(bot, chat_id, context.source_message_id)
                     .await;
             }
-            send_running_message(bot, chat_id, service, task_id, executor, selected_mode).await;
+            send_running_message(
+                bot,
+                chat_id,
+                service,
+                task_id,
+                None,
+                None,
+                executor,
+                selected_mode,
+            )
+            .await;
         }
         Err(msg) => {
             super::ui::render_or_send_card(
@@ -288,12 +311,13 @@ pub(super) async fn handle_approve_confirm(
 }
 
 pub(super) fn approval_completion_cleanup_plan(
+    execution_process_id: Option<Uuid>,
     card_context: Option<CardRenderContext>,
 ) -> super::ui::CompletionCleanupPlan {
     let interaction_message_id = card_context.map(|ctx| ctx.source_message_id);
 
     super::ui::CompletionCleanupPlan {
-        delete_plan_review_cards: true,
+        delete_plan_review_execution_process_id: execution_process_id,
         delete_plan_message_id: None,
         delete_interaction_message_id: interaction_message_id,
         send_result_as_new_message: true,
@@ -301,11 +325,12 @@ pub(super) fn approval_completion_cleanup_plan(
 }
 
 pub(super) fn reject_completion_cleanup_plan(
+    execution_process_id: Option<Uuid>,
     plan_message_id: Option<MessageId>,
     card_context: Option<CardRenderContext>,
 ) -> super::ui::CompletionCleanupPlan {
     super::ui::CompletionCleanupPlan {
-        delete_plan_review_cards: true,
+        delete_plan_review_execution_process_id: execution_process_id,
         delete_plan_message_id: plan_message_id,
         delete_interaction_message_id: card_context.map(|ctx| ctx.source_message_id),
         send_result_as_new_message: true,
@@ -316,21 +341,72 @@ pub(super) fn review_completion_cleanup_plan(
     card_context: Option<CardRenderContext>,
 ) -> super::ui::CompletionCleanupPlan {
     super::ui::CompletionCleanupPlan {
-        delete_plan_review_cards: false,
+        delete_plan_review_execution_process_id: None,
         delete_plan_message_id: None,
         delete_interaction_message_id: card_context.map(|ctx| ctx.source_message_id),
         send_result_as_new_message: true,
     }
 }
 
+pub(super) fn unavailable_flow_message() -> &'static str {
+    "This executor flow is no longer available."
+}
+
+fn parse_legacy_task_token(flow_token: &str) -> Option<Uuid> {
+    flow_token
+        .strip_prefix("legacy-task:")
+        .and_then(|raw| Uuid::parse_str(raw).ok())
+}
+
+fn to_request_error<E: std::fmt::Display>(err: E) -> teloxide::RequestError {
+    teloxide::RequestError::Io(std::io::Error::other(err.to_string()))
+}
+
+async fn resolve_flow_context_or_render_unavailable(
+    bot: &Bot,
+    chat_id: ChatId,
+    service: &TelegramBotService,
+    flow_token: &str,
+    card_context: Option<CardRenderContext>,
+) -> ResponseResult<Option<crate::services::telegram::flow::TelegramFlowContext>> {
+    let flow_ctx = flow::resolve_flow_context(&service.db.pool, flow_token)
+        .await
+        .map_err(to_request_error)?;
+    if flow_ctx.is_none() {
+        super::ui::render_or_send_card(
+            bot,
+            chat_id,
+            card_context,
+            unavailable_flow_message(),
+            Some(super::ui::empty_inline_keyboard()),
+        )
+        .await?;
+    }
+    Ok(flow_ctx)
+}
+
 pub(super) async fn handle_approve(
     bot: &Bot,
     chat_id: ChatId,
     service: &TelegramBotService,
-    task_id: Uuid,
+    flow_token: &str,
     card_context: Option<CardRenderContext>,
 ) -> ResponseResult<()> {
-    let Some(plan_approval) = service.find_exit_plan_approval(task_id).await else {
+    if let Some(task_id) = parse_legacy_task_token(flow_token) {
+        return handle_approve_legacy_task(bot, chat_id, service, task_id, card_context).await;
+    }
+
+    let Some(flow_ctx) =
+        resolve_flow_context_or_render_unavailable(bot, chat_id, service, flow_token, card_context)
+            .await?
+    else {
+        return Ok(());
+    };
+
+    let Some(plan_approval) = service
+        .find_exit_plan_approval_for_flow(flow_ctx.session_id, flow_ctx.latest_execution_process_id)
+        .await
+    else {
         super::ui::render_or_send_card(
             bot,
             chat_id,
@@ -355,11 +431,13 @@ pub(super) async fn handle_approve(
         .await
     {
         Ok(_) => {
-            let cleanup = approval_completion_cleanup_plan(card_context);
+            let cleanup = approval_completion_cleanup_plan(
+                Some(plan_approval.execution_process_id),
+                card_context,
+            );
             super::ui::finalize_completion_result(
                 bot,
                 chat_id,
-                task_id,
                 cleanup,
                 card_context,
                 Some("✅ Plan approved!"),
@@ -380,13 +458,99 @@ pub(super) async fn handle_approve(
     Ok(())
 }
 
+pub(super) async fn handle_approve_legacy_task(
+    bot: &Bot,
+    chat_id: ChatId,
+    service: &TelegramBotService,
+    task_id: Uuid,
+    card_context: Option<CardRenderContext>,
+) -> ResponseResult<()> {
+    let Some(plan_approval) = service.find_exit_plan_approval_by_task(task_id).await else {
+        super::ui::render_or_send_card(
+            bot,
+            chat_id,
+            card_context,
+            "No pending plan approval found. It may have expired.",
+            Some(super::ui::empty_inline_keyboard()),
+        )
+        .await?;
+        return Ok(());
+    };
+
+    match service
+        .approvals
+        .respond(
+            &service.db.pool,
+            &plan_approval.approval_id,
+            ApprovalResponse {
+                execution_process_id: plan_approval.execution_process_id,
+                status: ApprovalStatus::Approved,
+            },
+        )
+        .await
+    {
+        Ok(_) => {
+            let cleanup = approval_completion_cleanup_plan(
+                Some(plan_approval.execution_process_id),
+                card_context,
+            );
+            super::ui::finalize_completion_result(
+                bot,
+                chat_id,
+                cleanup,
+                card_context,
+                Some("✅ Plan approved!"),
+            )
+            .await?;
+        }
+        Err(e) => {
+            super::ui::render_or_send_card(
+                bot,
+                chat_id,
+                card_context,
+                format!("Failed to approve plan: {e}"),
+                Some(super::ui::empty_inline_keyboard()),
+            )
+            .await?;
+        }
+    }
+    Ok(())
+}
+
+pub(super) async fn handle_flow_approve_confirm(
+    bot: &Bot,
+    chat_id: ChatId,
+    flow_token: &str,
+) -> ResponseResult<()> {
+    format::send_rich_then_plain(
+        bot,
+        chat_id,
+        "⚠️ Confirm plan approval?",
+        Some(keyboard::flow_approve_confirm_keyboard(flow_token)),
+    )
+    .await?;
+    Ok(())
+}
+
 pub(super) async fn handle_reject_start(
     bot: &Bot,
     chat_id: ChatId,
-    task_id: Uuid,
+    flow_token: &str,
     dialogue: &BotDialogue,
     _card_context: Option<CardRenderContext>,
 ) -> ResponseResult<()> {
+    if parse_legacy_task_token(flow_token).is_some() {
+        super::ui::render_or_send_card(
+            bot,
+            chat_id,
+            _card_context,
+            "This older card is not flow-aware anymore; use a newer summary/run card.",
+            Some(super::ui::empty_inline_keyboard()),
+        )
+        .await?;
+        return Ok(());
+    }
+
     let prompt_message = format::send_rich_then_plain(
         bot,
         chat_id,
@@ -397,7 +561,7 @@ pub(super) async fn handle_reject_start(
     dialogue
         .update(
             crate::services::telegram::state::DialogueState::RejectingPlan {
-                task_id,
+                flow_token: flow_token.to_string(),
                 prompt_message_id: prompt_message.id.0,
             },
         )
@@ -410,12 +574,35 @@ pub(super) async fn handle_reject_finish(
     bot: &Bot,
     chat_id: ChatId,
     service: &TelegramBotService,
-    task_id: Uuid,
+    flow_token: &str,
     plan_message_id: Option<MessageId>,
     reason: Option<&str>,
     card_context: Option<CardRenderContext>,
 ) -> ResponseResult<bool> {
-    let Some(plan_approval) = service.find_exit_plan_approval(task_id).await else {
+    if let Some(task_id) = parse_legacy_task_token(flow_token) {
+        return handle_reject_finish_legacy_task(
+            bot,
+            chat_id,
+            service,
+            task_id,
+            plan_message_id,
+            reason,
+            card_context,
+        )
+        .await;
+    }
+
+    let Some(flow_ctx) =
+        resolve_flow_context_or_render_unavailable(bot, chat_id, service, flow_token, card_context)
+            .await?
+    else {
+        return Ok(false);
+    };
+
+    let Some(plan_approval) = service
+        .find_exit_plan_approval_for_flow(flow_ctx.session_id, flow_ctx.latest_execution_process_id)
+        .await
+    else {
         super::ui::render_or_send_card(
             bot,
             chat_id,
@@ -442,11 +629,79 @@ pub(super) async fn handle_reject_finish(
         .await
     {
         Ok(_) => {
-            let cleanup = reject_completion_cleanup_plan(plan_message_id, card_context);
+            let cleanup = reject_completion_cleanup_plan(
+                Some(plan_approval.execution_process_id),
+                plan_message_id,
+                card_context,
+            );
             super::ui::finalize_completion_result(
                 bot,
                 chat_id,
-                task_id,
+                cleanup,
+                card_context,
+                Some("📝 Plan rejected."),
+            )
+            .await?;
+            return Ok(true);
+        }
+        Err(e) => {
+            super::ui::render_or_send_card(
+                bot,
+                chat_id,
+                card_context,
+                format!("Failed to reject plan: {e}"),
+                Some(super::ui::empty_inline_keyboard()),
+            )
+            .await?;
+        }
+    }
+    Ok(false)
+}
+
+pub(super) async fn handle_reject_finish_legacy_task(
+    bot: &Bot,
+    chat_id: ChatId,
+    service: &TelegramBotService,
+    task_id: Uuid,
+    plan_message_id: Option<MessageId>,
+    reason: Option<&str>,
+    card_context: Option<CardRenderContext>,
+) -> ResponseResult<bool> {
+    let Some(plan_approval) = service.find_exit_plan_approval_by_task(task_id).await else {
+        super::ui::render_or_send_card(
+            bot,
+            chat_id,
+            card_context,
+            "No pending plan approval found. It may have expired.",
+            Some(super::ui::empty_inline_keyboard()),
+        )
+        .await?;
+        return Ok(false);
+    };
+
+    match service
+        .approvals
+        .respond(
+            &service.db.pool,
+            &plan_approval.approval_id,
+            ApprovalResponse {
+                execution_process_id: plan_approval.execution_process_id,
+                status: ApprovalStatus::Denied {
+                    reason: reason.map(String::from),
+                },
+            },
+        )
+        .await
+    {
+        Ok(_) => {
+            let cleanup = reject_completion_cleanup_plan(
+                Some(plan_approval.execution_process_id),
+                plan_message_id,
+                card_context,
+            );
+            super::ui::finalize_completion_result(
+                bot,
+                chat_id,
                 cleanup,
                 card_context,
                 Some("📝 Plan rejected."),
@@ -471,10 +726,29 @@ pub(super) async fn handle_reject_finish(
 pub(super) async fn handle_follow_up_reply_start(
     bot: &Bot,
     chat_id: ChatId,
-    task_id: Uuid,
+    service: &TelegramBotService,
+    flow_token: &str,
     dialogue: &BotDialogue,
     card_context: Option<CardRenderContext>,
 ) -> ResponseResult<()> {
+    if parse_legacy_task_token(flow_token).is_some() {
+        super::ui::render_or_send_card(
+            bot,
+            chat_id,
+            card_context,
+            "This older card is not flow-aware anymore; use a newer summary/run card.",
+            Some(super::ui::empty_inline_keyboard()),
+        )
+        .await?;
+        return Ok(());
+    }
+
+    let Some(flow_ctx) =
+        resolve_flow_context_or_render_unavailable(bot, chat_id, service, flow_token, card_context)
+            .await?
+    else {
+        return Ok(());
+    };
     let prompt_message_id = super::ui::render_or_send_card(
         bot,
         chat_id,
@@ -486,7 +760,36 @@ pub(super) async fn handle_follow_up_reply_start(
     dialogue
         .update(
             crate::services::telegram::state::DialogueState::ReplyingFollowUp {
-                task_id,
+                flow_token: flow_ctx.flow_token,
+                session_id: flow_ctx.session_id,
+                prompt_message_id: prompt_message_id.0,
+            },
+        )
+        .await
+        .ok();
+    Ok(())
+}
+
+pub(super) async fn handle_follow_up_reply_start_legacy_task(
+    bot: &Bot,
+    chat_id: ChatId,
+    task_id: Uuid,
+    dialogue: &BotDialogue,
+    card_context: Option<CardRenderContext>,
+) -> ResponseResult<()> {
+    let prompt_message_id = super::ui::render_or_send_card(
+        bot,
+        chat_id,
+        card_context,
+        "This older card is not flow-aware anymore; use a newer summary/run card.",
+        Some(super::ui::empty_inline_keyboard()),
+    )
+    .await?;
+    dialogue
+        .update(
+            crate::services::telegram::state::DialogueState::ReplyingFollowUp {
+                flow_token: format!("legacy-task:{task_id}"),
+                session_id: task_id,
                 prompt_message_id: prompt_message_id.0,
             },
         )
@@ -499,11 +802,43 @@ pub(super) async fn handle_follow_up_reply_finish(
     bot: &Bot,
     chat_id: ChatId,
     service: &TelegramBotService,
-    task_id: Uuid,
+    flow_token: &str,
+    session_id: Uuid,
     prompt: &str,
     card_context: Option<CardRenderContext>,
 ) -> ResponseResult<bool> {
-    match service.send_follow_up_reply(task_id, prompt).await {
+    if parse_legacy_task_token(flow_token).is_some() {
+        super::ui::render_or_send_card(
+            bot,
+            chat_id,
+            card_context,
+            "This older card is not flow-aware anymore; use a newer summary/run card.",
+            Some(super::ui::empty_inline_keyboard()),
+        )
+        .await?;
+        return Ok(false);
+    }
+
+    let Some(flow_ctx) =
+        resolve_flow_context_or_render_unavailable(bot, chat_id, service, flow_token, card_context)
+            .await?
+    else {
+        return Ok(false);
+    };
+
+    if flow_ctx.session_id != session_id {
+        super::ui::render_or_send_card(
+            bot,
+            chat_id,
+            card_context,
+            "This executor flow context is out of date. Please open a newer flow summary card.",
+            Some(super::ui::empty_inline_keyboard()),
+        )
+        .await?;
+        return Ok(false);
+    }
+
+    match service.send_follow_up_reply(session_id, prompt).await {
         Ok(latest_profile) => {
             let (executor_label, mode_label) = if let Some(profile) = latest_profile {
                 let mode = profile
@@ -517,8 +852,17 @@ pub(super) async fn handle_follow_up_reply_finish(
                 (config.default_executor, mode)
             };
 
-            send_running_message(bot, chat_id, service, task_id, &executor_label, &mode_label)
-                .await;
+            send_running_message(
+                bot,
+                chat_id,
+                service,
+                flow_ctx.task_id,
+                Some(session_id),
+                Some(flow_token),
+                &executor_label,
+                &mode_label,
+            )
+            .await;
             return Ok(true);
         }
         Err(err) => {
@@ -539,14 +883,33 @@ pub(super) async fn handle_done_task(
     bot: &Bot,
     chat_id: ChatId,
     service: &TelegramBotService,
-    task_id: Uuid,
+    flow_token: &str,
     card_context: Option<CardRenderContext>,
 ) -> ResponseResult<()> {
+    if parse_legacy_task_token(flow_token).is_some() {
+        super::ui::render_or_send_card(
+            bot,
+            chat_id,
+            card_context,
+            "This older card is not flow-aware anymore; use a newer summary/run card.",
+            Some(super::ui::empty_inline_keyboard()),
+        )
+        .await?;
+        return Ok(());
+    }
+
+    let Some(flow_ctx) =
+        resolve_flow_context_or_render_unavailable(bot, chat_id, service, flow_token, card_context)
+            .await?
+    else {
+        return Ok(());
+    };
+
     let Some(task) = super::ui::load_task_or_render_error(
         bot,
         chat_id,
         &service.db.pool,
-        task_id,
+        flow_ctx.task_id,
         card_context,
         "Task not found. It may have been deleted.",
         "Failed to load task",
@@ -597,6 +960,35 @@ pub(super) async fn handle_done_task(
         )
         .await?;
         return Ok(());
+    }
+
+    match service
+        .has_running_sibling_flow(task.id, flow_ctx.session_id)
+        .await
+    {
+        Ok(true) => {
+            super::ui::render_or_send_card(
+                bot,
+                chat_id,
+                card_context,
+                "Cannot mark Done while another executor flow for this task is still running.",
+                Some(super::ui::empty_inline_keyboard()),
+            )
+            .await?;
+            return Ok(());
+        }
+        Ok(false) => {}
+        Err(err) => {
+            super::ui::render_or_send_card(
+                bot,
+                chat_id,
+                card_context,
+                format!("Failed to validate concurrent flows: {err}"),
+                Some(super::ui::empty_inline_keyboard()),
+            )
+            .await?;
+            return Ok(());
+        }
     }
 
     let mut status_errors = Vec::new();
@@ -651,10 +1043,32 @@ pub(super) async fn handle_create_review_task(
     bot: &Bot,
     chat_id: ChatId,
     service: &TelegramBotService,
-    task_id: Uuid,
+    flow_token: &str,
     card_context: Option<CardRenderContext>,
 ) -> ResponseResult<()> {
-    match service.create_review_task(task_id).await {
+    if parse_legacy_task_token(flow_token).is_some() {
+        super::ui::render_or_send_card(
+            bot,
+            chat_id,
+            card_context,
+            "This older card is not flow-aware anymore; use a newer summary/run card.",
+            Some(super::ui::empty_inline_keyboard()),
+        )
+        .await?;
+        return Ok(());
+    }
+
+    let Some(flow_ctx) =
+        resolve_flow_context_or_render_unavailable(bot, chat_id, service, flow_token, card_context)
+            .await?
+    else {
+        return Ok(());
+    };
+
+    match service
+        .create_review_task_from_workspace(flow_ctx.workspace_id)
+        .await
+    {
         Ok(result) => {
             tracing::info!("Created review task {}", result.task.id);
 
@@ -665,15 +1079,8 @@ pub(super) async fn handle_create_review_task(
             let message =
                 format_review_task_created_message(&short_id, result.task.has_in_progress_attempt);
             let cleanup = review_completion_cleanup_plan(card_context);
-            super::ui::finalize_completion_result(
-                bot,
-                chat_id,
-                task_id,
-                cleanup,
-                card_context,
-                None,
-            )
-            .await?;
+            super::ui::finalize_completion_result(bot, chat_id, cleanup, card_context, None)
+                .await?;
 
             format::send_rich_then_plain(
                 bot,
@@ -692,7 +1099,7 @@ pub(super) async fn handle_create_review_task(
                 chat_id,
                 card_context,
                 format!("Failed to create review task: {err}\n\nYou can retry or cancel."),
-                Some(keyboard::review_confirm_keyboard(task_id)),
+                Some(keyboard::review_confirm_keyboard(flow_ctx.task_id)),
             )
             .await?;
         }
@@ -704,13 +1111,24 @@ pub(super) async fn handle_create_review_task(
 pub(super) async fn handle_create_review_task_confirm(
     bot: &Bot,
     chat_id: ChatId,
-    task_id: Uuid,
+    flow_token: &str,
 ) -> ResponseResult<()> {
+    if parse_legacy_task_token(flow_token).is_some() {
+        format::send_rich_then_plain(
+            bot,
+            chat_id,
+            "This older card is not flow-aware anymore; use a newer summary/run card.",
+            Some(super::ui::empty_inline_keyboard()),
+        )
+        .await?;
+        return Ok(());
+    }
+
     format::send_rich_then_plain(
         bot,
         chat_id,
         "Confirm creating a review task?",
-        Some(keyboard::review_confirm_keyboard(task_id)),
+        Some(keyboard::review_confirm_flow_keyboard(flow_token)),
     )
     .await?;
     Ok(())
@@ -907,7 +1325,10 @@ pub(super) async fn handle_new_task_project(
     .await?;
 
     dialogue
-        .update(build_creating_task_message_state(project_id, prompt_message_id.0))
+        .update(build_creating_task_message_state(
+            project_id,
+            prompt_message_id.0,
+        ))
         .await
         .ok();
     Ok(())
@@ -977,8 +1398,7 @@ mod tests {
         format_done_task_status_message, format_new_task_message_prompt,
         reject_completion_cleanup_plan, review_completion_cleanup_plan,
     };
-    use crate::services::telegram::state::DialogueState;
-    use crate::services::approvals::PendingApprovalInfo;
+    use crate::services::{approvals::PendingApprovalInfo, telegram::state::DialogueState};
 
     #[test]
     fn request_user_input_requires_structured_handling() {
@@ -1015,9 +1435,9 @@ mod tests {
             source_message_id: MessageId(42),
         });
 
-        let cleanup = approval_completion_cleanup_plan(context);
+        let cleanup = approval_completion_cleanup_plan(None, context);
 
-        assert!(cleanup.delete_plan_review_cards);
+        assert_eq!(cleanup.delete_plan_review_execution_process_id, None);
         assert_eq!(cleanup.delete_plan_message_id, None);
         assert_eq!(cleanup.delete_interaction_message_id, Some(MessageId(42)));
         assert!(cleanup.send_result_as_new_message);
@@ -1026,13 +1446,14 @@ mod tests {
     #[test]
     fn reject_cleanup_plan_deletes_plan_and_interaction_messages() {
         let cleanup = reject_completion_cleanup_plan(
+            None,
             Some(MessageId(7)),
             Some(CardRenderContext {
                 source_message_id: MessageId(8),
             }),
         );
 
-        assert!(cleanup.delete_plan_review_cards);
+        assert_eq!(cleanup.delete_plan_review_execution_process_id, None);
         assert_eq!(cleanup.delete_plan_message_id, Some(MessageId(7)));
         assert_eq!(cleanup.delete_interaction_message_id, Some(MessageId(8)));
         assert!(cleanup.send_result_as_new_message);
@@ -1044,7 +1465,7 @@ mod tests {
             source_message_id: MessageId(99),
         }));
 
-        assert!(!cleanup.delete_plan_review_cards);
+        assert_eq!(cleanup.delete_plan_review_execution_process_id, None);
         assert_eq!(cleanup.delete_plan_message_id, None);
         assert_eq!(cleanup.delete_interaction_message_id, Some(MessageId(99)));
         assert!(cleanup.send_result_as_new_message);

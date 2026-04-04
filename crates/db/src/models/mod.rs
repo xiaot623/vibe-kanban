@@ -13,5 +13,6 @@ pub mod session;
 pub mod short_id_mapping;
 pub mod tag;
 pub mod task;
+pub mod telegram_flow_binding;
 pub mod workspace;
 pub mod workspace_repo;

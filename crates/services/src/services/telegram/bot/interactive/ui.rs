@@ -10,7 +10,7 @@ use crate::services::telegram::{callback::CallbackAction, format, notifier};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct CompletionCleanupPlan {
-    pub(super) delete_plan_review_cards: bool,
+    pub(super) delete_plan_review_execution_process_id: Option<Uuid>,
     pub(super) delete_plan_message_id: Option<MessageId>,
     pub(super) delete_interaction_message_id: Option<MessageId>,
     pub(super) send_result_as_new_message: bool,
@@ -168,17 +168,15 @@ pub(super) async fn load_task_or_render_error(
 pub(super) async fn finalize_completion_result(
     bot: &Bot,
     chat_id: ChatId,
-    task_id: Uuid,
     cleanup: CompletionCleanupPlan,
     card_context: Option<CardRenderContext>,
     completion_text: Option<&str>,
 ) -> ResponseResult<()> {
-    apply_completion_cleanup(bot, chat_id, task_id, cleanup).await;
+    apply_completion_cleanup(bot, chat_id, cleanup).await;
 
     if let Some(text) = completion_text {
         if cleanup.send_result_as_new_message {
-            format::send_rich_then_plain(bot, chat_id, text, Some(empty_inline_keyboard()))
-                .await?;
+            format::send_rich_then_plain(bot, chat_id, text, Some(empty_inline_keyboard())).await?;
         } else {
             render_or_send_card(
                 bot,
@@ -194,22 +192,21 @@ pub(super) async fn finalize_completion_result(
     Ok(())
 }
 
-async fn cleanup_plan_review_cards(bot: &Bot, chat_id: ChatId, task_id: Uuid) -> Vec<MessageId> {
-    let message_ids = notifier::take_plan_review_message_ids(task_id).await;
+async fn cleanup_plan_review_cards(
+    bot: &Bot,
+    chat_id: ChatId,
+    execution_process_id: Uuid,
+) -> Vec<MessageId> {
+    let message_ids = notifier::take_plan_review_message_ids(execution_process_id).await;
     for message_id in &message_ids {
         delete_message_best_effort(bot, chat_id, *message_id).await;
     }
     message_ids
 }
 
-async fn apply_completion_cleanup(
-    bot: &Bot,
-    chat_id: ChatId,
-    task_id: Uuid,
-    cleanup: CompletionCleanupPlan,
-) {
-    if cleanup.delete_plan_review_cards {
-        cleanup_plan_review_cards(bot, chat_id, task_id).await;
+async fn apply_completion_cleanup(bot: &Bot, chat_id: ChatId, cleanup: CompletionCleanupPlan) {
+    if let Some(execution_process_id) = cleanup.delete_plan_review_execution_process_id {
+        cleanup_plan_review_cards(bot, chat_id, execution_process_id).await;
     }
 
     if let Some(message_id) = cleanup.delete_plan_message_id {
@@ -221,7 +218,7 @@ async fn apply_completion_cleanup(
     }
 }
 
-pub(super) fn extract_stage_summary_task_id_from_reply(message: &Message) -> Option<Uuid> {
+pub(super) fn extract_stage_summary_flow_token_from_reply(message: &Message) -> Option<String> {
     let reply = message.reply_to_message()?;
     let from = reply.from.as_ref()?;
     if !from.is_bot {
@@ -229,10 +226,12 @@ pub(super) fn extract_stage_summary_task_id_from_reply(message: &Message) -> Opt
     }
 
     let markup = reply.reply_markup()?;
-    extract_task_id_from_inline_keyboard(markup)
+    extract_flow_token_from_inline_keyboard(markup)
 }
 
-pub(super) fn extract_task_id_from_inline_keyboard(markup: &InlineKeyboardMarkup) -> Option<Uuid> {
+pub(super) fn extract_flow_token_from_inline_keyboard(
+    markup: &InlineKeyboardMarkup,
+) -> Option<String> {
     for row in &markup.inline_keyboard {
         for button in row {
             let InlineKeyboardButtonKind::CallbackData(data) = &button.kind else {
@@ -240,10 +239,10 @@ pub(super) fn extract_task_id_from_inline_keyboard(markup: &InlineKeyboardMarkup
             };
 
             match CallbackAction::decode(data) {
-                Some(CallbackAction::CreateReviewTask { task_id })
-                | Some(CallbackAction::CreateReviewTaskConfirm { task_id })
-                | Some(CallbackAction::DoneTask { task_id })
-                | Some(CallbackAction::FollowUpReply { task_id }) => return Some(task_id),
+                Some(CallbackAction::CreateReviewTask { flow_token })
+                | Some(CallbackAction::CreateReviewTaskConfirm { flow_token })
+                | Some(CallbackAction::DoneTask { flow_token })
+                | Some(CallbackAction::FollowUpReply { flow_token }) => return Some(flow_token),
                 _ => {}
             }
         }
@@ -267,7 +266,7 @@ mod tests {
 
     use super::{
         CompletionFailurePolicy, dialogue_completion_decision,
-        extract_stage_summary_task_id_from_reply, extract_task_id_from_inline_keyboard,
+        extract_flow_token_from_inline_keyboard, extract_stage_summary_flow_token_from_reply,
     };
     use crate::services::telegram::{callback::CallbackAction, keyboard};
 
@@ -296,27 +295,33 @@ mod tests {
     }
 
     #[test]
-    fn extracts_task_id_from_stage_summary_reply_message() {
-        let task_id = Uuid::new_v4();
+    fn extracts_flow_token_from_stage_summary_reply_message() {
+        let flow_token = "f-ab12c".to_string();
         let replied_message =
-            bot_message_with_keyboard(keyboard::stage_summary_reply_keyboard(task_id));
+            bot_message_with_keyboard(keyboard::stage_summary_reply_keyboard(&flow_token));
         let reply_message = user_reply_message(replied_message);
 
         assert_eq!(
-            extract_stage_summary_task_id_from_reply(&reply_message),
-            Some(task_id)
+            extract_stage_summary_flow_token_from_reply(&reply_message),
+            Some(flow_token)
         );
     }
 
     #[test]
-    fn extracts_task_id_from_legacy_follow_up_button() {
-        let task_id = Uuid::new_v4();
+    fn extracts_flow_token_from_follow_up_button() {
+        let flow_token = "f-ab12c".to_string();
         let markup = InlineKeyboardMarkup::new(vec![vec![InlineKeyboardButton::callback(
             "Reply",
-            CallbackAction::FollowUpReply { task_id }.encode(),
+            CallbackAction::FollowUpReply {
+                flow_token: flow_token.clone(),
+            }
+            .encode(),
         )]]);
 
-        assert_eq!(extract_task_id_from_inline_keyboard(&markup), Some(task_id));
+        assert_eq!(
+            extract_flow_token_from_inline_keyboard(&markup),
+            Some(flow_token)
+        );
     }
 
     #[test]
@@ -327,20 +332,20 @@ mod tests {
         let reply_message = user_reply_message(replied_message);
 
         assert_eq!(
-            extract_stage_summary_task_id_from_reply(&reply_message),
+            extract_stage_summary_flow_token_from_reply(&reply_message),
             None
         );
     }
 
     #[test]
     fn ignores_replies_to_non_bot_messages() {
-        let task_id = Uuid::new_v4();
+        let flow_token = "f-ab12c".to_string();
         let replied_message =
-            user_message_with_keyboard(keyboard::stage_summary_reply_keyboard(task_id));
+            user_message_with_keyboard(keyboard::stage_summary_reply_keyboard(&flow_token));
         let reply_message = user_reply_message(replied_message);
 
         assert_eq!(
-            extract_stage_summary_task_id_from_reply(&reply_message),
+            extract_stage_summary_flow_token_from_reply(&reply_message),
             None
         );
     }

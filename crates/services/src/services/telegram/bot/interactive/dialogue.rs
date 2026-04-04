@@ -14,7 +14,10 @@ fn parse_interactive_new_task_message(message: &str) -> Option<(String, Option<S
     parse_message_as_task(message)
 }
 
-fn retry_creating_task_message_state(project_id: uuid::Uuid, prompt_message_id: i32) -> DialogueState {
+fn retry_creating_task_message_state(
+    project_id: uuid::Uuid,
+    prompt_message_id: i32,
+) -> DialogueState {
     DialogueState::CreatingTaskMessage {
         project_id,
         prompt_message_id,
@@ -49,12 +52,30 @@ pub(super) async fn handle_dialogue_text(
             if text.is_empty() {
                 return Ok(());
             }
-            if let Some(task_id) = super::ui::extract_stage_summary_task_id_from_reply(&msg) {
+            if let Some(flow_token) = super::ui::extract_stage_summary_flow_token_from_reply(&msg) {
+                let Some(flow_ctx) = crate::services::telegram::flow::resolve_flow_context(
+                    &service.db.pool,
+                    &flow_token,
+                )
+                .await
+                .map_err(|e| teloxide::RequestError::Io(std::io::Error::other(e.to_string())))?
+                else {
+                    format::send_rich_then_plain(
+                        &bot,
+                        msg.chat.id,
+                        super::actions::unavailable_flow_message(),
+                        Some(super::ui::empty_inline_keyboard()),
+                    )
+                    .await?;
+                    return Ok(());
+                };
+
                 super::actions::handle_follow_up_reply_finish(
                     &bot,
                     msg.chat.id,
                     &service,
-                    task_id,
+                    &flow_token,
+                    flow_ctx.session_id,
                     text,
                     None,
                 )
@@ -207,7 +228,7 @@ pub(super) async fn handle_dialogue_text(
             .await;
         }
         DialogueState::RejectingPlan {
-            task_id,
+            flow_token,
             prompt_message_id,
         } => {
             let reason = if text.is_empty() {
@@ -219,7 +240,7 @@ pub(super) async fn handle_dialogue_text(
                 &bot,
                 msg.chat.id,
                 &service,
-                task_id,
+                &flow_token,
                 msg.reply_to_message().map(|reply| reply.id),
                 reason.as_deref(),
                 Some(CardRenderContext {
@@ -239,7 +260,8 @@ pub(super) async fn handle_dialogue_text(
             .await;
         }
         DialogueState::ReplyingFollowUp {
-            task_id,
+            flow_token,
+            session_id,
             prompt_message_id,
         } => {
             if text.is_empty() {
@@ -255,7 +277,8 @@ pub(super) async fn handle_dialogue_text(
                 .await?;
                 dialogue
                     .update(DialogueState::ReplyingFollowUp {
-                        task_id,
+                        flow_token,
+                        session_id,
                         prompt_message_id: updated_prompt_id.0,
                     })
                     .await
@@ -267,7 +290,8 @@ pub(super) async fn handle_dialogue_text(
                 &bot,
                 msg.chat.id,
                 &service,
-                task_id,
+                &flow_token,
+                session_id,
                 text,
                 Some(CardRenderContext {
                     source_message_id: MessageId(prompt_message_id),

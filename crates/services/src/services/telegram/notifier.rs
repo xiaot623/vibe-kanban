@@ -16,6 +16,7 @@ use db::{
         execution_process::{ExecutionProcess, ExecutionProcessRunReason, ExecutionProcessStatus},
         short_id_mapping::ShortIdMapping,
         task::{Task, TaskStatus},
+        telegram_flow_binding::TelegramFlowBinding,
         workspace::Workspace,
         workspace_repo::WorkspaceRepo,
     },
@@ -35,7 +36,7 @@ use tokio_util::sync::CancellationToken;
 use utils::{log_msg::LogMsg, msg_store::MsgStore};
 use uuid::Uuid;
 
-use super::{EXIT_PLAN_MODE_NAME, format, keyboard, telegraph};
+use super::{EXIT_PLAN_MODE_NAME, flow, format, keyboard, telegraph};
 use crate::services::{approvals::Approvals, config::Config, git::GitService};
 
 /// Telegram context for event handlers.
@@ -60,45 +61,46 @@ static RUNNING_MESSAGE_IDS: OnceLock<Arc<RwLock<RunningMessageRegistry>>> = Once
 
 #[derive(Debug, Default)]
 struct PlanReviewMessageRegistry {
-    by_task: HashMap<Uuid, Vec<i32>>,
+    by_execution_process: HashMap<Uuid, Vec<i32>>,
 }
 
 impl PlanReviewMessageRegistry {
     /// Store a non-empty set of message IDs for a task.
     /// To remove an entry use [`Self::clear`] or [`Self::take`].
-    fn record(&mut self, task_id: Uuid, message_ids: Vec<i32>) {
+    fn record(&mut self, execution_process_id: Uuid, message_ids: Vec<i32>) {
         debug_assert!(
             !message_ids.is_empty(),
             "record() called with empty ids; use clear() instead"
         );
         if !message_ids.is_empty() {
-            self.by_task.insert(task_id, message_ids);
+            self.by_execution_process
+                .insert(execution_process_id, message_ids);
         }
     }
 
     /// Remove and return any recorded message IDs for a task (one-shot).
-    fn take(&mut self, task_id: Uuid) -> Vec<i32> {
-        self.by_task.remove(&task_id).unwrap_or_default()
-    }
-
-    /// Discard any recorded message IDs for a task without returning them.
-    fn clear(&mut self, task_id: Uuid) {
-        self.by_task.remove(&task_id);
+    fn take(&mut self, execution_process_id: Uuid) -> Vec<i32> {
+        self.by_execution_process
+            .remove(&execution_process_id)
+            .unwrap_or_default()
     }
 }
 
 #[derive(Debug, Default)]
 struct RunningMessageRegistry {
-    by_task: HashMap<Uuid, Vec<i32>>,
+    by_session: HashMap<Uuid, Vec<i32>>,
 }
 
 impl RunningMessageRegistry {
-    fn record(&mut self, task_id: Uuid, message_id: i32) {
-        self.by_task.entry(task_id).or_default().push(message_id);
+    fn record(&mut self, session_id: Uuid, message_id: i32) {
+        self.by_session
+            .entry(session_id)
+            .or_default()
+            .push(message_id);
     }
 
-    fn take(&mut self, task_id: Uuid) -> Vec<i32> {
-        self.by_task.remove(&task_id).unwrap_or_default()
+    fn take(&mut self, session_id: Uuid) -> Vec<i32> {
+        self.by_session.remove(&session_id).unwrap_or_default()
     }
 }
 
@@ -117,6 +119,25 @@ pub async fn clear_telegram_context() {
     cancel_all_run_feed_watchers();
     clear_plan_review_message_registry();
     clear_running_message_registry();
+}
+
+pub async fn notify_coding_agent_execution_started(session_id: Uuid, execution_process_id: Uuid) {
+    let Some(tg) = get_context().await else {
+        return;
+    };
+
+    if let Ok(flow_ctx) =
+        flow::ensure_flow_context_for_session(&tg.db.pool, session_id, Some(execution_process_id))
+            .await
+    {
+        let _ = TelegramFlowBinding::refresh_expiry(&tg.db.pool, &flow_ctx.flow_token).await;
+    }
+
+    start_or_refresh_run_feed_watcher(tg, session_id).await;
+}
+
+pub async fn notify_flow_deleted(session_id: Uuid) {
+    stop_run_feed_watcher(session_id).await;
 }
 
 async fn get_context() -> Option<TelegramContext> {
@@ -162,7 +183,7 @@ fn clear_plan_review_message_registry() {
     };
 
     if let Ok(mut guard) = lock.try_write() {
-        guard.by_task.clear();
+        guard.by_execution_process.clear();
     }
 }
 
@@ -172,46 +193,40 @@ fn clear_running_message_registry() {
     };
 
     if let Ok(mut guard) = lock.try_write() {
-        guard.by_task.clear();
+        guard.by_session.clear();
     }
 }
 
-async fn record_plan_review_message_ids(task_id: Uuid, message_ids: Vec<MessageId>) {
+async fn record_plan_review_message_ids(execution_process_id: Uuid, message_ids: Vec<MessageId>) {
     let ids: Vec<i32> = message_ids.into_iter().map(|id| id.0).collect();
     plan_review_message_registry()
         .write()
         .await
-        .record(task_id, ids);
+        .record(execution_process_id, ids);
 }
 
-/// Discard tracked plan-review message IDs for a task (no Telegram delete).
-/// Used when no plan-review cards were sent for this transition.
-async fn clear_plan_review_message_ids(task_id: Uuid) {
-    plan_review_message_registry().write().await.clear(task_id);
-}
-
-pub(super) async fn take_plan_review_message_ids(task_id: Uuid) -> Vec<MessageId> {
+pub(super) async fn take_plan_review_message_ids(execution_process_id: Uuid) -> Vec<MessageId> {
     plan_review_message_registry()
         .write()
         .await
-        .take(task_id)
+        .take(execution_process_id)
         .into_iter()
         .map(MessageId)
         .collect()
 }
 
-pub(super) async fn record_running_message_id(task_id: Uuid, message_id: MessageId) {
+pub(super) async fn record_running_message_id(session_id: Uuid, message_id: MessageId) {
     running_message_registry()
         .write()
         .await
-        .record(task_id, message_id.0);
+        .record(session_id, message_id.0);
 }
 
-async fn take_running_message_ids(task_id: Uuid) -> Vec<MessageId> {
+async fn take_running_message_ids(session_id: Uuid) -> Vec<MessageId> {
     running_message_registry()
         .write()
         .await
-        .take(task_id)
+        .take(session_id)
         .into_iter()
         .map(MessageId)
         .collect()
@@ -323,8 +338,7 @@ impl TelegramHandler for TaskInProgressHandler {
     }
 
     async fn handle_with_context(&self, tg: &TelegramContext, transition: &TaskStateTransition) {
-        let task = &transition.task;
-        start_run_feed_watcher(tg.clone(), task.id).await;
+        let _ = (tg, transition);
     }
 }
 
@@ -350,7 +364,7 @@ impl TelegramHandler for TaskOutOfInProgressHandler {
     }
 
     async fn handle_with_context(&self, _tg: &TelegramContext, transition: &TaskStateTransition) {
-        stop_run_feed_watcher(transition.task.id).await;
+        let _ = transition;
     }
 }
 
@@ -372,7 +386,9 @@ impl TelegramHandler for TaskInReviewHandler {
     async fn handle_with_context(&self, tg: &TelegramContext, transition: &TaskStateTransition) {
         let task = &transition.task;
 
-        // If the task has a pending plan, split and send as multiple messages
+        // If the task has a pending plan, split and send as multiple messages.
+        // This transition is task-scoped and can be ambiguous with concurrent flows,
+        // so we keep this card flow-aware only when it can be resolved safely.
         if let Some(plan) = find_exit_plan_approval(tg, task.id).await {
             let chunks = split_plan(&plan.plan);
             let total = chunks.len();
@@ -380,7 +396,18 @@ impl TelegramHandler for TaskInReviewHandler {
             for (i, chunk) in chunks.into_iter().enumerate() {
                 // Attach approve/reject buttons to the last chunk.
                 let markup = if i == total - 1 {
-                    Some(keyboard::review_notification_keyboard(task.id))
+                    if let Ok(Some(flow_ctx)) = flow::resolve_flow_context_from_execution(
+                        &tg.db.pool,
+                        plan.execution_process_id,
+                    )
+                    .await
+                    {
+                        Some(keyboard::review_notification_flow_keyboard(
+                            &flow_ctx.flow_token,
+                        ))
+                    } else {
+                        Some(keyboard::review_notification_keyboard(task.id))
+                    }
                 } else {
                     None
                 };
@@ -388,14 +415,16 @@ impl TelegramHandler for TaskInReviewHandler {
                     sent_message_ids.push(message_id);
                 }
             }
-            record_plan_review_message_ids(task.id, sent_message_ids).await;
+            if !sent_message_ids.is_empty() {
+                record_plan_review_message_ids(plan.execution_process_id, sent_message_ids).await;
+            }
             return;
         }
 
         // No split review cards for this task in the current transition.
         // Explicitly clear any IDs that might have been recorded from a prior InReview
         // cycle so they are not stale-deleted on a future approve/reject.
-        clear_plan_review_message_ids(task.id).await;
+        // no-op: flow-local clear requires execution process context.
     }
 }
 
@@ -512,7 +541,10 @@ struct RunFeedAccumulator {
     task_id: Option<Uuid>,
     task_project_id: Option<Uuid>,
     task_title: Option<String>,
+    session_id: Option<Uuid>,
+    workspace_id: Option<Uuid>,
     execution_process_id: Option<Uuid>,
+    flow_context: Option<flow::TelegramFlowContext>,
     sent_pending_approvals: HashSet<String>,
     sent_terminal_tool_updates: HashSet<(usize, &'static str)>,
     active_assistant_entry_index: Option<usize>,
@@ -597,11 +629,29 @@ impl RunFeedAccumulator {
         self.task_title = Some(title.to_string());
     }
 
+    fn remember_session(&mut self, session_id: Uuid, workspace_id: Uuid) {
+        self.session_id = Some(session_id);
+        self.workspace_id = Some(workspace_id);
+    }
+
+    fn remember_flow_context(&mut self, flow_ctx: flow::TelegramFlowContext) {
+        self.flow_context = Some(flow_ctx);
+    }
+
     fn remember_execution_process(&mut self, execution_process_id: Uuid) {
         if self.execution_process_id != Some(execution_process_id) {
             self.reset_execution_process_state();
             self.execution_process_id = Some(execution_process_id);
         }
+    }
+
+    fn flow_prefix(&self) -> String {
+        let (executor, variant) = self
+            .flow_context
+            .as_ref()
+            .map(|ctx| (ctx.executor_label.clone(), ctx.variant_label.clone()))
+            .unwrap_or_else(|| ("UNKNOWN".to_string(), "DEFAULT".to_string()));
+        format!("[{executor} · {variant}]")
     }
 
     fn reset_execution_process_state(&mut self) {
@@ -662,14 +712,14 @@ fn classify_entry_behavior(entry: &NormalizedEntry) -> EntryDeliveryBehavior {
     }
 }
 
-async fn start_run_feed_watcher(tg: TelegramContext, task_id: Uuid) {
+async fn start_or_refresh_run_feed_watcher(tg: TelegramContext, session_id: Uuid) {
     let watcher_id = Uuid::new_v4();
     let cancel = CancellationToken::new();
 
     {
         let mut watchers = run_feed_watchers().write().await;
         if let Some(existing) = watchers.insert(
-            task_id,
+            session_id,
             RunFeedWatcherHandle {
                 watcher_id,
                 cancel: cancel.clone(),
@@ -680,36 +730,36 @@ async fn start_run_feed_watcher(tg: TelegramContext, task_id: Uuid) {
     }
 
     tokio::spawn(async move {
-        run_feed_watcher_loop(tg, task_id, watcher_id, cancel.clone()).await;
-        cleanup_run_feed_watcher(task_id, watcher_id).await;
+        run_feed_watcher_loop(tg, session_id, watcher_id, cancel.clone()).await;
+        cleanup_run_feed_watcher(session_id, watcher_id).await;
     });
 }
 
-async fn stop_run_feed_watcher(task_id: Uuid) {
-    let handle = { run_feed_watchers().write().await.remove(&task_id) };
+async fn stop_run_feed_watcher(session_id: Uuid) {
+    let handle = { run_feed_watchers().write().await.remove(&session_id) };
     if let Some(handle) = handle {
         handle.cancel.cancel();
     }
 }
 
-async fn cleanup_run_feed_watcher(task_id: Uuid, watcher_id: Uuid) {
+async fn cleanup_run_feed_watcher(session_id: Uuid, watcher_id: Uuid) {
     let mut watchers = run_feed_watchers().write().await;
     if watchers
-        .get(&task_id)
+        .get(&session_id)
         .is_some_and(|handle| handle.watcher_id == watcher_id)
     {
-        watchers.remove(&task_id);
+        watchers.remove(&session_id);
     }
 }
 
 async fn run_feed_watcher_loop(
     tg: TelegramContext,
-    task_id: Uuid,
+    session_id: Uuid,
     watcher_id: Uuid,
     cancel: CancellationToken,
 ) {
     let mut accumulator = RunFeedAccumulator::default();
-    let mut watched_processes = HashSet::new();
+    let mut watched_processes: HashSet<Uuid> = HashSet::new();
 
     loop {
         if cancel.is_cancelled() {
@@ -717,7 +767,26 @@ async fn run_feed_watcher_loop(
             return;
         }
 
-        let task = match Task::find_by_id(&tg.db.pool, task_id).await {
+        let session = match db::models::session::Session::find_by_id(&tg.db.pool, session_id).await
+        {
+            Ok(Some(session)) => session,
+            Ok(None) => return,
+            Err(err) => {
+                tracing::warn!("run-feed watcher {watcher_id} failed to load session: {err}");
+                return;
+            }
+        };
+
+        let workspace = match Workspace::find_by_id(&tg.db.pool, session.workspace_id).await {
+            Ok(Some(workspace)) => workspace,
+            Ok(None) => return,
+            Err(err) => {
+                tracing::warn!("run-feed watcher {watcher_id} failed to load workspace: {err}");
+                return;
+            }
+        };
+
+        let task = match Task::find_by_id(&tg.db.pool, workspace.task_id).await {
             Ok(Some(task)) => task,
             Ok(None) => return,
             Err(err) => {
@@ -725,15 +794,43 @@ async fn run_feed_watcher_loop(
                 return;
             }
         };
+
+        accumulator.remember_session(session.id, workspace.id);
         accumulator.remember_task(task.id, task.project_id, &task.title);
 
-        if task.status != TaskStatus::InProgress {
+        let flow_ctx =
+            match flow::ensure_flow_context_for_session(&tg.db.pool, session.id, None).await {
+                Ok(ctx) => ctx,
+                Err(err) => {
+                    tracing::warn!(
+                        "run-feed watcher {watcher_id} failed to ensure flow context: {err}"
+                    );
+                    return;
+                }
+            };
+        accumulator.remember_flow_context(flow_ctx);
+
+        let processes =
+            match ExecutionProcess::find_by_session_id(&tg.db.pool, session_id, false).await {
+                Ok(processes) => processes,
+                Err(err) => {
+                    tracing::warn!("run-feed watcher {watcher_id} failed to load processes: {err}");
+                    return;
+                }
+            };
+        let has_running = processes.iter().any(|p| {
+            p.run_reason == ExecutionProcessRunReason::CodingAgent
+                && p.status == ExecutionProcessStatus::Running
+        });
+
+        if !has_running {
             emit_stage_summary(&tg, &mut accumulator, SummaryTrigger::TaskLeftInProgress).await;
             return;
         }
 
         let Some(process) =
-            find_running_coding_agent_process(&tg, task_id, &watched_processes).await
+            find_running_coding_agent_process_for_session(&tg, session_id, &watched_processes)
+                .await
         else {
             tokio::select! {
                 _ = cancel.cancelled() => {
@@ -747,6 +844,11 @@ async fn run_feed_watcher_loop(
 
         watched_processes.insert(process.id);
         accumulator.remember_execution_process(process.id);
+        if let Ok(flow_ctx) =
+            flow::ensure_flow_context_for_session(&tg.db.pool, session_id, Some(process.id)).await
+        {
+            accumulator.remember_flow_context(flow_ctx);
+        }
 
         let Some(store) = wait_for_msg_store(&tg, process.id, &cancel).await else {
             tracing::warn!(
@@ -764,43 +866,22 @@ async fn run_feed_watcher_loop(
     }
 }
 
-async fn find_running_coding_agent_process(
+async fn find_running_coding_agent_process_for_session(
     tg: &TelegramContext,
-    task_id: Uuid,
+    session_id: Uuid,
     exclude: &HashSet<Uuid>,
 ) -> Option<ExecutionProcess> {
-    let workspaces = Workspace::fetch_all(&tg.db.pool, Some(task_id))
+    let processes = ExecutionProcess::find_by_session_id(&tg.db.pool, session_id, false)
         .await
         .ok()?;
-    let mut latest_running: Option<ExecutionProcess> = None;
-
-    for workspace in workspaces {
-        let maybe_process = ExecutionProcess::find_latest_by_workspace_and_run_reason(
-            &tg.db.pool,
-            workspace.id,
-            &ExecutionProcessRunReason::CodingAgent,
-        )
-        .await
-        .ok()
-        .flatten();
-
-        let Some(process) = maybe_process else {
-            continue;
-        };
-
-        if process.status != ExecutionProcessStatus::Running || exclude.contains(&process.id) {
-            continue;
-        }
-
-        if latest_running
-            .as_ref()
-            .is_none_or(|current| process.created_at > current.created_at)
-        {
-            latest_running = Some(process);
-        }
-    }
-
-    latest_running
+    processes
+        .into_iter()
+        .filter(|process| {
+            process.run_reason == ExecutionProcessRunReason::CodingAgent
+                && process.status == ExecutionProcessStatus::Running
+                && !exclude.contains(&process.id)
+        })
+        .max_by_key(|process| process.created_at)
 }
 
 async fn wait_for_msg_store(
@@ -971,8 +1052,9 @@ async fn emit_realtime_assistant_card(
     accumulator: &mut RunFeedAccumulator,
     content: &str,
 ) {
+    let prefix = accumulator.flow_prefix();
     let message = format!(
-        "🤖 Assistant\n{}",
+        "🤖 {prefix} Assistant\n{}",
         truncate_for_telegram(content, TELEGRAM_MESSAGE_LIMIT * 2)
     );
     let source_message_id = accumulator.active_assistant_message_id();
@@ -1017,8 +1099,9 @@ async fn emit_realtime_card_for_entry(
 ) {
     match &update.current.entry_type {
         NormalizedEntryType::UserFeedback { denied_tool } => {
+            let prefix = accumulator.flow_prefix();
             let message = format!(
-                "🚫 User rejected tool: {}\n{}",
+                "🚫 {prefix} User rejected tool: {}\n{}",
                 denied_tool,
                 truncate_for_telegram(&update.current.content, 220)
             );
@@ -1050,7 +1133,8 @@ async fn emit_realtime_card_for_entry(
                 {
                     let reason = reason.as_deref().unwrap_or("No reason provided");
                     let message = format!(
-                        "🛑 Tool denied: {tool_name}\nReason: {}\n{}",
+                        "🛑 {} Tool denied: {tool_name}\nReason: {}\n{}",
+                        accumulator.flow_prefix(),
                         truncate_for_telegram(reason, 140),
                         truncate_for_telegram(&update.current.content, 180)
                     );
@@ -1064,7 +1148,8 @@ async fn emit_realtime_card_for_entry(
                         .insert((update.index, "timed_out"))
                 {
                     let message = format!(
-                        "⏱️ Tool approval timed out: {tool_name}\n{}",
+                        "⏱️ {} Tool approval timed out: {tool_name}\n{}",
+                        accumulator.flow_prefix(),
                         truncate_for_telegram(&update.current.content, 200)
                     );
                     let _ = send_telegram_card(tg, message, None).await;
@@ -1078,8 +1163,11 @@ async fn emit_realtime_card_for_entry(
             needs_setup,
         } => {
             let message = format!(
-                "🔁 Stage changed\nfailed: {}\nexecution_processes: {}\nneeds_setup: {}",
-                failed, execution_processes, needs_setup
+                "🔁 {} Stage changed\nfailed: {}\nexecution_processes: {}\nneeds_setup: {}",
+                accumulator.flow_prefix(),
+                failed,
+                execution_processes,
+                needs_setup
             );
             let _ = send_telegram_card(tg, message, None).await;
         }
@@ -1178,7 +1266,7 @@ async fn emit_stage_summary(
 ) {
     delete_active_assistant_message(tg, accumulator).await;
 
-    if should_skip_stage_summary_in_plan_mode(tg, accumulator.task_id).await {
+    if should_skip_stage_summary_in_plan_mode(tg, accumulator.execution_process_id).await {
         accumulator.finalize_stage();
         return;
     }
@@ -1189,23 +1277,18 @@ async fn emit_stage_summary(
     let model_latest = changed.model_latest.or(overall.model_latest);
     let token_usage = changed.token_usage.or(overall.token_usage);
 
-    let trigger_label = match trigger {
-        SummaryTrigger::NextAction => "next_action",
-        SummaryTrigger::ExecutionFinished => "execution_finished",
-        SummaryTrigger::TaskLeftInProgress => "task_left_in_progress",
-    };
-
     if changed.assistant_messages.is_empty() {
         if matches!(trigger, SummaryTrigger::ExecutionFinished)
-            && let Some(task_id) = accumulator.task_id
+            && let Some(session_id) = accumulator.session_id
         {
-            delete_running_messages_for_task(tg, task_id).await;
+            delete_running_messages_for_session(tg, session_id).await;
         }
         accumulator.finalize_stage();
         return;
     }
 
-    let mut lines = vec![format!("🧾 Stage summary ({trigger_label})")];
+    let prefix = accumulator.flow_prefix();
+    let mut lines = vec![format!("🧾 {prefix} Stage summary")];
     lines.push(format!(
         "Task title: {}",
         accumulator
@@ -1248,26 +1331,35 @@ async fn emit_stage_summary(
     append_telegraph_log_lines(&mut lines, &telegraph_urls);
 
     let is_daily_task = is_daily_project_task(tg, accumulator.task_project_id).await;
-    let summary_markup = stage_summary_keyboard(trigger, accumulator.task_id, is_daily_task);
+    let summary_markup = stage_summary_keyboard(
+        trigger,
+        accumulator
+            .flow_context
+            .as_ref()
+            .map(|ctx| ctx.flow_token.clone()),
+        is_daily_task,
+    );
     let sent_ids = send_split_telegram_card(tg, lines.join("\n"), summary_markup).await;
     if matches!(trigger, SummaryTrigger::ExecutionFinished)
         && !sent_ids.is_empty()
-        && let Some(task_id) = accumulator.task_id
+        && let Some(session_id) = accumulator.session_id
     {
-        delete_running_messages_for_task(tg, task_id).await;
+        delete_running_messages_for_session(tg, session_id).await;
     }
     accumulator.finalize_stage();
 }
 
 async fn should_skip_stage_summary_in_plan_mode(
     tg: &TelegramContext,
-    task_id: Option<Uuid>,
+    execution_process_id: Option<Uuid>,
 ) -> bool {
-    let Some(task_id) = task_id else {
+    let Some(execution_process_id) = execution_process_id else {
         return false;
     };
 
-    find_exit_plan_approval(tg, task_id).await.is_some()
+    find_exit_plan_approval_for_execution_process(tg, execution_process_id)
+        .await
+        .is_some()
 }
 
 fn append_stage_summary_assistant_lines(lines: &mut Vec<String>, assistant_messages: &[String]) {
@@ -1291,8 +1383,8 @@ fn append_telegraph_log_lines(lines: &mut Vec<String>, telegraph_urls: &[String]
     }
 }
 
-async fn delete_running_messages_for_task(tg: &TelegramContext, task_id: Uuid) {
-    let message_ids = take_running_message_ids(task_id).await;
+async fn delete_running_messages_for_session(tg: &TelegramContext, session_id: Uuid) {
+    let message_ids = take_running_message_ids(session_id).await;
     for message_id in message_ids {
         if let Err(err) = tg.bot.delete_message(tg.chat_id, message_id).await {
             tracing::debug!(
@@ -1307,7 +1399,7 @@ async fn delete_running_messages_for_task(tg: &TelegramContext, task_id: Uuid) {
 
 fn stage_summary_keyboard(
     trigger: SummaryTrigger,
-    task_id: Option<Uuid>,
+    flow_token: Option<String>,
     is_daily_task: bool,
 ) -> Option<teloxide::types::InlineKeyboardMarkup> {
     if !matches!(
@@ -1317,11 +1409,11 @@ fn stage_summary_keyboard(
         return None;
     }
 
-    let task_id = task_id?;
+    let flow_token = flow_token?;
     Some(if is_daily_task {
-        keyboard::stage_summary_reply_done_keyboard(task_id)
+        keyboard::stage_summary_reply_done_keyboard(&flow_token)
     } else {
-        keyboard::stage_summary_reply_keyboard(task_id)
+        keyboard::stage_summary_reply_keyboard(&flow_token)
     })
 }
 
@@ -1493,6 +1585,7 @@ async fn compute_workspace_diff_stats(
 }
 
 struct PlanApproval {
+    execution_process_id: Uuid,
     plan: String,
 }
 
@@ -1587,11 +1680,32 @@ async fn find_exit_plan_approval(
             && ctx.task.id == task_id
         {
             return Some(PlanApproval {
+                execution_process_id: approval.execution_process_id,
                 plan: approval.entry.content,
             });
         }
     }
 
+    None
+}
+
+async fn find_exit_plan_approval_for_execution_process(
+    tg: &TelegramContext,
+    execution_process_id: Uuid,
+) -> Option<PlanApproval> {
+    for approval in tg.approvals.list_pending() {
+        if approval.tool_name != EXIT_PLAN_MODE_NAME {
+            continue;
+        }
+        if approval.execution_process_id != execution_process_id {
+            continue;
+        }
+
+        return Some(PlanApproval {
+            execution_process_id,
+            plan: approval.entry.content,
+        });
+    }
     None
 }
 
@@ -1618,35 +1732,23 @@ mod tests {
 
     #[test]
     fn plan_review_message_registry_records_replaces_and_takes() {
-        let task_id = Uuid::new_v4();
+        let execution_process_id = Uuid::new_v4();
         let mut registry = PlanReviewMessageRegistry::default();
 
-        registry.record(task_id, vec![11, 22]);
-        assert_eq!(registry.by_task.get(&task_id), Some(&vec![11, 22]));
+        registry.record(execution_process_id, vec![11, 22]);
+        assert_eq!(
+            registry.by_execution_process.get(&execution_process_id),
+            Some(&vec![11, 22])
+        );
 
-        registry.record(task_id, vec![33]);
-        assert_eq!(registry.by_task.get(&task_id), Some(&vec![33]));
+        registry.record(execution_process_id, vec![33]);
+        assert_eq!(
+            registry.by_execution_process.get(&execution_process_id),
+            Some(&vec![33])
+        );
 
-        assert_eq!(registry.take(task_id), vec![33]);
-        assert!(registry.take(task_id).is_empty());
-    }
-
-    #[test]
-    fn plan_review_message_registry_clear_does_not_erase_subsequent_record() {
-        let task_id = Uuid::new_v4();
-        let mut registry = PlanReviewMessageRegistry::default();
-
-        // Simulate first InReview: plan found, IDs recorded.
-        registry.record(task_id, vec![1, 2, 3]);
-        assert_eq!(registry.by_task.get(&task_id), Some(&vec![1, 2, 3]));
-
-        // Simulate second InReview: no plan, clear is called (not record with empty vec).
-        registry.clear(task_id);
-        assert!(registry.by_task.get(&task_id).is_none());
-
-        // A subsequent record (third InReview with plan) is unaffected.
-        registry.record(task_id, vec![4, 5]);
-        assert_eq!(registry.take(task_id), vec![4, 5]);
+        assert_eq!(registry.take(execution_process_id), vec![33]);
+        assert!(registry.take(execution_process_id).is_empty());
     }
 
     #[test]
@@ -1711,9 +1813,13 @@ mod tests {
 
     #[test]
     fn stage_summary_keyboard_uses_review_done_for_daily_task() {
-        let task_id = Uuid::new_v4();
-        let markup = stage_summary_keyboard(SummaryTrigger::ExecutionFinished, Some(task_id), true)
-            .expect("keyboard should be present");
+        let flow_token = "f-ab12c".to_string();
+        let markup = stage_summary_keyboard(
+            SummaryTrigger::ExecutionFinished,
+            Some(flow_token.clone()),
+            true,
+        )
+        .expect("keyboard should be present");
         let value = serde_json::to_value(markup).expect("keyboard should serialize");
         let row = value["inline_keyboard"]
             .get(0)
@@ -1727,7 +1833,9 @@ mod tests {
                     .as_str()
                     .expect("review callback should exist")
             ),
-            Some(CallbackAction::CreateReviewTask { task_id })
+            Some(CallbackAction::CreateReviewTask {
+                flow_token: flow_token.clone(),
+            })
         );
         assert_eq!(
             CallbackAction::decode(
@@ -1735,16 +1843,19 @@ mod tests {
                     .as_str()
                     .expect("done callback should exist")
             ),
-            Some(CallbackAction::DoneTask { task_id })
+            Some(CallbackAction::DoneTask { flow_token })
         );
     }
 
     #[test]
     fn stage_summary_keyboard_uses_review_for_non_daily_task() {
-        let task_id = Uuid::new_v4();
-        let markup =
-            stage_summary_keyboard(SummaryTrigger::TaskLeftInProgress, Some(task_id), false)
-                .expect("keyboard should be present");
+        let flow_token = "f-ab12c".to_string();
+        let markup = stage_summary_keyboard(
+            SummaryTrigger::TaskLeftInProgress,
+            Some(flow_token.clone()),
+            false,
+        )
+        .expect("keyboard should be present");
         let value = serde_json::to_value(markup).expect("keyboard should serialize");
         let row = value["inline_keyboard"]
             .get(0)
@@ -1758,15 +1869,19 @@ mod tests {
                     .as_str()
                     .expect("review callback should exist")
             ),
-            Some(CallbackAction::CreateReviewTask { task_id })
+            Some(CallbackAction::CreateReviewTask { flow_token })
         );
     }
 
     #[test]
     fn stage_summary_keyboard_omits_buttons_for_next_action_trigger() {
         assert!(
-            stage_summary_keyboard(SummaryTrigger::NextAction, Some(Uuid::new_v4()), true)
-                .is_none()
+            stage_summary_keyboard(
+                SummaryTrigger::NextAction,
+                Some("f-ab12c".to_string()),
+                true,
+            )
+            .is_none()
         );
     }
 
@@ -2107,7 +2222,7 @@ mod tests {
     fn stage_summary_preserves_full_assistant_reply_content() {
         let assistant = "a".repeat(TELEGRAM_MESSAGE_LIMIT * 3 + 17);
         let lines = {
-            let mut lines = vec!["🧾 Stage summary (execution_finished)".to_string()];
+            let mut lines = vec!["🧾 [CODEX · PLAN] Stage summary".to_string()];
             append_stage_summary_assistant_lines(&mut lines, std::slice::from_ref(&assistant));
             lines
         };
@@ -2118,6 +2233,29 @@ mod tests {
     }
 
     #[test]
+    fn flow_prefix_uses_executor_and_variant() {
+        let mut acc = RunFeedAccumulator::default();
+        acc.flow_context = Some(flow::TelegramFlowContext {
+            flow_token: "f-abc12".to_string(),
+            task_id: Uuid::nil(),
+            workspace_id: Uuid::nil(),
+            session_id: Uuid::nil(),
+            latest_execution_process_id: None,
+            executor_label: "CODEX".to_string(),
+            variant_label: "PLAN".to_string(),
+        });
+
+        assert_eq!(acc.flow_prefix(), "[CODEX · PLAN]");
+    }
+
+    #[test]
+    fn flow_prefix_defaults_when_flow_context_is_missing() {
+        let acc = RunFeedAccumulator::default();
+
+        assert_eq!(acc.flow_prefix(), "[UNKNOWN · DEFAULT]");
+    }
+
+    #[test]
     fn stage_summary_assistant_lines_keep_only_latest_message() {
         let mut lines = Vec::new();
         append_stage_summary_assistant_lines(
@@ -2125,10 +2263,7 @@ mod tests {
             &["First reply".to_string(), "Second reply".to_string()],
         );
 
-        assert_eq!(
-            lines,
-            vec!["Second reply".to_string()]
-        );
+        assert_eq!(lines, vec!["Second reply".to_string()]);
     }
 
     #[test]
@@ -2194,10 +2329,12 @@ mod tests {
         let process_b = Uuid::new_v4();
 
         acc.remember_execution_process(process_a);
-        let _ = acc.apply_patch(&executors::logs::utils::patch::ConversationPatch::add_normalized_entry(
-            0,
-            entry(NormalizedEntryType::AssistantMessage, "draft"),
-        ));
+        let _ = acc.apply_patch(
+            &executors::logs::utils::patch::ConversationPatch::add_normalized_entry(
+                0,
+                entry(NormalizedEntryType::AssistantMessage, "draft"),
+            ),
+        );
         acc.sent_pending_approvals.insert("approval-a".to_string());
         acc.sent_terminal_tool_updates.insert((0, "denied"));
         acc.finalize_stage();

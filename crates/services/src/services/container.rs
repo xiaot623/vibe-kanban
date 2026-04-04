@@ -62,7 +62,7 @@ use crate::services::{
     execution_log_hub::ExecutionLogHub,
     git::{GitService, GitServiceError},
     notification::NotificationService,
-    telegram::telegraph,
+    telegram::{notifier as telegram_notifier, telegraph},
     workspace_manager::WorkspaceError as WorkspaceManagerError,
     worktree_manager::WorktreeError,
 };
@@ -1331,6 +1331,14 @@ pub trait ContainerService {
             &repo_states,
         )
         .await?;
+
+        if run_reason == &ExecutionProcessRunReason::CodingAgent {
+            telegram_notifier::notify_coding_agent_execution_started(
+                session.id,
+                execution_process.id,
+            )
+            .await;
+        }
 
         Workspace::set_archived(&self.db().pool, workspace.id, false).await?;
 

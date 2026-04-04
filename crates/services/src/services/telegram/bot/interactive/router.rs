@@ -254,15 +254,79 @@ pub(super) async fn handle_callback(
         CallbackAction::ApproveConfirm { task_id } => {
             super::actions::handle_approve_confirm(&bot, chat_id, task_id).await?;
         }
-        CallbackAction::ApproveYes { task_id } => {
-            super::actions::handle_approve(&bot, chat_id, &service, task_id, card_context).await?;
+        CallbackAction::LegacyFlowApproveConfirmTask { task_id } => {
+            super::actions::handle_approve_confirm(&bot, chat_id, task_id).await?;
         }
-        CallbackAction::RejectInput { task_id } => {
-            super::actions::handle_reject_start(&bot, chat_id, task_id, &dialogue, card_context)
+        CallbackAction::FlowApproveConfirm { flow_token } => {
+            super::actions::handle_flow_approve_confirm(&bot, chat_id, &flow_token).await?;
+        }
+        CallbackAction::ApproveYes { task_id } => {
+            super::actions::handle_approve(
+                &bot,
+                chat_id,
+                &service,
+                &format!("legacy-task:{task_id}"),
+                card_context,
+            )
+            .await?;
+        }
+        CallbackAction::LegacyFlowApproveYesTask { task_id } => {
+            super::actions::handle_approve(
+                &bot,
+                chat_id,
+                &service,
+                &format!("legacy-task:{task_id}"),
+                card_context,
+            )
+            .await?;
+        }
+        CallbackAction::FlowApproveYes { flow_token } => {
+            super::actions::handle_approve(&bot, chat_id, &service, &flow_token, card_context)
                 .await?;
         }
-        CallbackAction::FollowUpReply { task_id } => {
+        CallbackAction::RejectInput { task_id } => {
+            super::actions::handle_reject_start(
+                &bot,
+                chat_id,
+                &format!("legacy-task:{task_id}"),
+                &dialogue,
+                card_context,
+            )
+            .await?;
+        }
+        CallbackAction::FlowRejectInput { flow_token } => {
+            super::actions::handle_reject_start(
+                &bot,
+                chat_id,
+                &flow_token,
+                &dialogue,
+                card_context,
+            )
+            .await?;
+        }
+        CallbackAction::LegacyFlowRejectInputTask { task_id } => {
+            super::actions::handle_reject_start(
+                &bot,
+                chat_id,
+                &format!("legacy-task:{task_id}"),
+                &dialogue,
+                card_context,
+            )
+            .await?;
+        }
+        CallbackAction::FollowUpReply { flow_token } => {
             super::actions::handle_follow_up_reply_start(
+                &bot,
+                chat_id,
+                &service,
+                &flow_token,
+                &dialogue,
+                card_context,
+            )
+            .await?;
+        }
+        CallbackAction::LegacyFollowUpReplyTask { task_id } => {
+            super::actions::handle_follow_up_reply_start_legacy_task(
                 &bot,
                 chat_id,
                 task_id,
@@ -271,21 +335,33 @@ pub(super) async fn handle_callback(
             )
             .await?;
         }
-        CallbackAction::CreateReviewTask { task_id } => {
-            super::actions::handle_create_review_task_confirm(&bot, chat_id, task_id).await?;
+        CallbackAction::CreateReviewTask { flow_token } => {
+            super::actions::handle_create_review_task_confirm(&bot, chat_id, &flow_token).await?;
         }
-        CallbackAction::CreateReviewTaskConfirm { task_id } => {
+        CallbackAction::LegacyCreateReviewTask { .. }
+        | CallbackAction::LegacyCreateReviewTaskConfirm { .. }
+        | CallbackAction::LegacyDoneTask { .. } => {
+            super::ui::render_or_send_card(
+                &bot,
+                chat_id,
+                card_context,
+                "This older card is not flow-aware anymore; use a newer summary/run card.",
+                Some(super::ui::empty_inline_keyboard()),
+            )
+            .await?;
+        }
+        CallbackAction::CreateReviewTaskConfirm { flow_token } => {
             super::actions::handle_create_review_task(
                 &bot,
                 chat_id,
                 &service,
-                task_id,
+                &flow_token,
                 card_context,
             )
             .await?;
         }
-        CallbackAction::DoneTask { task_id } => {
-            super::actions::handle_done_task(&bot, chat_id, &service, task_id, card_context)
+        CallbackAction::DoneTask { flow_token } => {
+            super::actions::handle_done_task(&bot, chat_id, &service, &flow_token, card_context)
                 .await?;
         }
         CallbackAction::ToolApprove { approval_id } => {
@@ -522,7 +598,8 @@ mod tests {
     fn dismiss_resets_only_when_dismissing_active_prompt_message() {
         let task_id = Uuid::new_v4();
         let state = Some(DialogueState::ReplyingFollowUp {
-            task_id,
+            flow_token: format!("f-{}", task_id.simple()),
+            session_id: task_id,
             prompt_message_id: 33,
         });
 
