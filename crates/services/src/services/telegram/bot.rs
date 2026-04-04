@@ -77,12 +77,12 @@ impl TelegramBotService {
             approvals: self.approvals.clone(),
             git: self.git.clone(),
         };
-        super::notifier::set_telegram_context(tg_context);
+        super::notifier::set_telegram_context(tg_context).await;
         super::notifier::register_handlers(self.task_state.dispatcher()).await;
 
         interactive::run_dispatcher(self, bot, chat_id).await;
 
-        super::notifier::clear_telegram_context();
+        super::notifier::clear_telegram_context().await;
     }
 }
 

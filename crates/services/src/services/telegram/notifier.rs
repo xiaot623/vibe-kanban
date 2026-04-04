@@ -102,19 +102,17 @@ impl RunningMessageRegistry {
     }
 }
 
-pub fn set_telegram_context(ctx: TelegramContext) {
+pub async fn set_telegram_context(ctx: TelegramContext) {
     let lock = TELEGRAM_CONTEXT.get_or_init(|| Arc::new(RwLock::new(None)));
-    if let Ok(mut guard) = lock.try_write() {
-        *guard = Some(ctx);
-    }
+    let mut guard = lock.write().await;
+    *guard = Some(ctx);
 }
 
 /// Clear the telegram context (for shutdown).
-pub fn clear_telegram_context() {
+pub async fn clear_telegram_context() {
     if let Some(lock) = TELEGRAM_CONTEXT.get() {
-        if let Ok(mut guard) = lock.try_write() {
-            *guard = None;
-        }
+        let mut guard = lock.write().await;
+        *guard = None;
     }
     cancel_all_run_feed_watchers();
     clear_plan_review_message_registry();
@@ -262,6 +260,13 @@ impl<H: TelegramHandler> TelegramHandlerWrapper<H> {
         let handler = fn_handler(H::name(), H::filter(), |_, transition| {
             Box::pin(async move {
                 let Some(tg) = get_context().await else {
+                    tracing::warn!(
+                        handler = H::name(),
+                        task_id = %transition.task_id(),
+                        from = ?transition.from_status(),
+                        to = ?transition.to_status(),
+                        "Skipping telegram task-state notification because context is unavailable"
+                    );
                     return;
                 };
 
