@@ -1190,6 +1190,16 @@ async fn emit_stage_summary(
         SummaryTrigger::TaskLeftInProgress => "task_left_in_progress",
     };
 
+    if changed.assistant_messages.is_empty() {
+        if matches!(trigger, SummaryTrigger::ExecutionFinished)
+            && let Some(task_id) = accumulator.task_id
+        {
+            delete_running_messages_for_task(tg, task_id).await;
+        }
+        accumulator.finalize_stage();
+        return;
+    }
+
     let mut lines = vec![format!("🧾 Stage summary ({trigger_label})")];
     lines.push(format!(
         "Task title: {}",
@@ -1200,14 +1210,7 @@ async fn emit_stage_summary(
             .unwrap_or_else(|| "n/a".to_string())
     ));
 
-    if changed.assistant_messages.is_empty() {
-        lines.push("Assistant replies: n/a".to_string());
-    } else {
-        lines.push("Assistant replies:".to_string());
-        for (index, assistant) in changed.assistant_messages.iter().enumerate() {
-            lines.push(format!("{}. {}", index + 1, assistant));
-        }
-    }
+    append_stage_summary_assistant_lines(&mut lines, &changed.assistant_messages);
 
     if let Some(model) = model_latest {
         lines.push(format!(
@@ -1251,12 +1254,23 @@ async fn emit_stage_summary(
     accumulator.finalize_stage();
 }
 
-async fn should_skip_stage_summary_in_plan_mode(tg: &TelegramContext, task_id: Option<Uuid>) -> bool {
+async fn should_skip_stage_summary_in_plan_mode(
+    tg: &TelegramContext,
+    task_id: Option<Uuid>,
+) -> bool {
     let Some(task_id) = task_id else {
         return false;
     };
 
     find_exit_plan_approval(tg, task_id).await.is_some()
+}
+
+fn append_stage_summary_assistant_lines(lines: &mut Vec<String>, assistant_messages: &[String]) {
+    let Some(latest_assistant) = assistant_messages.last() else {
+        return;
+    };
+
+    lines.push(latest_assistant.clone());
 }
 
 fn append_telegraph_log_lines(lines: &mut Vec<String>, telegraph_urls: &[String]) {
@@ -2089,14 +2103,35 @@ mod tests {
         let assistant = "a".repeat(TELEGRAM_MESSAGE_LIMIT * 3 + 17);
         let lines = {
             let mut lines = vec!["🧾 Stage summary (execution_finished)".to_string()];
-            lines.push("Assistant replies:".to_string());
-            lines.push(format!("1. {}", assistant));
+            append_stage_summary_assistant_lines(&mut lines, std::slice::from_ref(&assistant));
             lines
         };
 
         let rendered = lines.join("\n");
         assert!(rendered.contains(&assistant));
         assert!(!rendered.contains('…'));
+    }
+
+    #[test]
+    fn stage_summary_assistant_lines_keep_only_latest_message() {
+        let mut lines = Vec::new();
+        append_stage_summary_assistant_lines(
+            &mut lines,
+            &["First reply".to_string(), "Second reply".to_string()],
+        );
+
+        assert_eq!(
+            lines,
+            vec!["Second reply".to_string()]
+        );
+    }
+
+    #[test]
+    fn stage_summary_assistant_lines_skip_empty_messages() {
+        let mut lines = Vec::new();
+        append_stage_summary_assistant_lines(&mut lines, &[]);
+
+        assert!(lines.is_empty());
     }
 
     #[test]
