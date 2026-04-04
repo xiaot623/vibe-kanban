@@ -1173,6 +1173,11 @@ async fn emit_stage_summary(
 ) {
     delete_active_assistant_message(tg, accumulator).await;
 
+    if should_skip_stage_summary_in_plan_mode(tg, accumulator.task_id).await {
+        accumulator.finalize_stage();
+        return;
+    }
+
     let changed = accumulator.collect_summary_data(true);
     let overall = accumulator.collect_summary_data(false);
 
@@ -1244,6 +1249,14 @@ async fn emit_stage_summary(
         delete_running_messages_for_task(tg, task_id).await;
     }
     accumulator.finalize_stage();
+}
+
+async fn should_skip_stage_summary_in_plan_mode(tg: &TelegramContext, task_id: Option<Uuid>) -> bool {
+    let Some(task_id) = task_id else {
+        return false;
+    };
+
+    find_exit_plan_approval(tg, task_id).await.is_some()
 }
 
 fn append_telegraph_log_lines(lines: &mut Vec<String>, telegraph_urls: &[String]) {
