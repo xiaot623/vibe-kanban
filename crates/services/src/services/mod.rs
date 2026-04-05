@@ -24,5 +24,6 @@ pub mod queued_message;
 pub mod repo;
 pub mod task_state;
 pub mod telegram;
+pub mod tts;
 pub mod workspace_manager;
 pub mod worktree_manager;

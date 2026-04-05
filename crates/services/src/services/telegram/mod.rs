@@ -1,3 +1,4 @@
+pub mod audio_jobs;
 pub mod bot;
 pub mod callback;
 pub mod flow;

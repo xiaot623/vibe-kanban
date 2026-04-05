@@ -158,6 +158,22 @@ pub enum CallbackAction {
         project_id: Uuid,
         minutes: u32,
     },
+    /// Start audio synthesis for a stage summary card.
+    /// `msg_id` is the Telegram message id of the source summary card.
+    StageSummaryAudio {
+        flow_token: String,
+        msg_id: i32,
+    },
+    /// Stop (cancel) a running audio synthesis job.
+    StageSummaryStopAudio {
+        flow_token: String,
+        msg_id: i32,
+    },
+    /// Confirm stopping the running audio job.
+    StageSummaryStopAudioConfirm {
+        flow_token: String,
+        msg_id: i32,
+    },
 }
 
 /// Short action tags used in the wire format.
@@ -205,6 +221,9 @@ impl CallbackAction {
             Self::Unpin => "pu",
             Self::PinProject { .. } => "pp",
             Self::PinDuration { .. } => "pd",
+            Self::StageSummaryAudio { .. } => "sa",
+            Self::StageSummaryStopAudio { .. } => "ss",
+            Self::StageSummaryStopAudioConfirm { .. } => "sc",
         }
     }
 
@@ -290,6 +309,11 @@ impl CallbackAction {
                 minutes,
             } => {
                 format!("v1|{}|{}|{}", self.tag(), short_uuid(project_id), minutes)
+            }
+            Self::StageSummaryAudio { flow_token, msg_id }
+            | Self::StageSummaryStopAudio { flow_token, msg_id }
+            | Self::StageSummaryStopAudioConfirm { flow_token, msg_id } => {
+                format!("v1|{}|{}|{}", self.tag(), flow_token, msg_id)
             }
         }
     }
@@ -426,6 +450,21 @@ impl CallbackAction {
                     project_id,
                     minutes,
                 })
+            }
+            "sa" => {
+                let flow_token = parts.get(2)?.to_string();
+                let msg_id: i32 = parts.get(3)?.parse().ok()?;
+                Some(Self::StageSummaryAudio { flow_token, msg_id })
+            }
+            "ss" => {
+                let flow_token = parts.get(2)?.to_string();
+                let msg_id: i32 = parts.get(3)?.parse().ok()?;
+                Some(Self::StageSummaryStopAudio { flow_token, msg_id })
+            }
+            "sc" => {
+                let flow_token = parts.get(2)?.to_string();
+                let msg_id: i32 = parts.get(3)?.parse().ok()?;
+                Some(Self::StageSummaryStopAudioConfirm { flow_token, msg_id })
             }
             _ => None,
         }
@@ -724,6 +763,18 @@ mod tests {
                 project_id: id,
                 minutes: 720,
             },
+            CallbackAction::StageSummaryAudio {
+                flow_token: flow_token.clone(),
+                msg_id: 42,
+            },
+            CallbackAction::StageSummaryStopAudio {
+                flow_token: flow_token.clone(),
+                msg_id: 42,
+            },
+            CallbackAction::StageSummaryStopAudioConfirm {
+                flow_token: flow_token.clone(),
+                msg_id: 42,
+            },
         ];
         for action in all_actions {
             let encoded = action.encode();
@@ -759,6 +810,35 @@ mod tests {
                 "encoded too long for {minutes}m: {encoded}"
             );
             assert_eq!(CallbackAction::decode(&encoded).unwrap(), action);
+        }
+    }
+
+    #[test]
+    fn roundtrip_stage_summary_audio() {
+        let flow_token = "f-ab12c".to_string();
+        for msg_id in [1i32, 42, 99999] {
+            for action in [
+                CallbackAction::StageSummaryAudio {
+                    flow_token: flow_token.clone(),
+                    msg_id,
+                },
+                CallbackAction::StageSummaryStopAudio {
+                    flow_token: flow_token.clone(),
+                    msg_id,
+                },
+                CallbackAction::StageSummaryStopAudioConfirm {
+                    flow_token: flow_token.clone(),
+                    msg_id,
+                },
+            ] {
+                let encoded = action.encode();
+                assert!(
+                    encoded.len() <= 64,
+                    "encoded too long: {encoded}"
+                );
+                let decoded = CallbackAction::decode(&encoded).expect("decode failed");
+                assert_eq!(decoded, action);
+            }
         }
     }
 }

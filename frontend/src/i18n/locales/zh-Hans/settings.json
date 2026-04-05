@@ -225,6 +225,24 @@
           }
         }
       },
+      "tts": {
+        "title": "文字转语音",
+        "description": "为 Telegram 阶段摘要卡片配置音频合成。",
+        "model": {
+          "label": "TTS 模型",
+          "placeholder": "选择模型",
+          "helper": "用于合成音频的 Replicate 模型。"
+        },
+        "replicateApiToken": {
+          "label": "Replicate API 令牌",
+          "placeholder": "r8_...",
+          "helper": "来自 replicate.com 的 API 令牌。若留空，将回退到 REPLICATE_API_TOKEN 环境变量。"
+        },
+        "speed": {
+          "label": "播放速度",
+          "helper": "通过 FFmpeg 在发送前应用的音频倍速（0.5× – 2.0×）。"
+        }
+      },
       "mcpServer": {
         "enabled": {
           "label": "启用 MCP 服务器（Beta）",

@@ -3,7 +3,7 @@ use std::sync::Arc;
 use teloxide::{prelude::*, types::MessageId, utils::command::BotCommands};
 
 use super::{BotDialogue, CardRenderContext, TelegramBotService};
-use crate::services::telegram::{callback::CallbackAction, format, keyboard, state::DialogueState};
+use crate::services::telegram::{callback::CallbackAction, format, keyboard, notifier, state::DialogueState};
 
 #[derive(BotCommands, Clone)]
 #[command(rename_rule = "lowercase", description = "Commands:")]
@@ -462,6 +462,28 @@ pub(super) async fn handle_callback(
                 card_context,
             )
             .await?;
+        }
+        CallbackAction::StageSummaryAudio { flow_token, msg_id } => {
+            if let Some(tg) = notifier::get_context().await {
+                notifier::handle_stage_summary_audio(&tg, &flow_token, msg_id).await;
+            }
+        }
+        CallbackAction::StageSummaryStopAudio { flow_token, msg_id } => {
+            if let Some(tg) = notifier::get_context().await {
+                notifier::handle_stage_summary_stop_audio(&tg, &flow_token, msg_id).await;
+            }
+        }
+        CallbackAction::StageSummaryStopAudioConfirm { flow_token, msg_id } => {
+            let confirm_msg_id = q.message.as_ref().map(|m| m.id()).unwrap_or(MessageId(0));
+            if let Some(tg) = notifier::get_context().await {
+                notifier::handle_stage_summary_stop_audio_confirm(
+                    &tg,
+                    &flow_token,
+                    msg_id,
+                    confirm_msg_id,
+                )
+                .await;
+            }
         }
         CallbackAction::DismissInteraction
         | CallbackAction::Cancel

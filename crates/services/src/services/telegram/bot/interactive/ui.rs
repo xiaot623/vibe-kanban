@@ -297,7 +297,7 @@ mod tests {
     fn extracts_flow_token_from_stage_summary_reply_message() {
         let flow_token = "f-ab12c".to_string();
         let replied_message =
-            bot_message_with_keyboard(keyboard::stage_summary_reply_keyboard(&flow_token));
+            bot_message_with_keyboard(keyboard::stage_summary_reply_keyboard(&flow_token, 0));
         let reply_message = user_reply_message(replied_message);
 
         assert_eq!(
@@ -340,7 +340,7 @@ mod tests {
     fn ignores_replies_to_non_bot_messages() {
         let flow_token = "f-ab12c".to_string();
         let replied_message =
-            user_message_with_keyboard(keyboard::stage_summary_reply_keyboard(&flow_token));
+            user_message_with_keyboard(keyboard::stage_summary_reply_keyboard(&flow_token, 0));
         let reply_message = user_reply_message(replied_message);
 
         assert_eq!(

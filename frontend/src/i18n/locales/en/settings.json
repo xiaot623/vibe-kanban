@@ -225,6 +225,24 @@
           }
         }
       },
+      "tts": {
+        "title": "Text-to-Speech",
+        "description": "Configure audio synthesis for Telegram stage summary cards.",
+        "model": {
+          "label": "TTS Model",
+          "placeholder": "Select model",
+          "helper": "Replicate model used to synthesise audio."
+        },
+        "replicateApiToken": {
+          "label": "Replicate API Token",
+          "placeholder": "r8_...",
+          "helper": "API token from replicate.com. Falls back to the REPLICATE_API_TOKEN environment variable if left empty."
+        },
+        "speed": {
+          "label": "Playback Speed",
+          "helper": "Audio speed multiplier applied via FFmpeg before sending (0.5× – 2.0×)."
+        }
+      },
       "mcpServer": {
         "enabled": {
           "label": "Enable MCP server (Beta)",

@@ -254,6 +254,54 @@ impl SoundFile {
     }
 }
 
+/// TTS provider enum (only Replicate for v1).
+#[derive(Clone, Debug, Serialize, Deserialize, TS, EnumString, PartialEq, Eq)]
+#[ts(use_ts_enum)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+#[strum(serialize_all = "SCREAMING_SNAKE_CASE")]
+pub enum TtsProvider {
+    Replicate,
+}
+
+impl Default for TtsProvider {
+    fn default() -> Self {
+        TtsProvider::Replicate
+    }
+}
+
+fn default_tts_model() -> String {
+    "minimax/speech-2.8-turbo".to_string()
+}
+
+fn default_tts_speed() -> f32 {
+    1.0
+}
+
+/// Text-to-speech configuration.
+#[derive(Clone, Debug, Serialize, Deserialize, TS)]
+pub struct TtsConfig {
+    #[serde(default)]
+    pub provider: TtsProvider,
+    #[serde(default = "default_tts_model")]
+    pub model: String,
+    #[serde(default)]
+    pub replicate_api_token: Option<String>,
+    /// Playback speed multiplier applied via FFmpeg atempo filter (0.5 – 2.0).
+    #[serde(default = "default_tts_speed")]
+    pub speed: f32,
+}
+
+impl Default for TtsConfig {
+    fn default() -> Self {
+        Self {
+            provider: TtsProvider::default(),
+            model: default_tts_model(),
+            replicate_api_token: None,
+            speed: default_tts_speed(),
+        }
+    }
+}
+
 /// V2 Config - includes local network, telegram bot, and embedded MCP server settings
 #[derive(Clone, Debug, Serialize, Deserialize, TS)]
 pub struct Config {
@@ -302,6 +350,8 @@ pub struct Config {
     pub mcp_server: McpServerConfig,
     #[serde(default)]
     pub power_mode: PowerMode,
+    #[serde(default)]
+    pub tts: TtsConfig,
 }
 
 impl Default for Config {
@@ -380,6 +430,7 @@ impl From<super::v1::Config> for Config {
             telegram: TelegramConfig::default(),
             mcp_server: McpServerConfig::default(),
             power_mode: PowerMode::default(),
+            tts: TtsConfig::default(),
         }
     }
 }

@@ -10,6 +10,8 @@ use std::{
     vec,
 };
 
+use dashmap::DashMap;
+
 use db::{
     DBService,
     models::{
@@ -57,6 +59,14 @@ static RUN_FEED_WATCHERS: OnceLock<Arc<RwLock<HashMap<Uuid, RunFeedWatcherHandle
     OnceLock::new();
 static PLAN_REVIEW_MESSAGE_IDS: OnceLock<Arc<RwLock<PlanReviewMessageRegistry>>> = OnceLock::new();
 static RUNNING_MESSAGE_IDS: OnceLock<Arc<RwLock<RunningMessageRegistry>>> = OnceLock::new();
+
+/// Cache of TTS text keyed by (flow_token, msg_id) so the Audio handler can
+/// retrieve the assistant text that was shown in the stage summary card.
+static STAGE_SUMMARY_TTS_TEXT: OnceLock<DashMap<(String, i32), String>> = OnceLock::new();
+
+fn tts_text_cache() -> &'static DashMap<(String, i32), String> {
+    STAGE_SUMMARY_TTS_TEXT.get_or_init(DashMap::new)
+}
 
 #[derive(Debug, Default)]
 struct PlanReviewMessageRegistry {
@@ -139,7 +149,7 @@ pub async fn notify_flow_deleted(session_id: Uuid) {
     stop_run_feed_watcher(session_id).await;
 }
 
-async fn get_context() -> Option<TelegramContext> {
+pub async fn get_context() -> Option<TelegramContext> {
     let lock = TELEGRAM_CONTEXT.get()?;
     lock.read().await.clone()
 }
@@ -1332,6 +1342,7 @@ async fn emit_stage_summary(
             .as_ref()
             .map(|ctx| ctx.flow_token.clone()),
         is_daily_task,
+        None, // msg_id not known yet; will be filled after send
     );
     let sent_ids = send_split_telegram_card(tg, lines.join("\n"), summary_markup).await;
     if matches!(trigger, SummaryTrigger::ExecutionFinished)
@@ -1340,6 +1351,36 @@ async fn emit_stage_summary(
     {
         delete_running_messages_for_session(tg, session_id).await;
     }
+
+    // If we have a flow token and at least one sent message, retroactively edit the
+    // last card to include the correct msg_id in the Audio callback button.
+    if let Some(flow_token) = accumulator.flow_context.as_ref().map(|ctx| ctx.flow_token.clone())
+        && let Some(last_msg_id) = sent_ids.last().copied()
+        && matches!(
+            trigger,
+            SummaryTrigger::ExecutionFinished | SummaryTrigger::TaskLeftInProgress
+        )
+    {
+        let updated_markup = stage_summary_keyboard(
+            trigger,
+            Some(flow_token.clone()),
+            is_daily_task,
+            Some(last_msg_id.0),
+        );
+        if let Some(markup) = updated_markup {
+            let _ = tg
+                .bot
+                .edit_message_reply_markup(tg.chat_id, last_msg_id)
+                .reply_markup(markup)
+                .await;
+        }
+
+        // Cache the assistant text for the Audio handler to use.
+        if let Some(tts_text) = stage_summary_assistant_text(&changed.assistant_messages) {
+            tts_text_cache().insert((flow_token, last_msg_id.0), tts_text);
+        }
+    }
+
     accumulator.finalize_stage();
 }
 
@@ -1377,6 +1418,190 @@ fn append_telegraph_log_lines(lines: &mut Vec<String>, telegraph_urls: &[String]
     }
 }
 
+/// Extract the latest assistant text from `assistant_messages` for TTS synthesis.
+/// Returns `None` when the message list is empty or the last message is blank.
+pub fn stage_summary_assistant_text(assistant_messages: &[String]) -> Option<String> {
+    let text = assistant_messages.last()?.trim().to_string();
+    if text.is_empty() { None } else { Some(text) }
+}
+
+/// Handle "🔊 Audio" button: start async TTS synthesis for the stage summary card.
+pub async fn handle_stage_summary_audio(
+    tg: &TelegramContext,
+    flow_token: &str,
+    source_msg_id: i32,
+) {
+    use super::{audio_jobs, keyboard};
+    use crate::services::tts;
+
+    let key = audio_jobs::AudioJobKey {
+        flow_token: flow_token.to_string(),
+        source_message_id: MessageId(source_msg_id),
+    };
+
+    // If a job is already running, do nothing (button should have been swapped to Stop).
+    if audio_jobs::contains(&key).await {
+        return;
+    }
+
+    // Retrieve config and resolve TTS text from the card message content.
+    // We synthesise the flow_token itself as a fallback if we can't look up the card text.
+    let tts_config = {
+        let cfg = tg.config.read().await;
+        cfg.tts.clone()
+    };
+
+    // Check TTS is configured before touching the keyboard.
+    if tts::resolve_replicate_token(&tts_config).is_none() {
+        if let Err(err) = tg
+            .bot
+            .send_message(tg.chat_id, "TTS not configured: Replicate API token is missing.")
+            .await
+        {
+            tracing::warn!("Failed to send TTS not-configured notice: {err}");
+        }
+        return;
+    }
+
+    // Swap button to Stop immediately.
+    let stop_markup = keyboard::stage_summary_audio_running_keyboard(flow_token, source_msg_id);
+    let _ = tg
+        .bot
+        .edit_message_reply_markup(tg.chat_id, MessageId(source_msg_id))
+        .reply_markup(stop_markup)
+        .await;
+
+    // Try to fetch the card message text to use as TTS input.
+    // Look up the cache populated at card-send time; fall back to a descriptive placeholder.
+    let tts_text: String = tts_text_cache()
+        .get(&(flow_token.to_string(), source_msg_id))
+        .map(|v| v.clone())
+        .unwrap_or_else(|| format!("Stage summary for flow {flow_token}"));
+
+    // Register the job.
+    let cancel = audio_jobs::insert(key.clone()).await;
+
+    // Spawn async synthesis.
+    let tg = tg.clone();
+    let flow_token = flow_token.to_string();
+    let key_clone = key.clone();
+    tokio::spawn(async move {
+        let result = tts::synthesize(&tts_config, &tts_text, cancel.clone()).await;
+
+        match result {
+            Ok(output) => {
+                // Apply speed adjustment via FFmpeg if needed.
+                let speed = tts_config.speed;
+                let (send_path, speed_path) = match tts::apply_speed(&output.file_path, speed).await {
+                    Ok(p) if p != output.file_path => (p.clone(), Some(p)),
+                    Ok(p) => (p, None),
+                    Err(err) => {
+                        tracing::warn!("FFmpeg speed adjustment failed, using original: {err}");
+                        (output.file_path.clone(), None)
+                    }
+                };
+
+                // Send audio as voice reply to the source message.
+                use teloxide::types::{InputFile, ReplyParameters};
+                let voice = InputFile::file(send_path.clone());
+                let send_result = tg
+                    .bot
+                    .send_voice(tg.chat_id, voice)
+                    .reply_parameters(ReplyParameters::new(MessageId(source_msg_id)))
+                    .await;
+
+                // Clean up temp files.
+                let _ = tokio::fs::remove_file(&output.file_path).await;
+                if let Some(sp) = speed_path {
+                    let _ = tokio::fs::remove_file(&sp).await;
+                }
+
+                if let Err(err) = send_result {
+                    tracing::warn!("Failed to send TTS voice message: {err}");
+                }
+            }
+            Err(err) => {
+                tracing::warn!("TTS synthesis failed: {err}");
+            }
+        }
+
+        // Remove job from registry.
+        audio_jobs::remove(&key_clone).await;
+
+        // Restore the stage summary keyboard after audio completes, fails, or is cancelled.
+        let is_daily_task = match flow::resolve_flow_context(&tg.db.pool, &flow_token).await {
+            Ok(Some(flow_ctx)) => {
+                let task_project_id = match Task::find_by_id(&tg.db.pool, flow_ctx.task_id).await {
+                    Ok(Some(task)) => Some(task.project_id),
+                    Ok(None) => None,
+                    Err(err) => {
+                        tracing::warn!(
+                            "Failed to load task when restoring stage summary keyboard: {err}"
+                        );
+                        None
+                    }
+                };
+                is_daily_project_task(&tg, task_project_id).await
+            }
+            Ok(None) => false,
+            Err(err) => {
+                tracing::warn!(
+                    "Failed to resolve flow context when restoring stage summary keyboard: {err}"
+                );
+                false
+            }
+        };
+        let audio_markup = stage_summary_reply_keyboard_for_task(
+            &flow_token,
+            source_msg_id,
+            is_daily_task,
+        );
+        let _ = tg
+            .bot
+            .edit_message_reply_markup(tg.chat_id, MessageId(source_msg_id))
+            .reply_markup(audio_markup)
+            .await;
+    });
+}
+
+/// Handle "⏹ Stop" button: send a confirmation prompt.
+pub async fn handle_stage_summary_stop_audio(
+    tg: &TelegramContext,
+    flow_token: &str,
+    source_msg_id: i32,
+) {
+    use super::keyboard;
+    let confirm_markup = keyboard::stage_summary_stop_confirm_keyboard(flow_token, source_msg_id);
+    let _ = tg
+        .bot
+        .send_message(tg.chat_id, "Stop audio synthesis?")
+        .reply_markup(confirm_markup)
+        .await;
+}
+
+/// Handle "✅ Yes, stop" button: cancel the running job, delete the confirm message.
+pub async fn handle_stage_summary_stop_audio_confirm(
+    tg: &TelegramContext,
+    flow_token: &str,
+    source_msg_id: i32,
+    confirm_msg_id: MessageId,
+) {
+    use super::audio_jobs;
+
+    let key = audio_jobs::AudioJobKey {
+        flow_token: flow_token.to_string(),
+        source_message_id: MessageId(source_msg_id),
+    };
+
+    // Cancel the job (will trigger Cancelled error in the synthesis task).
+    if let Some(job) = audio_jobs::remove(&key).await {
+        job.cancel.cancel();
+    }
+
+    // Delete the confirmation message.
+    let _ = tg.bot.delete_message(tg.chat_id, confirm_msg_id).await;
+}
+
 async fn delete_running_messages_for_session(tg: &TelegramContext, session_id: Uuid) {
     let message_ids = take_running_message_ids(session_id).await;
     for message_id in message_ids {
@@ -1395,6 +1620,7 @@ fn stage_summary_keyboard(
     trigger: SummaryTrigger,
     flow_token: Option<String>,
     is_daily_task: bool,
+    msg_id: Option<i32>,
 ) -> Option<teloxide::types::InlineKeyboardMarkup> {
     if !matches!(
         trigger,
@@ -1404,11 +1630,24 @@ fn stage_summary_keyboard(
     }
 
     let flow_token = flow_token?;
-    Some(if is_daily_task {
-        keyboard::stage_summary_reply_done_keyboard(&flow_token)
+    let card_msg_id = msg_id.unwrap_or(0);
+    Some(stage_summary_reply_keyboard_for_task(
+        &flow_token,
+        card_msg_id,
+        is_daily_task,
+    ))
+}
+
+fn stage_summary_reply_keyboard_for_task(
+    flow_token: &str,
+    msg_id: i32,
+    is_daily_task: bool,
+) -> teloxide::types::InlineKeyboardMarkup {
+    if is_daily_task {
+        keyboard::stage_summary_reply_done_keyboard(flow_token, msg_id)
     } else {
-        keyboard::stage_summary_reply_keyboard(&flow_token)
-    })
+        keyboard::stage_summary_reply_keyboard(flow_token, msg_id)
+    }
 }
 
 async fn is_daily_project_task(tg: &TelegramContext, task_project_id: Option<Uuid>) -> bool {
@@ -1812,6 +2051,7 @@ mod tests {
             SummaryTrigger::ExecutionFinished,
             Some(flow_token.clone()),
             true,
+            Some(101),
         )
         .expect("keyboard should be present");
         let value = serde_json::to_value(markup).expect("keyboard should serialize");
@@ -1820,7 +2060,7 @@ mod tests {
             .and_then(Value::as_array)
             .expect("first row should be present");
 
-        assert_eq!(row.len(), 2);
+        assert_eq!(row.len(), 3);
         assert_eq!(
             CallbackAction::decode(
                 row[0]["callback_data"]
@@ -1837,7 +2077,15 @@ mod tests {
                     .as_str()
                     .expect("done callback should exist")
             ),
-            Some(CallbackAction::DoneTask { flow_token })
+            Some(CallbackAction::DoneTask { flow_token: flow_token.clone() })
+        );
+        assert_eq!(
+            CallbackAction::decode(
+                row[2]["callback_data"]
+                    .as_str()
+                    .expect("audio callback should exist")
+            ),
+            Some(CallbackAction::StageSummaryAudio { flow_token, msg_id: 101 })
         );
     }
 
@@ -1848,6 +2096,7 @@ mod tests {
             SummaryTrigger::TaskLeftInProgress,
             Some(flow_token.clone()),
             false,
+            Some(101),
         )
         .expect("keyboard should be present");
         let value = serde_json::to_value(markup).expect("keyboard should serialize");
@@ -1856,14 +2105,46 @@ mod tests {
             .and_then(Value::as_array)
             .expect("first row should be present");
 
-        assert_eq!(row.len(), 1);
+        assert_eq!(row.len(), 2);
         assert_eq!(
             CallbackAction::decode(
                 row[0]["callback_data"]
                     .as_str()
                     .expect("review callback should exist")
             ),
-            Some(CallbackAction::CreateReviewTask { flow_token })
+            Some(CallbackAction::CreateReviewTask { flow_token: flow_token.clone() })
+        );
+        assert_eq!(
+            CallbackAction::decode(
+                row[1]["callback_data"]
+                    .as_str()
+                    .expect("audio callback should exist")
+            ),
+            Some(CallbackAction::StageSummaryAudio { flow_token, msg_id: 101 })
+        );
+    }
+
+    #[test]
+    fn restored_stage_summary_keyboard_keeps_done_button_for_daily_task() {
+        let flow_token = "f-ab12c";
+        let markup = stage_summary_reply_keyboard_for_task(flow_token, 101, true);
+        let value = serde_json::to_value(markup).expect("keyboard should serialize");
+        let row = value["inline_keyboard"]
+            .get(0)
+            .and_then(Value::as_array)
+            .expect("first row should be present");
+
+        assert_eq!(row.len(), 3);
+        assert_eq!(row[1]["text"], "✅ Done");
+        assert_eq!(
+            CallbackAction::decode(
+                row[1]["callback_data"]
+                    .as_str()
+                    .expect("done callback should exist")
+            ),
+            Some(CallbackAction::DoneTask {
+                flow_token: flow_token.to_string(),
+            })
         );
     }
 
@@ -1874,6 +2155,7 @@ mod tests {
                 SummaryTrigger::NextAction,
                 Some("f-ab12c".to_string()),
                 true,
+                None,
             )
             .is_none()
         );

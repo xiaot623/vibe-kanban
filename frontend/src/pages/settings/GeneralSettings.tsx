@@ -26,6 +26,7 @@ import {
   PowerMode,
   SoundFile,
   ThemeMode,
+  TtsProvider,
   UiLanguage,
 } from 'shared/types';
 import { getLanguageOptions } from '@/i18n/languages';
@@ -169,6 +170,11 @@ export function GeneralSettings() {
       .filter((variant) => variant !== 'DEFAULT')
       .sort((a, b) => a.localeCompare(b));
   }, [draft?.telegram?.default_executor, profiles]);
+
+  const TTS_MODELS = [
+    'minimax/speech-2.8-turbo',
+    'qwen/qwen3-tts',
+  ] as const;
 
   const handleSave = async () => {
     if (!draft) return;
@@ -1192,6 +1198,128 @@ export function GeneralSettings() {
               </p>
             </div>
           )}
+
+          {/* TTS Settings */}
+          <div className="space-y-1 pt-2">
+            <div className="flex items-center gap-2">
+              <Volume2 className="h-4 w-4 text-muted-foreground" />
+              <h4 className="text-sm font-medium">
+                {t('settings.general.tts.title')}
+              </h4>
+            </div>
+            <p className="text-sm text-muted-foreground">
+              {t('settings.general.tts.description')}
+            </p>
+          </div>
+
+          <div className="space-y-2">
+            <Label htmlFor="tts-model">
+              {t('settings.general.tts.model.label')}
+            </Label>
+            <Select
+              value={draft?.tts?.model ?? 'minimax/speech-2.8-turbo'}
+              onValueChange={(value: string) =>
+                updateDraft({
+                  tts: {
+                    ...(draft?.tts ?? {
+                      provider: TtsProvider.REPLICATE,
+                      model: 'minimax/speech-2.8-turbo',
+                      replicate_api_token: null,
+                      speed: 1.0,
+                    }),
+                    model: value,
+                  },
+                })
+              }
+            >
+              <SelectTrigger id="tts-model">
+                <SelectValue
+                  placeholder={t('settings.general.tts.model.placeholder')}
+                />
+              </SelectTrigger>
+              <SelectContent>
+                {TTS_MODELS.map((model) => (
+                  <SelectItem key={model} value={model}>
+                    {model}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+            <p className="text-sm text-muted-foreground">
+              {t('settings.general.tts.model.helper')}
+            </p>
+          </div>
+
+          <div className="space-y-2">
+            <Label htmlFor="tts-replicate-token">
+              {t('settings.general.tts.replicateApiToken.label')}
+            </Label>
+            <Input
+              id="tts-replicate-token"
+              type="password"
+              value={draft?.tts?.replicate_api_token ?? ''}
+              onChange={(e) =>
+                updateDraft({
+                  tts: {
+                    ...(draft?.tts ?? {
+                      provider: TtsProvider.REPLICATE,
+                      model: 'minimax/speech-2.8-turbo',
+                      replicate_api_token: null,
+                      speed: 1.0,
+                    }),
+                    replicate_api_token: e.target.value || null,
+                  },
+                })
+              }
+              placeholder={t(
+                'settings.general.tts.replicateApiToken.placeholder'
+              )}
+            />
+            <p className="text-sm text-muted-foreground">
+              {t('settings.general.tts.replicateApiToken.helper')}
+            </p>
+          </div>
+
+          <div className="space-y-2">
+            <div className="flex items-center justify-between">
+              <Label htmlFor="tts-speed">
+                {t('settings.general.tts.speed.label')}
+              </Label>
+              <span className="text-sm font-medium tabular-nums">
+                {(draft?.tts?.speed ?? 1.0).toFixed(2)}×
+              </span>
+            </div>
+            <input
+              id="tts-speed"
+              type="range"
+              min={0.5}
+              max={2.0}
+              step={0.05}
+              value={draft?.tts?.speed ?? 1.0}
+              onChange={(e) =>
+                updateDraft({
+                  tts: {
+                    ...(draft?.tts ?? {
+                      provider: TtsProvider.REPLICATE,
+                      model: 'minimax/speech-2.8-turbo',
+                      replicate_api_token: null,
+                      speed: 1.0,
+                    }),
+                    speed: parseFloat(e.target.value),
+                  },
+                })
+              }
+              className="w-full accent-primary"
+            />
+            <div className="flex justify-between text-xs text-muted-foreground">
+              <span>0.5×</span>
+              <span>1.0×</span>
+              <span>2.0×</span>
+            </div>
+            <p className="text-sm text-muted-foreground">
+              {t('settings.general.tts.speed.helper')}
+            </p>
+          </div>
         </CardContent>
       </Card>
 

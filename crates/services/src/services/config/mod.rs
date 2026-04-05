@@ -42,6 +42,8 @@ pub type DailyModeConfig = versions::v2::DailyModeConfig;
 pub type TelegramConfig = versions::v2::TelegramConfig;
 pub type McpServerConfig = versions::v2::McpServerConfig;
 pub type PowerMode = versions::v2::PowerMode;
+pub type TtsConfig = versions::v2::TtsConfig;
+pub type TtsProvider = versions::v2::TtsProvider;
 
 /// Load config from file, creating default if not exists
 /// Returns ConfigLoadResult which includes the config and optionally a parse error

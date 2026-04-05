@@ -321,17 +321,26 @@ pub fn tool_approval_keyboard(approval_id: &str) -> InlineKeyboardMarkup {
 }
 
 /// Build review buttons shown after stage summaries.
-pub fn stage_summary_reply_keyboard(flow_token: &str) -> InlineKeyboardMarkup {
-    InlineKeyboardMarkup::new(vec![vec![btn(
-        "🔍 Review",
-        CallbackAction::CreateReviewTask {
-            flow_token: flow_token.to_string(),
-        },
-    )]])
+pub fn stage_summary_reply_keyboard(flow_token: &str, msg_id: i32) -> InlineKeyboardMarkup {
+    InlineKeyboardMarkup::new(vec![vec![
+        btn(
+            "🔍 Review",
+            CallbackAction::CreateReviewTask {
+                flow_token: flow_token.to_string(),
+            },
+        ),
+        btn(
+            "🔊 Audio",
+            CallbackAction::StageSummaryAudio {
+                flow_token: flow_token.to_string(),
+                msg_id,
+            },
+        ),
+    ]])
 }
 
 /// Build review + done buttons shown after Daily task stage summaries.
-pub fn stage_summary_reply_done_keyboard(flow_token: &str) -> InlineKeyboardMarkup {
+pub fn stage_summary_reply_done_keyboard(flow_token: &str, msg_id: i32) -> InlineKeyboardMarkup {
     InlineKeyboardMarkup::new(vec![vec![
         btn(
             "🔍 Review",
@@ -345,6 +354,38 @@ pub fn stage_summary_reply_done_keyboard(flow_token: &str) -> InlineKeyboardMark
                 flow_token: flow_token.to_string(),
             },
         ),
+        btn(
+            "🔊 Audio",
+            CallbackAction::StageSummaryAudio {
+                flow_token: flow_token.to_string(),
+                msg_id,
+            },
+        ),
+    ]])
+}
+
+/// Build the keyboard shown while audio synthesis is running (replaces Audio button).
+pub fn stage_summary_audio_running_keyboard(flow_token: &str, msg_id: i32) -> InlineKeyboardMarkup {
+    InlineKeyboardMarkup::new(vec![vec![btn(
+        "⏹ Stop",
+        CallbackAction::StageSummaryStopAudio {
+            flow_token: flow_token.to_string(),
+            msg_id,
+        },
+    )]])
+}
+
+/// Build the stop-confirmation keyboard (first Stop click).
+pub fn stage_summary_stop_confirm_keyboard(flow_token: &str, msg_id: i32) -> InlineKeyboardMarkup {
+    InlineKeyboardMarkup::new(vec![vec![
+        btn(
+            "✅ Yes, stop",
+            CallbackAction::StageSummaryStopAudioConfirm {
+                flow_token: flow_token.to_string(),
+                msg_id,
+            },
+        ),
+        btn("❌ Cancel", CallbackAction::DismissInteraction),
     ]])
 }
 
@@ -567,29 +608,10 @@ mod tests {
     }
 
     #[test]
-    fn stage_summary_reply_keyboard_contains_only_review_button() {
+    fn stage_summary_reply_keyboard_contains_review_and_audio_buttons() {
         let flow_token = "f-ab12c";
-        let keyboard = stage_summary_reply_keyboard(flow_token);
-        let value = serde_json::to_value(keyboard).expect("keyboard should serialize");
-        let row = value["inline_keyboard"]
-            .get(0)
-            .and_then(Value::as_array)
-            .expect("first row should exist");
-
-        assert_eq!(row.len(), 1);
-        assert_eq!(row[0]["text"], "🔍 Review");
-        assert_eq!(
-            CallbackAction::decode(callback_data(&row[0])),
-            Some(CallbackAction::CreateReviewTask {
-                flow_token: flow_token.to_string(),
-            })
-        );
-    }
-
-    #[test]
-    fn stage_summary_reply_done_keyboard_contains_review_and_done_buttons() {
-        let flow_token = "f-ab12c";
-        let keyboard = stage_summary_reply_done_keyboard(flow_token);
+        let msg_id = 101i32;
+        let keyboard = stage_summary_reply_keyboard(flow_token, msg_id);
         let value = serde_json::to_value(keyboard).expect("keyboard should serialize");
         let row = value["inline_keyboard"]
             .get(0)
@@ -604,11 +626,48 @@ mod tests {
                 flow_token: flow_token.to_string(),
             })
         );
+        assert_eq!(row[1]["text"], "🔊 Audio");
+        assert_eq!(
+            CallbackAction::decode(callback_data(&row[1])),
+            Some(CallbackAction::StageSummaryAudio {
+                flow_token: flow_token.to_string(),
+                msg_id,
+            })
+        );
+    }
+
+    #[test]
+    fn stage_summary_reply_done_keyboard_contains_review_done_audio_buttons() {
+        let flow_token = "f-ab12c";
+        let msg_id = 101i32;
+        let keyboard = stage_summary_reply_done_keyboard(flow_token, msg_id);
+        let value = serde_json::to_value(keyboard).expect("keyboard should serialize");
+        let row = value["inline_keyboard"]
+            .get(0)
+            .and_then(Value::as_array)
+            .expect("first row should exist");
+
+        assert_eq!(row.len(), 3);
+        assert_eq!(row[0]["text"], "🔍 Review");
+        assert_eq!(
+            CallbackAction::decode(callback_data(&row[0])),
+            Some(CallbackAction::CreateReviewTask {
+                flow_token: flow_token.to_string(),
+            })
+        );
         assert_eq!(row[1]["text"], "✅ Done");
         assert_eq!(
             CallbackAction::decode(callback_data(&row[1])),
             Some(CallbackAction::DoneTask {
                 flow_token: flow_token.to_string(),
+            })
+        );
+        assert_eq!(row[2]["text"], "🔊 Audio");
+        assert_eq!(
+            CallbackAction::decode(callback_data(&row[2])),
+            Some(CallbackAction::StageSummaryAudio {
+                flow_token: flow_token.to_string(),
+                msg_id,
             })
         );
     }
@@ -639,9 +698,12 @@ mod tests {
     #[test]
     fn stage_summary_keyboards_callback_data_stays_within_limit() {
         let flow_token = "f-ab12c";
+        let msg_id = 101i32;
         for keyboard in [
-            stage_summary_reply_keyboard(flow_token),
-            stage_summary_reply_done_keyboard(flow_token),
+            stage_summary_reply_keyboard(flow_token, msg_id),
+            stage_summary_reply_done_keyboard(flow_token, msg_id),
+            stage_summary_audio_running_keyboard(flow_token, msg_id),
+            stage_summary_stop_confirm_keyboard(flow_token, msg_id),
         ] {
             let value = serde_json::to_value(keyboard).expect("keyboard should serialize");
             let row = value["inline_keyboard"]

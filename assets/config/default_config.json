@@ -59,5 +59,10 @@
     "default_executor": "CLAUDE_CODE",
     "default_mode": "DEFAULT"
   },
-  "power_mode": "SYSTEM_DEFAULT"
+  "power_mode": "SYSTEM_DEFAULT",
+  "tts": {
+    "provider": "REPLICATE",
+    "model": "minimax/speech-2.8-turbo",
+    "replicate_api_token": null
+  }
 }
