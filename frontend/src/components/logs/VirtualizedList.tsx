@@ -68,6 +68,9 @@ const ItemContent: VirtuosoMessageListProps<
         executionProcessId={data.executionProcessId}
         taskAttempt={attempt}
         task={task}
+        plainTextFallbackOnMarkdownError={
+          data.plainTextFallbackOnMarkdownError
+        }
       />
     );
   }

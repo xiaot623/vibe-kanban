@@ -11,10 +11,12 @@ const UserMessage = ({
   content,
   executionProcessId,
   taskAttempt,
+  plainTextFallbackOnMarkdownError,
 }: {
   content: string;
   executionProcessId?: string;
   taskAttempt?: WorkspaceWithSession;
+  plainTextFallbackOnMarkdownError?: boolean;
 }) => {
   const [isEditing, setIsEditing] = useState(false);
   const { capabilities } = useUserSystem();
@@ -70,6 +72,7 @@ const UserMessage = ({
               className="whitespace-pre-wrap break-words flex flex-col gap-1 font-light"
               taskAttemptId={taskAttempt?.id}
               onEdit={canRetry ? startRetry : undefined}
+              plainTextFallbackOnRenderError={plainTextFallbackOnMarkdownError}
             />
           )}
         </div>

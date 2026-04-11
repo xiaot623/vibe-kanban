@@ -1,4 +1,4 @@
-import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { Component, memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   MDXEditor,
   type MDXEditorMethods,
@@ -54,6 +54,55 @@ export interface NormalizedComment {
 /** Markdown string representing the editor content */
 export type SerializedEditorState = string;
 
+/**
+ * Error boundary that catches render errors from MDXEditor and falls back to
+ * displaying the raw plain text. Only active when `active` prop is true.
+ */
+interface MarkdownErrorBoundaryProps {
+  active: boolean;
+  plainText: string;
+  className?: string;
+  children: React.ReactNode;
+}
+
+interface MarkdownErrorBoundaryState {
+  hasError: boolean;
+}
+
+class MarkdownErrorBoundary extends Component<
+  MarkdownErrorBoundaryProps,
+  MarkdownErrorBoundaryState
+> {
+  constructor(props: MarkdownErrorBoundaryProps) {
+    super(props);
+    this.state = { hasError: false };
+  }
+
+  static getDerivedStateFromError(): MarkdownErrorBoundaryState {
+    return { hasError: true };
+  }
+
+  componentDidCatch(error: Error) {
+    console.warn('[MarkdownEditor] MDXEditor render error, falling back to plain text:', error);
+  }
+
+  render() {
+    if (this.props.active && this.state.hasError) {
+      return (
+        <pre
+          className={cn(
+            'whitespace-pre-wrap break-words font-sans text-base leading-6 text-foreground',
+            this.props.className
+          )}
+        >
+          {this.props.plainText}
+        </pre>
+      );
+    }
+    return this.props.children;
+  }
+}
+
 type MarkdownEditorProps = {
   placeholder?: string;
   /** Markdown string representing the editor content */
@@ -100,6 +149,12 @@ type MarkdownEditorProps = {
    * Accepted for API compat; not implemented in MDXEditor migration.
    */
   onCodeClick?: (fullPath: string) => void;
+  /**
+   * When true, if MDXEditor throws a render error the component falls back to
+   * displaying `value` as raw plain text. Defaults to false.
+   * Only meaningful when `disabled` is also true (read-only mode).
+   */
+  plainTextFallbackOnRenderError?: boolean;
 };
 
 function MarkdownEditor(props: MarkdownEditorProps) {
@@ -118,6 +173,7 @@ function MarkdownEditor(props: MarkdownEditorProps) {
     onShiftCmdEnter,
     isFullscreen = false,
     onImageUploaded,
+    plainTextFallbackOnRenderError = false,
   } = props;
   const editorRef = useRef<MDXEditorMethods>(null);
   const lastMarkdownRef = useRef(value);
@@ -352,57 +408,63 @@ function MarkdownEditor(props: MarkdownEditorProps) {
   // Wrap with action buttons in read-only mode
   if (disabled) {
     return (
-      <div className="relative group">
-        <div className="sticky top-0 right-2 z-10 pointer-events-none h-0">
-          <div className="flex justify-end gap-1 opacity-0 group-hover:opacity-100 transition-opacity duration-150">
-            {/* Copy button */}
-            <Button
-              type="button"
-              aria-label={copied ? 'Copied!' : 'Copy as Markdown'}
-              title={copied ? 'Copied!' : 'Copy as Markdown'}
-              variant="icon"
-              size="icon"
-              onClick={handleCopy}
-              className="pointer-events-auto p-2 bg-muted h-8 w-8"
-            >
-              {copied ? (
-                <Check className="w-4 h-4 text-success" />
-              ) : (
-                <Clipboard className="w-4 h-4 text-muted-foreground" />
+      <MarkdownErrorBoundary
+        active={plainTextFallbackOnRenderError}
+        plainText={value}
+        className={className}
+      >
+        <div className="relative group">
+          <div className="sticky top-0 right-2 z-10 pointer-events-none h-0">
+            <div className="flex justify-end gap-1 opacity-0 group-hover:opacity-100 transition-opacity duration-150">
+              {/* Copy button */}
+              <Button
+                type="button"
+                aria-label={copied ? 'Copied!' : 'Copy as Markdown'}
+                title={copied ? 'Copied!' : 'Copy as Markdown'}
+                variant="icon"
+                size="icon"
+                onClick={handleCopy}
+                className="pointer-events-auto p-2 bg-muted h-8 w-8"
+              >
+                {copied ? (
+                  <Check className="w-4 h-4 text-success" />
+                ) : (
+                  <Clipboard className="w-4 h-4 text-muted-foreground" />
+                )}
+              </Button>
+              {/* Edit button - only if onEdit provided */}
+              {onEdit && (
+                <Button
+                  type="button"
+                  aria-label="Edit"
+                  title="Edit"
+                  variant="icon"
+                  size="icon"
+                  onClick={onEdit}
+                  className="pointer-events-auto p-2 bg-muted h-8 w-8"
+                >
+                  <Pencil className="w-4 h-4 text-muted-foreground" />
+                </Button>
               )}
-            </Button>
-            {/* Edit button - only if onEdit provided */}
-            {onEdit && (
-              <Button
-                type="button"
-                aria-label="Edit"
-                title="Edit"
-                variant="icon"
-                size="icon"
-                onClick={onEdit}
-                className="pointer-events-auto p-2 bg-muted h-8 w-8"
-              >
-                <Pencil className="w-4 h-4 text-muted-foreground" />
-              </Button>
-            )}
-            {/* Delete button - only if onDelete provided */}
-            {onDelete && (
-              <Button
-                type="button"
-                aria-label="Delete"
-                title="Delete"
-                variant="icon"
-                size="icon"
-                onClick={onDelete}
-                className="pointer-events-auto p-2 bg-muted h-8 w-8"
-              >
-                <Trash2 className="w-4 h-4 text-muted-foreground" />
-              </Button>
-            )}
+              {/* Delete button - only if onDelete provided */}
+              {onDelete && (
+                <Button
+                  type="button"
+                  aria-label="Delete"
+                  title="Delete"
+                  variant="icon"
+                  size="icon"
+                  onClick={onDelete}
+                  className="pointer-events-auto p-2 bg-muted h-8 w-8"
+                >
+                  <Trash2 className="w-4 h-4 text-muted-foreground" />
+                </Button>
+              )}
+            </div>
           </div>
+          {editorContent}
         </div>
-        {editorContent}
-      </div>
+      </MarkdownErrorBoundary>
     );
   }
 

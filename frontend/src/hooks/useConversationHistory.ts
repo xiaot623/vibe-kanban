@@ -20,6 +20,8 @@ import {
 export type PatchTypeWithKey = PatchType & {
   patchKey: string;
   executionProcessId: string;
+  /** When true, the rendering layer should fall back to plain text if MDXEditor fails to render. */
+  plainTextFallbackOnMarkdownError?: boolean;
 };
 
 export type AddEntryType = 'initial' | 'running' | 'historic' | 'plan';
@@ -416,7 +418,7 @@ export const useConversationHistory = ({
     patch: PatchType,
     executionProcessId: string,
     index: number | 'user'
-  ) => {
+  ): PatchTypeWithKey => {
     return {
       ...patch,
       patchKey: `${executionProcessId}:${index}`,
@@ -497,6 +499,14 @@ export const useConversationHistory = ({
             p.executionProcess.id,
             'user'
           );
+          // Follow-up prompts can contain content that MDXEditor can't render;
+          // flag them so the UI can fall back to plain text on render error.
+          if (
+            p.executionProcess.executor_action.typ.type ===
+            'CodingAgentFollowUpRequest'
+          ) {
+            userPatchTypeWithKey.plainTextFallbackOnMarkdownError = true;
+          }
           entries.push(userPatchTypeWithKey);
 
           // Remove all coding agent added user messages, replace with our custom one

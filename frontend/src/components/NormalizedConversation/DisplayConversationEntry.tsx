@@ -50,6 +50,7 @@ type Props = {
   executionProcessId?: string;
   taskAttempt?: WorkspaceWithSession;
   task?: TaskWithAttemptStatus;
+  plainTextFallbackOnMarkdownError?: boolean;
 };
 
 type FileEditAction = Extract<ActionType, { action: 'file_edit' }>;
@@ -700,6 +701,7 @@ function DisplayConversationEntry({
   executionProcessId,
   taskAttempt,
   task,
+  plainTextFallbackOnMarkdownError,
 }: Props) {
   const { t } = useTranslation('common');
   const isNormalizedEntry = (
@@ -747,6 +749,7 @@ function DisplayConversationEntry({
         content={entry.content}
         executionProcessId={executionProcessId}
         taskAttempt={taskAttempt}
+        plainTextFallbackOnMarkdownError={plainTextFallbackOnMarkdownError}
       />
     );
   }
