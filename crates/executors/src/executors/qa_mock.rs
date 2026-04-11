@@ -8,7 +8,6 @@
 use std::{path::Path, process::Stdio, sync::Arc};
 
 use async_trait::async_trait;
-use command_group::AsyncCommandGroup;
 use rand::seq::SliceRandom as _;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -17,6 +16,7 @@ use ts_rs::TS;
 use workspace_utils::msg_store::MsgStore;
 
 use crate::{
+    command::group_spawn_suppressed,
     env::ExecutionEnv,
     executors::{
         ExecutorError, SpawnedChild, StandardCodingAgentExecutor,
@@ -68,7 +68,7 @@ impl StandardCodingAgentExecutor for QaMockExecutor {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
 
-        let child = cmd.group_spawn().map_err(ExecutorError::Io)?;
+        let child = group_spawn_suppressed(&mut cmd).map_err(ExecutorError::Io)?;
         Ok(SpawnedChild::from(child))
     }
 
@@ -337,6 +337,8 @@ fn generate_mock_logs(prompt: &str) -> Vec<String> {
             error: None,
             num_turns: Some(3),
             session_id: Some(session_id),
+            model_usage: None,
+            usage: None,
         },
     ];
 

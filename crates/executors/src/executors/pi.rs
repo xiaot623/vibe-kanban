@@ -9,7 +9,6 @@ use std::{
 
 use async_trait::async_trait;
 use chrono::{Duration, Utc};
-use command_group::AsyncCommandGroup;
 use derivative::Derivative;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -37,7 +36,7 @@ use crate::{
     approvals::{ExecutorApprovalError, ExecutorApprovalService},
     command::{
         CmdOverrides, CommandBuildError, CommandBuilder, CommandParts, apply_overrides,
-        env_command_or_default, format_command_for_log,
+        env_command_or_default, format_command_for_log, group_spawn_suppressed,
     },
     env::ExecutionEnv,
     executors::{
@@ -152,7 +151,7 @@ impl Pi {
             .with_profile(&self.cmd)
             .apply_to_command(&mut command);
 
-        let mut child = command.group_spawn()?;
+        let mut child = group_spawn_suppressed(&mut command)?;
         let child_stdout = child.inner().stdout.take().ok_or_else(|| {
             ExecutorError::Io(io::Error::other("Pi process missing stdout for RPC"))
         })?;

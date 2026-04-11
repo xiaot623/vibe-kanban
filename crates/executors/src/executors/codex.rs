@@ -47,7 +47,6 @@ use codex_protocol::{
     },
     openai_models::ReasoningEffort as CodexReasoningEffort,
 };
-use command_group::AsyncCommandGroup;
 use derivative::Derivative;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -67,7 +66,7 @@ use crate::{
     approvals::ExecutorApprovalService,
     command::{
         CmdOverrides, CommandBuildError, CommandBuilder, CommandParts, apply_overrides,
-        env_command_or_default, format_command_for_log,
+        env_command_or_default, format_command_for_log, group_spawn_suppressed,
     },
     env::ExecutionEnv,
     executors::{
@@ -506,7 +505,7 @@ impl Codex {
             .with_profile(&self.cmd)
             .apply_to_command(&mut process);
 
-        let mut child = process.group_spawn()?;
+        let mut child = group_spawn_suppressed(&mut process)?;
 
         let child_stdout = child.inner().stdout.take().ok_or_else(|| {
             ExecutorError::Io(std::io::Error::other("Codex app server missing stdout"))

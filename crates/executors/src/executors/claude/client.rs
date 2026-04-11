@@ -5,6 +5,7 @@ use workspace_utils::approvals::ApprovalStatus;
 
 use crate::{
     approvals::{ExecutorApprovalError, ExecutorApprovalService},
+    command::suppress_windows_command_window,
     env::RepoContext,
     executors::{
         ExecutorError,
@@ -246,12 +247,14 @@ async fn check_git_status(repo_context: &RepoContext) -> serde_json::Value {
             continue;
         }
 
-        let output = Command::new("git")
+        let mut command = Command::new("git");
+        command
             .args(["status", "--porcelain"])
             .current_dir(repo_path)
-            .env("GIT_TERMINAL_PROMPT", "0")
-            .output()
-            .await;
+            .env("GIT_TERMINAL_PROMPT", "0");
+        suppress_windows_command_window(&mut command);
+
+        let output = command.output().await;
 
         if let Ok(out) = output
             && !out.stdout.is_empty()

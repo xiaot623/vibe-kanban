@@ -10,7 +10,7 @@ use std::{
 
 use agent_client_protocol as proto;
 use agent_client_protocol::Agent as _;
-use command_group::{AsyncCommandGroup, AsyncGroupChild};
+use command_group::AsyncGroupChild;
 use futures::StreamExt;
 use tokio::{io::AsyncWriteExt, process::Command, sync::mpsc};
 use tokio_util::{
@@ -23,7 +23,7 @@ use workspace_utils::{approvals::ApprovalStatus, stream_lines::LinesStreamExt};
 use super::{AcpClient, SessionManager};
 use crate::{
     approvals::ExecutorApprovalService,
-    command::{CmdOverrides, CommandParts, format_command_for_log},
+    command::{CmdOverrides, CommandParts, format_command_for_log, group_spawn_suppressed},
     env::ExecutionEnv,
     executors::{ExecutorError, ExecutorExitResult, SpawnedChild, acp::AcpEvent},
 };
@@ -100,7 +100,7 @@ impl AcpAgentHarness {
             .with_profile(cmd_overrides)
             .apply_to_command(&mut command);
 
-        let mut child = command.group_spawn()?;
+        let mut child = group_spawn_suppressed(&mut command)?;
 
         let (exit_tx, exit_rx) = tokio::sync::oneshot::channel::<ExecutorExitResult>();
         Self::bootstrap_acp_connection(
@@ -154,7 +154,7 @@ impl AcpAgentHarness {
             .with_profile(cmd_overrides)
             .apply_to_command(&mut command);
 
-        let mut child = command.group_spawn()?;
+        let mut child = group_spawn_suppressed(&mut command)?;
 
         let (exit_tx, exit_rx) = tokio::sync::oneshot::channel::<ExecutorExitResult>();
         Self::bootstrap_acp_connection(

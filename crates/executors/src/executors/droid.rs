@@ -1,7 +1,6 @@
 use std::{path::Path, process::Stdio, sync::Arc};
 
 use async_trait::async_trait;
-use command_group::AsyncCommandGroup;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use strum_macros::AsRefStr;
@@ -10,7 +9,10 @@ use ts_rs::TS;
 use workspace_utils::msg_store::MsgStore;
 
 use crate::{
-    command::{CommandBuildError, CommandBuilder, CommandParts, format_command_for_log},
+    command::{
+        CommandBuildError, CommandBuilder, CommandParts, format_command_for_log,
+        group_spawn_suppressed,
+    },
     env::ExecutionEnv,
     executors::{
         AppendPrompt, AvailabilityInfo, ExecutorError, SpawnedChild, StandardCodingAgentExecutor,
@@ -134,7 +136,7 @@ async fn spawn_droid(
         .with_profile(cmd_overrides)
         .apply_to_command(&mut command);
 
-    let mut child = command.group_spawn()?;
+    let mut child = group_spawn_suppressed(&mut command)?;
 
     if let Some(mut stdin) = child.inner().stdin.take() {
         stdin.write_all(prompt.as_bytes()).await?;

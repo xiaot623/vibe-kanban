@@ -11,6 +11,33 @@ use workspace_utils::shell::{resolve_executable_path, resolve_executable_path_bl
 
 use crate::executors::ExecutorError;
 
+#[cfg(windows)]
+const CREATE_NO_WINDOW: u32 = 0x08000000;
+
+pub fn suppress_windows_command_window(command: &mut tokio::process::Command) {
+    #[cfg(windows)]
+    command.creation_flags(CREATE_NO_WINDOW);
+
+    #[cfg(not(windows))]
+    let _ = command;
+}
+
+pub fn group_spawn_suppressed(
+    command: &mut tokio::process::Command,
+) -> std::io::Result<command_group::AsyncGroupChild> {
+    use command_group::AsyncCommandGroup;
+
+    #[cfg(windows)]
+    {
+        command.group().creation_flags(CREATE_NO_WINDOW).spawn()
+    }
+
+    #[cfg(not(windows))]
+    {
+        command.group_spawn()
+    }
+}
+
 #[derive(Debug, Error)]
 pub enum CommandBuildError {
     #[error("base command cannot be parsed: {0}")]
