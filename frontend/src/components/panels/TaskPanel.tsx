@@ -69,7 +69,6 @@ const TaskPanel = ({ task }: TaskPanelProps) => {
     );
   }
 
-  const titleContent = `# ${task.title || 'Task'}`;
   const descriptionContent = task.description || '';
 
   const attemptColumns: ColumnDef<WorkspaceWithSession>[] = [
@@ -106,8 +105,8 @@ const TaskPanel = ({ task }: TaskPanelProps) => {
     <NewCardContent>
       <div className="h-full max-h-[calc(100vh-8rem)] overflow-y-auto p-6">
         <div className="mx-auto w-full max-w-[50rem] space-y-10">
-          <div className="space-y-3">
-            <MarkdownEditor value={titleContent} disabled taskId={task.id} />
+          <div className="space-y-1">
+            <h1 className="text-2xl font-semibold">{task.title || 'Task'}</h1>
             {descriptionContent && (
               <MarkdownEditor
                 value={descriptionContent}
