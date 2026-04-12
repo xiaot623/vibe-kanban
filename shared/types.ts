@@ -372,6 +372,8 @@ export type TtsConfig = { provider: TtsProvider, model: string, replicate_api_to
 
 export type McpServerConfig = { enabled: boolean, port: number, };
 
+export type ProjectOpenAiApiConfig = { enabled: boolean, port: number, };
+
 export type GitBranch = { name: string, is_current: boolean, is_remote: boolean, last_commit_date: Date, };
 
 export type QueuedMessage = { 

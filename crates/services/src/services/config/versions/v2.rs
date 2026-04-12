@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::{collections::HashMap, path::PathBuf};
 
 use executors::profile::ExecutorProfileId;
 use serde::{Deserialize, Serialize};
@@ -63,6 +63,27 @@ impl Default for TelegramConfig {
 
 fn default_mcp_server_port() -> u16 {
     45677
+}
+
+fn default_openai_api_port() -> u16 {
+    3000
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct ProjectOpenAiApiConfig {
+    pub enabled: bool,
+    #[serde(default = "default_openai_api_port")]
+    pub port: u16,
+}
+
+impl Default for ProjectOpenAiApiConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            port: default_openai_api_port(),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, TS)]
@@ -352,6 +373,8 @@ pub struct Config {
     pub power_mode: PowerMode,
     #[serde(default)]
     pub tts: TtsConfig,
+    #[serde(default)]
+    pub openai_compatible_api_projects: HashMap<String, ProjectOpenAiApiConfig>,
 }
 
 impl Default for Config {
@@ -431,6 +454,7 @@ impl From<super::v1::Config> for Config {
             mcp_server: McpServerConfig::default(),
             power_mode: PowerMode::default(),
             tts: TtsConfig::default(),
+            openai_compatible_api_projects: HashMap::new(),
         }
     }
 }

@@ -39,9 +39,14 @@ pub mod pty;
 /// Shared handle for the MCP HTTP server task, allowing start/stop lifecycle management.
 pub type McpServerHandle = Arc<Mutex<Option<tokio::task::JoinHandle<()>>>>;
 
+/// Shared handle for per-project OpenAI-compatible API servers.
+/// Maps project_id (as String) -> JoinHandle for the server task.
+pub type OpenAiProjectServerHandles = Arc<Mutex<HashMap<String, tokio::task::JoinHandle<()>>>>;
+
 #[derive(Clone)]
 pub struct LocalDeployment {
     mcp_server_handle: McpServerHandle,
+    openai_project_server_handles: OpenAiProjectServerHandles,
     config: Arc<RwLock<Config>>,
     /// If the config file failed to parse, this contains the error message
     config_parse_error: Arc<RwLock<Option<String>>>,
@@ -186,6 +191,7 @@ impl Deployment for LocalDeployment {
 
         let deployment = Self {
             mcp_server_handle: Arc::new(Mutex::new(None)),
+            openai_project_server_handles: Arc::new(Mutex::new(HashMap::new())),
             config,
             config_parse_error,
             user_id,
@@ -305,6 +311,10 @@ impl LocalDeployment {
 
     pub fn mcp_server_handle(&self) -> &McpServerHandle {
         &self.mcp_server_handle
+    }
+
+    pub fn openai_project_server_handles(&self) -> &OpenAiProjectServerHandles {
+        &self.openai_project_server_handles
     }
 
     pub fn cron_scheduler(&self) -> &CronScheduler<LocalContainerService> {

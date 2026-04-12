@@ -20,13 +20,14 @@ use db::models::{
 use deployment::Deployment;
 use futures_util::{SinkExt, StreamExt, TryStreamExt};
 use services::services::{
+    config::{save_config_to_file, ProjectOpenAiApiConfig},
     cron_tasks::{
         CronTaskConfig, CronTaskError, load_project_cron_config, save_project_cron_config,
     },
     file_search::SearchQuery,
     project::ProjectServiceError,
 };
-use utils::response::ApiResponse;
+use utils::{assets::config_path, response::ApiResponse};
 use uuid::Uuid;
 
 use crate::{DeploymentImpl, error::ApiError, middleware::load_project_middleware};
@@ -154,6 +155,8 @@ pub async fn delete_project(
     Extension(project): Extension<Project>,
     State(deployment): State<DeploymentImpl>,
 ) -> Result<ResponseJson<ApiResponse<()>>, StatusCode> {
+    let project_id = project.id.to_string();
+
     match deployment
         .project()
         .delete_project(&deployment.db().pool, project.id)
@@ -171,6 +174,23 @@ pub async fn delete_project(
                         }),
                     )
                     .await;
+
+                // Stop any running OpenAI-compat server and remove its config entry
+                let handles = deployment.openai_project_server_handles();
+                crate::openai_compat::stop_project_server(&project_id, handles).await;
+
+                {
+                    let mut config = deployment.config().write().await;
+                    config
+                        .openai_compatible_api_projects
+                        .remove(&project_id);
+                    let cfg_clone = config.clone();
+                    drop(config);
+                    // Best-effort save; log on failure but don't fail the delete
+                    if let Err(e) = save_config_to_file(&cfg_clone, &config_path()).await {
+                        tracing::warn!("Failed to persist config after project delete: {e}");
+                    }
+                }
 
                 Ok(ResponseJson(ApiResponse::success(())))
             }
@@ -333,6 +353,74 @@ fn map_cron_error(err: CronTaskError) -> ApiError {
         CronTaskError::Json(e) => ApiError::BadRequest(format!("Invalid cron config: {e}")),
         other => ApiError::BadRequest(other.to_string()),
     }
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// OpenAI-compatible API config handlers
+// ──────────────────────────────────────────────────────────────────────────────
+
+pub async fn get_project_openai_api(
+    Extension(project): Extension<Project>,
+    State(deployment): State<DeploymentImpl>,
+) -> Result<ResponseJson<ApiResponse<ProjectOpenAiApiConfig>>, ApiError> {
+    let config = deployment.config().read().await;
+    let api_config = config
+        .openai_compatible_api_projects
+        .get(&project.id.to_string())
+        .cloned()
+        .unwrap_or_default();
+    Ok(ResponseJson(ApiResponse::success(api_config)))
+}
+
+pub async fn update_project_openai_api(
+    Extension(project): Extension<Project>,
+    State(deployment): State<DeploymentImpl>,
+    Json(payload): Json<ProjectOpenAiApiConfig>,
+) -> Result<ResponseJson<ApiResponse<ProjectOpenAiApiConfig>>, ApiError> {
+    if payload.port < 1024 {
+        return Err(ApiError::BadRequest(
+            "Port must be 1024 or higher".to_string(),
+        ));
+    }
+
+    let project_id = project.id.to_string();
+
+    // Update config
+    {
+        let mut config = deployment.config().write().await;
+        config
+            .openai_compatible_api_projects
+            .insert(project_id.clone(), payload.clone());
+        let cfg_clone = config.clone();
+        drop(config);
+
+        if let Err(e) = save_config_to_file(&cfg_clone, &config_path()).await {
+            return Err(ApiError::BadRequest(format!(
+                "Failed to save config: {e}"
+            )));
+        }
+    }
+
+    // Start / stop / restart the project server
+    let handles = deployment.openai_project_server_handles();
+    if payload.enabled {
+        if let Err(e) = crate::openai_compat::start_project_server(
+            &project_id,
+            payload.port,
+            deployment.clone(),
+            handles,
+        )
+        .await
+        {
+            return Err(ApiError::BadRequest(format!(
+                "Failed to start OpenAI-compat server: {e}"
+            )));
+        }
+    } else {
+        crate::openai_compat::stop_project_server(&project_id, handles).await;
+    }
+
+    Ok(ResponseJson(ApiResponse::success(payload)))
 }
 
 pub async fn get_project_repositories(
@@ -498,6 +586,10 @@ pub fn router(deployment: &DeploymentImpl) -> Router<DeploymentImpl> {
         .route(
             "/repositories",
             get(get_project_repositories).post(add_project_repository),
+        )
+        .route(
+            "/openai-api",
+            get(get_project_openai_api).put(update_project_openai_api),
         )
         .layer(from_fn_with_state(
             deployment.clone(),

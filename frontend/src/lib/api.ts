@@ -79,6 +79,7 @@ import {
   ReviewCommand,
   SaveReviewCommandRequest,
   UpdateReviewCommandStatusRequest,
+  ProjectOpenAiApiConfig,
 } from 'shared/types';
 import type { WorkspaceWithSession } from '@/types/attempt';
 import { createWorkspaceWithSession } from '@/types/attempt';
@@ -394,6 +395,30 @@ export const cronTasksApi = {
       }
     );
     return handleApiResponse<CronTaskConfig>(response);
+  },
+};
+
+// OpenAI-compatible API config per project
+export const projectOpenAiApi = {
+  get: async (projectId: string): Promise<ProjectOpenAiApiConfig> => {
+    const response = await makeRequest(
+      `/api/projects/${projectId}/openai-api`
+    );
+    return handleApiResponse<ProjectOpenAiApiConfig>(response);
+  },
+
+  update: async (
+    projectId: string,
+    data: ProjectOpenAiApiConfig
+  ): Promise<ProjectOpenAiApiConfig> => {
+    const response = await makeRequest(
+      `/api/projects/${projectId}/openai-api`,
+      {
+        method: 'PUT',
+        body: JSON.stringify(data),
+      }
+    );
+    return handleApiResponse<ProjectOpenAiApiConfig>(response);
   },
 };
 

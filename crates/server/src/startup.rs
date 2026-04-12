@@ -129,6 +129,13 @@ pub async fn spawn_background_services(deployment: &DeploymentImpl, platform: &s
     )
     .await;
 
+    // Start all enabled per-project OpenAI-compat servers
+    crate::openai_compat::start_all_from_config(
+        deployment,
+        deployment.openai_project_server_handles(),
+    )
+    .await;
+
     deployment
         .track_if_analytics_allowed("session_start", serde_json::json!({ "platform": platform }))
         .await;

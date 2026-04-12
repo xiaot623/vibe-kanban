@@ -25,9 +25,14 @@ import { Loader2, Plus, Trash2 } from 'lucide-react';
 import { useProjects } from '@/hooks/useProjects';
 import { useProjectMutations } from '@/hooks/useProjectMutations';
 import { RepoPickerDialog } from '@/components/dialogs/shared/RepoPickerDialog';
-import { projectsApi } from '@/lib/api';
+import { projectsApi, projectOpenAiApi } from '@/lib/api';
 import { repoBranchKeys } from '@/hooks/useRepoBranches';
-import type { Project, Repo, UpdateProject } from 'shared/types';
+import type {
+  Project,
+  ProjectOpenAiApiConfig,
+  Repo,
+  UpdateProject,
+} from 'shared/types';
 
 interface ProjectFormState {
   name: string;
@@ -71,6 +76,16 @@ export function ProjectSettings() {
   const [repoError, setRepoError] = useState<string | null>(null);
   const [addingRepo, setAddingRepo] = useState(false);
   const [deletingRepoId, setDeletingRepoId] = useState<string | null>(null);
+
+  // OpenAI-compatible API config state
+  const [openAiConfig, setOpenAiConfig] =
+    useState<ProjectOpenAiApiConfig | null>(null);
+  const [openAiConfigLoading, setOpenAiConfigLoading] = useState(false);
+  const [openAiConfigSaving, setOpenAiConfigSaving] = useState(false);
+  const [openAiConfigError, setOpenAiConfigError] = useState<string | null>(
+    null
+  );
+  const [openAiConfigSuccess, setOpenAiConfigSuccess] = useState(false);
 
   // Check for unsaved changes (project name)
   const hasUnsavedChanges = useMemo(() => {
@@ -177,6 +192,48 @@ export function ProjectSettings() {
     window.addEventListener('beforeunload', handler);
     return () => window.removeEventListener('beforeunload', handler);
   }, [hasUnsavedChanges]);
+
+  // Fetch OpenAI-compatible API config when project changes
+  useEffect(() => {
+    if (!selectedProjectId) {
+      setOpenAiConfig(null);
+      return;
+    }
+
+    setOpenAiConfigLoading(true);
+    setOpenAiConfigError(null);
+    projectOpenAiApi
+      .get(selectedProjectId)
+      .then(setOpenAiConfig)
+      .catch((err) => {
+        setOpenAiConfigError(
+          err instanceof Error
+            ? err.message
+            : 'Failed to load OpenAI API config'
+        );
+      })
+      .finally(() => setOpenAiConfigLoading(false));
+  }, [selectedProjectId]);
+
+  const handleSaveOpenAiConfig = async () => {
+    if (!selectedProjectId || !openAiConfig) return;
+
+    setOpenAiConfigSaving(true);
+    setOpenAiConfigError(null);
+    setOpenAiConfigSuccess(false);
+    try {
+      const saved = await projectOpenAiApi.update(selectedProjectId, openAiConfig);
+      setOpenAiConfig(saved);
+      setOpenAiConfigSuccess(true);
+      setTimeout(() => setOpenAiConfigSuccess(false), 3000);
+    } catch (err) {
+      setOpenAiConfigError(
+        err instanceof Error ? err.message : 'Failed to save OpenAI API config'
+      );
+    } finally {
+      setOpenAiConfigSaving(false);
+    }
+  };
 
   // Fetch repositories when project changes
   useEffect(() => {
@@ -539,6 +596,95 @@ export function ProjectSettings() {
                   </Button>
                 </div>
               )}
+            </CardContent>
+          </Card>
+
+          {/* OpenAI-compatible API Section */}
+          <Card>
+            <CardHeader>
+              <CardTitle>OpenAI-compatible API</CardTitle>
+              <CardDescription>
+                Expose an OpenAI-compatible HTTP endpoint for this project
+              </CardDescription>
+            </CardHeader>
+            <CardContent className="space-y-4">
+              {openAiConfigError && (
+                <Alert variant="destructive">
+                  <AlertDescription>{openAiConfigError}</AlertDescription>
+                </Alert>
+              )}
+              {openAiConfigSuccess && (
+                <Alert variant="success">
+                  <AlertDescription className="font-medium">
+                    OpenAI API config saved
+                  </AlertDescription>
+                </Alert>
+              )}
+              {openAiConfigLoading ? (
+                <div className="flex items-center justify-center py-4">
+                  <Loader2 className="h-5 w-5 animate-spin" />
+                  <span className="ml-2 text-sm text-muted-foreground">
+                    Loading config...
+                  </span>
+                </div>
+              ) : openAiConfig ? (
+                <div className="space-y-4">
+                  <div className="flex items-center gap-3">
+                    <input
+                      id="openai-api-enabled"
+                      type="checkbox"
+                      checked={openAiConfig.enabled}
+                      onChange={(e) =>
+                        setOpenAiConfig((prev) =>
+                          prev ? { ...prev, enabled: e.target.checked } : prev
+                        )
+                      }
+                      className="h-4 w-4"
+                    />
+                    <Label htmlFor="openai-api-enabled">Enable</Label>
+                  </div>
+                  <div className="space-y-2">
+                    <Label htmlFor="openai-api-port">Port</Label>
+                    <Input
+                      id="openai-api-port"
+                      type="number"
+                      min={1024}
+                      max={65535}
+                      value={openAiConfig.port}
+                      onChange={(e) =>
+                        setOpenAiConfig((prev) =>
+                          prev
+                            ? { ...prev, port: parseInt(e.target.value, 10) || prev.port }
+                            : prev
+                        )
+                      }
+                      className="w-32"
+                    />
+                    <p className="text-sm text-muted-foreground">
+                      Binds to{' '}
+                      <code className="font-mono">
+                        127.0.0.1:{openAiConfig.port}
+                      </code>
+                      . Must be 1024 or higher.
+                    </p>
+                  </div>
+                  <div className="flex justify-end pt-2 border-t">
+                    <Button
+                      onClick={handleSaveOpenAiConfig}
+                      disabled={openAiConfigSaving}
+                    >
+                      {openAiConfigSaving ? (
+                        <>
+                          <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+                          Saving...
+                        </>
+                      ) : (
+                        'Save'
+                      )}
+                    </Button>
+                  </div>
+                </div>
+              ) : null}
             </CardContent>
           </Card>
 
