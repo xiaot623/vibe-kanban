@@ -2,7 +2,6 @@ use std::{
     collections::{BTreeMap, HashMap},
     io,
     path::{Path, PathBuf},
-    str::FromStr,
     sync::Arc,
     time::Duration,
 };
@@ -19,7 +18,7 @@ use db::{
         },
         execution_process_repo_state::ExecutionProcessRepoState,
         repo::Repo,
-        scratch::{DraftFollowUpData, Scratch, ScratchType},
+        scratch::DraftFollowUpData,
         task::{Task, TaskStatus},
         workspace::Workspace,
         workspace_repo::WorkspaceRepo,
@@ -27,16 +26,11 @@ use db::{
 };
 use deployment::DeploymentError;
 use executors::{
-    actions::{
-        Executable, ExecutorAction, ExecutorActionType,
-        coding_agent_follow_up::CodingAgentFollowUpRequest,
-        coding_agent_initial::CodingAgentInitialRequest,
-    },
+    actions::{Executable, ExecutorAction},
     approvals::{ExecutorApprovalService, NoopExecutorApprovalService},
     env::{ExecutionEnv, RepoContext},
     executors::{BaseCodingAgent, ExecutorExitResult, ExecutorExitSignal, InterruptSender},
     logs::{NormalizedEntry, NormalizedEntryType},
-    profile::ExecutorProfileId,
 };
 use futures::{FutureExt, TryStreamExt, stream::select};
 use serde_json::json;
@@ -532,25 +526,18 @@ impl LocalContainerService {
                                 ctx.session.id
                             );
 
-                            // Delete the scratch since we're consuming the queued message
-                            if let Err(e) = Scratch::delete(
-                                &db.pool,
-                                ctx.session.id,
-                                &ScratchType::DraftFollowUp,
-                            )
-                            .await
-                            {
-                                tracing::warn!(
-                                    "Failed to delete scratch after consuming queued message: {}",
-                                    e
-                                );
-                            }
-
                             // Execute the queued follow-up
                             if let Err(e) = container
-                                .start_queued_follow_up(&ctx, &queued_msg.data)
+                                .start_queued_follow_up(
+                                    &ctx,
+                                    &queued_msg.queued_message.data,
+                                    queued_msg.queue_id(),
+                                )
                                 .await
                             {
+                                container
+                                    .queued_message_service
+                                    .notify_start_failed(queued_msg.queue_id(), e.to_string());
                                 tracing::error!("Failed to start queued follow-up: {}", e);
                                 // Fall back to finalization if follow-up fails
                                 container.finalize_task(&ctx).await;
@@ -562,6 +549,9 @@ impl LocalContainerService {
                                 ctx.session.id,
                                 ctx.execution_process.status
                             );
+                            container
+                                .queued_message_service
+                                .notify_discarded(queued_msg.queue_id());
                             container.finalize_task(&ctx).await;
                         }
                     } else {
@@ -873,105 +863,22 @@ impl LocalContainerService {
         &self,
         ctx: &ExecutionContext,
         queued_data: &DraftFollowUpData,
+        queue_id: Uuid,
     ) -> Result<ExecutionProcess, ContainerError> {
-        // Get executor from the latest CodingAgent process, or fall back to session's executor
-        let current_executor = match ExecutionProcess::latest_executor_profile_for_session(
-            &self.db.pool,
-            ctx.session.id,
-        )
-        .await
-        .map_err(|e| ContainerError::Other(anyhow!("Failed to get executor profile: {e}")))?
-        {
-            Some(profile) => profile.executor,
-            None => {
-                // No prior execution - use session's executor field
-                let executor_str = ctx.session.executor.as_ref().ok_or_else(|| {
-                    ContainerError::Other(anyhow!(
-                        "No prior execution and no executor configured on session"
-                    ))
-                })?;
-                BaseCodingAgent::from_str(&executor_str.replace('-', "_").to_ascii_uppercase())
-                    .map_err(|_| {
-                        ContainerError::Other(anyhow!("Invalid executor: {}", executor_str))
-                    })?
-            }
-        };
-
-        let switch_decision =
-            context_archive::resolve_executor_switch(current_executor, queued_data.executor);
-        let executor_profile_id = ExecutorProfileId {
-            executor: switch_decision.requested_executor,
-            variant: queued_data.variant.clone(),
-        };
-
-        // Get latest agent session ID for session continuity (from coding agent turns)
-        let latest_agent_session_id = if switch_decision.switched {
-            None
-        } else {
-            ExecutionProcess::find_latest_coding_agent_turn_session_id(
-                &self.db.pool,
-                ctx.session.id,
-            )
-            .await?
-        };
-
-        let prompt = if switch_decision.switched {
-            match context_archive::build_executor_switch_prompt_for_workspace(
-                &self.db.pool,
+        let execution = self
+            .start_follow_up_execution(
                 &ctx.workspace,
-                &queued_data.message,
+                &ctx.session,
+                queued_data.message.clone(),
+                queued_data.variant.clone(),
+                queued_data.executor,
             )
-            .await
-            {
-                Ok(switch_prompt) => switch_prompt,
-                Err(err) => {
-                    tracing::warn!(
-                        "Failed to build archive-context prompt for queued executor switch on session {}: {}",
-                        ctx.session.id,
-                        err
-                    );
-                    queued_data.message.clone()
-                }
-            }
-        } else {
-            queued_data.message.clone()
-        };
+            .await?;
 
-        let repos =
-            WorkspaceRepo::find_repos_for_workspace(&self.db.pool, ctx.workspace.id).await?;
-        let cleanup_action = self.cleanup_actions_for_repos(&repos);
+        self.queued_message_service
+            .notify_started(queue_id, execution.id);
 
-        let working_dir = ctx
-            .workspace
-            .agent_working_dir
-            .as_ref()
-            .filter(|dir| !dir.is_empty())
-            .cloned();
-
-        let action_type = if let Some(agent_session_id) = latest_agent_session_id {
-            ExecutorActionType::CodingAgentFollowUpRequest(CodingAgentFollowUpRequest {
-                prompt: prompt.clone(),
-                session_id: agent_session_id,
-                executor_profile_id: executor_profile_id.clone(),
-                working_dir: working_dir.clone(),
-            })
-        } else {
-            ExecutorActionType::CodingAgentInitialRequest(CodingAgentInitialRequest {
-                prompt,
-                executor_profile_id: executor_profile_id.clone(),
-                working_dir,
-            })
-        };
-
-        let action = ExecutorAction::new(action_type, cleanup_action.map(Box::new));
-
-        self.start_execution(
-            &ctx.workspace,
-            &ctx.session,
-            &action,
-            &ExecutionProcessRunReason::CodingAgent,
-        )
-        .await
+        Ok(execution)
     }
 }
 

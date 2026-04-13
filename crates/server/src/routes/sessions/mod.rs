@@ -1,8 +1,6 @@
 pub mod queue;
 pub mod review;
 
-use std::str::FromStr;
-
 use axum::{
     Extension, Json, Router,
     extract::{Query, State},
@@ -11,22 +9,14 @@ use axum::{
     routing::{get, post},
 };
 use db::models::{
-    execution_process::{ExecutionProcess, ExecutionProcessRunReason},
-    scratch::{Scratch, ScratchType},
+    execution_process::ExecutionProcess,
     session::{CreateSession, Session},
     workspace::{Workspace, WorkspaceError},
-    workspace_repo::WorkspaceRepo,
 };
 use deployment::Deployment;
-use executors::{
-    actions::{
-        ExecutorAction, ExecutorActionType, coding_agent_follow_up::CodingAgentFollowUpRequest,
-    },
-    executors::BaseCodingAgent,
-    profile::ExecutorProfileId,
-};
+use executors::executors::BaseCodingAgent;
 use serde::Deserialize;
-use services::services::{container::ContainerService, context_archive};
+use services::services::container::ContainerService;
 use ts_rs::TS;
 use utils::response::ApiResponse;
 use uuid::Uuid;
@@ -120,34 +110,6 @@ pub async fn follow_up(
         .ensure_container_exists(&workspace)
         .await?;
 
-    // Get executor from the latest CodingAgent process, or fall back to session's executor
-    let current_executor =
-        match ExecutionProcess::latest_executor_profile_for_session(pool, session.id).await? {
-            Some(profile) => profile.executor,
-            None => {
-                // No prior execution - use session's executor field
-                let executor_str = session.executor.as_ref().ok_or_else(|| {
-                    ApiError::Workspace(WorkspaceError::ValidationError(
-                        "No prior execution and no executor configured on session".to_string(),
-                    ))
-                })?;
-                BaseCodingAgent::from_str(&executor_str.replace('-', "_").to_ascii_uppercase())
-                    .map_err(|_| {
-                        ApiError::Workspace(WorkspaceError::ValidationError(format!(
-                            "Invalid executor: {}",
-                            executor_str
-                        )))
-                    })?
-            }
-        };
-
-    let switch_decision =
-        context_archive::resolve_executor_switch(current_executor, payload.executor);
-    let executor_profile_id = ExecutorProfileId {
-        executor: switch_decision.requested_executor,
-        variant: payload.variant.clone(),
-    };
-
     // If retry settings provided, perform replace-logic before proceeding
     if let Some(proc_id) = payload.retry_process_id {
         // Validate process belongs to this session
@@ -183,82 +145,16 @@ pub async fn follow_up(
         let _ = ExecutionProcess::drop_at_and_after(pool, process.session_id, proc_id).await?;
     }
 
-    let latest_agent_session_id = if switch_decision.switched {
-        None
-    } else {
-        ExecutionProcess::find_latest_coding_agent_turn_session_id(pool, session.id).await?
-    };
-
-    let prompt = if switch_decision.switched {
-        match context_archive::build_executor_switch_prompt_for_workspace(
-            pool,
-            &workspace,
-            &payload.prompt,
-        )
-        .await
-        {
-            Ok(switch_prompt) => switch_prompt,
-            Err(err) => {
-                tracing::warn!(
-                    "Failed to build archive-context prompt for executor switch on session {}: {}",
-                    session.id,
-                    err
-                );
-                payload.prompt.clone()
-            }
-        }
-    } else {
-        payload.prompt.clone()
-    };
-
-    let repos = WorkspaceRepo::find_repos_for_workspace(pool, workspace.id).await?;
-    let cleanup_action = deployment.container().cleanup_actions_for_repos(&repos);
-
-    let working_dir = workspace
-        .agent_working_dir
-        .as_ref()
-        .filter(|dir| !dir.is_empty())
-        .cloned();
-
-    let action_type = if let Some(agent_session_id) = latest_agent_session_id {
-        ExecutorActionType::CodingAgentFollowUpRequest(CodingAgentFollowUpRequest {
-            prompt: prompt.clone(),
-            session_id: agent_session_id,
-            executor_profile_id: executor_profile_id.clone(),
-            working_dir: working_dir.clone(),
-        })
-    } else {
-        ExecutorActionType::CodingAgentInitialRequest(
-            executors::actions::coding_agent_initial::CodingAgentInitialRequest {
-                prompt,
-                executor_profile_id: executor_profile_id.clone(),
-                working_dir,
-            },
-        )
-    };
-
-    let action = ExecutorAction::new(action_type, cleanup_action.map(Box::new));
-
     let execution_process = deployment
         .container()
-        .start_execution(
+        .start_follow_up_execution(
             &workspace,
             &session,
-            &action,
-            &ExecutionProcessRunReason::CodingAgent,
+            payload.prompt.clone(),
+            payload.variant.clone(),
+            payload.executor,
         )
         .await?;
-
-    // Clear the draft follow-up scratch on successful spawn
-    // This ensures the scratch is wiped even if the user navigates away quickly
-    if let Err(e) = Scratch::delete(pool, session.id, &ScratchType::DraftFollowUp).await {
-        // Log but don't fail the request - scratch deletion is best-effort
-        tracing::debug!(
-            "Failed to delete draft follow-up scratch for session {}: {}",
-            session.id,
-            e
-        );
-    }
 
     Ok(ResponseJson(ApiResponse::success(execution_process)))
 }

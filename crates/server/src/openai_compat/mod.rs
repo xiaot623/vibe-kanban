@@ -1,5 +1,9 @@
 use std::{
     collections::HashMap,
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -14,6 +18,8 @@ use axum::{
     routing::{get, post},
 };
 use db::models::{
+    execution_process::{ExecutionProcess, ExecutionProcessRunReason, ExecutionProcessStatus},
+    session::Session,
     task::{CreateTask, Task},
     workspace::{CreateWorkspace, Workspace},
     workspace_repo::{CreateWorkspaceRepo, WorkspaceRepo},
@@ -26,8 +32,12 @@ use executors::{
 use futures_util::StreamExt;
 use local_deployment::OpenAiProjectServerHandles;
 use serde::{Deserialize, Serialize};
-use services::services::{container::ContainerService, execution_log_hub::ExecutionLogHub};
-use tokio::sync::mpsc;
+use services::services::{
+    container::ContainerService,
+    execution_log_hub::ExecutionLogHub,
+    queued_message::{QueueWaitError, QueuedMessageWaiter},
+};
+use tokio::sync::{RwLock, mpsc};
 use tokio_stream::wrappers::ReceiverStream;
 use uuid::Uuid;
 
@@ -93,6 +103,12 @@ struct ContentPart {
 struct ChatMessage {
     role: String,
     content: MessageContent,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct IndexedChatMessage {
+    role: String,
+    content: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -261,6 +277,46 @@ fn parse_model(model: &str) -> Option<ExecutorProfileId> {
 struct ProjectServerState {
     deployment: DeploymentImpl,
     project_id: Uuid,
+    session_index: OpenAiSessionIndex,
+}
+
+#[derive(Debug, Clone)]
+struct OpenAiIndexedSession {
+    session_id: Uuid,
+    messages: Vec<IndexedChatMessage>,
+    revision: u64,
+}
+
+#[derive(Clone, Default)]
+struct OpenAiSessionIndex {
+    entries: Arc<RwLock<Vec<OpenAiIndexedSession>>>,
+    revisions: Arc<AtomicU64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PrefixMatch {
+    session_id: Uuid,
+    prefix_len: usize,
+}
+
+impl OpenAiSessionIndex {
+    async fn record_messages(&self, session_id: Uuid, messages: Vec<IndexedChatMessage>) {
+        let revision = self.revisions.fetch_add(1, Ordering::Relaxed) + 1;
+        let mut entries = self.entries.write().await;
+        entries.push(OpenAiIndexedSession {
+            session_id,
+            messages,
+            revision,
+        });
+    }
+
+    async fn find_longest_prefix_match(
+        &self,
+        request_messages: &[IndexedChatMessage],
+    ) -> Option<PrefixMatch> {
+        let entries = self.entries.read().await;
+        select_longest_prefix_match(&entries, request_messages)
+    }
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -282,6 +338,237 @@ async fn wait_for_hub(hubs: &HubMap, exec_id: Uuid) -> Option<std::sync::Arc<Exe
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     }
     None
+}
+
+fn indexable_messages(messages: &[ChatMessage]) -> Vec<IndexedChatMessage> {
+    let mut indexed = Vec::new();
+
+    for message in messages {
+        let Some(content) = message.content.as_text() else {
+            continue;
+        };
+        let indexed_message = IndexedChatMessage {
+            role: message.role.clone(),
+            content: content.to_string(),
+        };
+
+        if indexed_message.role == "user"
+            && indexed.last().is_some_and(|previous: &IndexedChatMessage| {
+                previous.role == "user" && previous.content == indexed_message.content
+            })
+        {
+            continue;
+        }
+
+        indexed.push(indexed_message);
+    }
+
+    indexed
+}
+
+fn transcript_from_messages(messages: &[IndexedChatMessage]) -> String {
+    messages
+        .iter()
+        .map(|message| format!("[{}]: {}", message.role, message.content))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn follow_up_prompt_from_messages(messages: &[IndexedChatMessage]) -> String {
+    let trailing_user_start = messages
+        .iter()
+        .rposition(|message| message.role != "user")
+        .map_or(0, |index| index + 1);
+    let trailing_user_messages = &messages[trailing_user_start..];
+
+    if trailing_user_messages.is_empty() {
+        return transcript_from_messages(messages);
+    }
+
+    trailing_user_messages
+        .iter()
+        .map(|message| message.content.as_str())
+        .filter(|content| !content.trim().is_empty())
+        .collect::<Vec<_>>()
+        .join("\n\n")
+}
+
+fn select_longest_prefix_match(
+    entries: &[OpenAiIndexedSession],
+    request_messages: &[IndexedChatMessage],
+) -> Option<PrefixMatch> {
+    entries
+        .iter()
+        .filter(|entry| {
+            entry.messages.len() < request_messages.len()
+                && request_messages.starts_with(entry.messages.as_slice())
+        })
+        .max_by_key(|entry| (entry.messages.len(), entry.revision))
+        .map(|entry| PrefixMatch {
+            session_id: entry.session_id,
+            prefix_len: entry.messages.len(),
+        })
+}
+
+async fn session_has_running_non_dev_server_processes(
+    deployment: &DeploymentImpl,
+    session_id: Uuid,
+) -> Result<bool, sqlx::Error> {
+    let processes =
+        ExecutionProcess::find_by_session_id(&deployment.db().pool, session_id, false).await?;
+    Ok(processes.iter().any(|process| {
+        process.status == ExecutionProcessStatus::Running
+            && process.run_reason != ExecutionProcessRunReason::DevServer
+    }))
+}
+
+fn map_wait_error(error: QueueWaitError) -> (StatusCode, String) {
+    match error {
+        QueueWaitError::Overwritten => (
+            StatusCode::CONFLICT,
+            "Queued follow-up was replaced by a newer request".to_string(),
+        ),
+        QueueWaitError::Cancelled => (
+            StatusCode::CONFLICT,
+            "Queued follow-up was cancelled before it started".to_string(),
+        ),
+        QueueWaitError::Discarded => (
+            StatusCode::CONFLICT,
+            "Queued follow-up was discarded before it started".to_string(),
+        ),
+        QueueWaitError::StartFailed(message) => (StatusCode::INTERNAL_SERVER_ERROR, message),
+    }
+}
+
+async fn wait_for_execution_result(deployment: &DeploymentImpl, exec_id: Uuid) -> Option<String> {
+    let hubs = deployment.container().execution_log_hubs().clone();
+    let hub = wait_for_hub(&hubs, exec_id).await?;
+    let mut stream = hub.normalized_history_plus_stream();
+    let mut last_assistant = String::new();
+
+    while let Some(event) = stream.next().await {
+        match event {
+            Ok(NormalizedLogEvent::UpsertEntry { entry, .. }) => {
+                if matches!(entry.entry_type, NormalizedEntryType::AssistantMessage)
+                    && !entry.content.trim().is_empty()
+                {
+                    last_assistant = entry.content.clone();
+                }
+            }
+            Ok(NormalizedLogEvent::Finished) => break,
+            _ => {}
+        }
+    }
+
+    Some(last_assistant)
+}
+
+async fn wait_for_execution_stream(
+    deployment: &DeploymentImpl,
+    exec_id: Uuid,
+    model: String,
+) -> Sse<ReceiverStream<Result<Event, std::io::Error>>> {
+    let hubs = deployment.container().execution_log_hubs().clone();
+    let (tx, rx) = mpsc::channel::<Result<Event, std::io::Error>>(64);
+
+    tokio::spawn(async move {
+        let hub = wait_for_hub(&hubs, exec_id).await;
+        let Some(hub) = hub else {
+            tracing::warn!("No execution log hub found for exec {}", exec_id);
+            return;
+        };
+
+        let completion_id = gen_id();
+        let created = unix_now();
+
+        let header = ChatCompletionChunk {
+            id: completion_id.clone(),
+            object: "chat.completion.chunk".to_string(),
+            created,
+            model: model.clone(),
+            choices: vec![StreamChoice {
+                index: 0,
+                delta: StreamDelta {
+                    role: Some("assistant".to_string()),
+                    content: Some(String::new()),
+                },
+                finish_reason: None,
+            }],
+        };
+        if let Ok(data) = serde_json::to_string(&header) {
+            let _ = tx.send(Ok(Event::default().data(data))).await;
+        }
+
+        let mut stream = hub.normalized_history_plus_stream();
+        let mut sent_assistant_entries = HashMap::new();
+        loop {
+            match stream.next().await {
+                Some(Ok(NormalizedLogEvent::UpsertEntry { index, entry })) => {
+                    if matches!(entry.entry_type, NormalizedEntryType::AssistantMessage)
+                        && let Some(delta) = assistant_delta_for_upsert(
+                            &mut sent_assistant_entries,
+                            index,
+                            &entry.content,
+                        )
+                    {
+                        let chunk = ChatCompletionChunk {
+                            id: completion_id.clone(),
+                            object: "chat.completion.chunk".to_string(),
+                            created,
+                            model: model.clone(),
+                            choices: vec![StreamChoice {
+                                index: 0,
+                                delta: StreamDelta {
+                                    role: None,
+                                    content: Some(delta),
+                                },
+                                finish_reason: None,
+                            }],
+                        };
+                        if let Ok(data) = serde_json::to_string(&chunk) {
+                            if tx.send(Ok(Event::default().data(data))).await.is_err() {
+                                return;
+                            }
+                        }
+                    }
+                }
+                Some(Ok(NormalizedLogEvent::Finished)) | None => {
+                    let stop_chunk = ChatCompletionChunk {
+                        id: completion_id.clone(),
+                        object: "chat.completion.chunk".to_string(),
+                        created,
+                        model: model.clone(),
+                        choices: vec![StreamChoice {
+                            index: 0,
+                            delta: StreamDelta {
+                                role: None,
+                                content: None,
+                            },
+                            finish_reason: Some("stop".to_string()),
+                        }],
+                    };
+                    if let Ok(data) = serde_json::to_string(&stop_chunk) {
+                        let _ = tx.send(Ok(Event::default().data(data))).await;
+                    }
+                    let _ = tx.send(Ok(Event::default().data("[DONE]"))).await;
+                    return;
+                }
+                Some(Ok(NormalizedLogEvent::RemoveEntry { index })) => {
+                    sent_assistant_entries.remove(&index);
+                }
+                Some(Err(_)) => {}
+            }
+        }
+    });
+
+    let sse_stream = ReceiverStream::new(rx);
+    Sse::new(sse_stream)
+}
+
+async fn resolve_queued_execution(
+    waiter: QueuedMessageWaiter,
+) -> Result<Uuid, (StatusCode, String)> {
+    waiter.wait_for_start().await.map_err(map_wait_error)
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -314,29 +601,164 @@ async fn chat_completions(
         }
     };
 
-    // Build prompt from messages
-    let transcript: String = req
-        .messages
-        .iter()
-        .filter_map(|m| m.content.as_text().map(|t| format!("[{}]: {}", m.role, t)))
-        .collect::<Vec<_>>()
-        .join("\n");
+    let indexed_messages = indexable_messages(&req.messages);
 
-    // Use the last user message as the task title
-    let last_user_text = req
-        .messages
-        .iter()
-        .rev()
-        .find(|m| m.role == "user")
-        .and_then(|m| m.content.as_text())
-        .unwrap_or("API Task")
-        .to_string();
+    if indexed_messages.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            "At least one text message is required",
+        )
+            .into_response();
+    }
 
-    let title = if last_user_text.len() > 100 {
-        format!("{}...", &last_user_text[..100])
-    } else {
-        last_user_text.clone()
-    };
+    if let Some(prefix_match) = state
+        .session_index
+        .find_longest_prefix_match(&indexed_messages)
+        .await
+    {
+        let pool = &state.deployment.db().pool;
+        let session = match Session::find_by_id(pool, prefix_match.session_id).await {
+            Ok(Some(session)) => session,
+            Ok(None) => {
+                tracing::warn!(
+                    "Indexed OpenAI session {} no longer exists; ignoring prefix match",
+                    prefix_match.session_id
+                );
+                return create_new_openai_session(
+                    state,
+                    req,
+                    executor_profile_id,
+                    indexed_messages,
+                )
+                .await;
+            }
+            Err(err) => {
+                tracing::error!(
+                    "Failed to load indexed OpenAI session {}: {}",
+                    prefix_match.session_id,
+                    err
+                );
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "Failed to load matched session",
+                )
+                    .into_response();
+            }
+        };
+
+        let workspace = match Workspace::find_by_id(pool, session.workspace_id).await {
+            Ok(Some(workspace)) => workspace,
+            Ok(None) => {
+                tracing::warn!(
+                    "Indexed OpenAI workspace {} no longer exists; ignoring prefix match",
+                    session.workspace_id
+                );
+                return create_new_openai_session(
+                    state,
+                    req,
+                    executor_profile_id,
+                    indexed_messages,
+                )
+                .await;
+            }
+            Err(err) => {
+                tracing::error!(
+                    "Failed to load indexed workspace {}: {}",
+                    session.workspace_id,
+                    err
+                );
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "Failed to load matched workspace",
+                )
+                    .into_response();
+            }
+        };
+
+        let follow_up_messages = &indexed_messages[prefix_match.prefix_len..];
+        let follow_up_prompt = follow_up_prompt_from_messages(follow_up_messages);
+
+        let exec_id =
+            match session_has_running_non_dev_server_processes(&state.deployment, session.id).await
+            {
+                Ok(true) => {
+                    let (queued_message, waiter) = state
+                        .deployment
+                        .queued_message_service()
+                        .queue_message_with_waiter(
+                            session.id,
+                            db::models::scratch::DraftFollowUpData {
+                                message: follow_up_prompt,
+                                variant: executor_profile_id.variant.clone(),
+                                executor: None,
+                            },
+                        );
+                    tracing::info!(
+                        "Queued OpenAI follow-up for session {} at {}",
+                        queued_message.session_id,
+                        queued_message.queued_at
+                    );
+
+                    match resolve_queued_execution(waiter).await {
+                        Ok(exec_id) => exec_id,
+                        Err((status, message)) => return (status, message).into_response(),
+                    }
+                }
+                Ok(false) => match state
+                    .deployment
+                    .container()
+                    .start_follow_up_execution(
+                        &workspace,
+                        &session,
+                        follow_up_prompt,
+                        executor_profile_id.variant.clone(),
+                        Some(executor_profile_id.executor),
+                    )
+                    .await
+                {
+                    Ok(process) => process.id,
+                    Err(err) => {
+                        tracing::error!(
+                            "Failed to start OpenAI follow-up for session {}: {}",
+                            session.id,
+                            err
+                        );
+                        return (
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            "Failed to start follow-up execution",
+                        )
+                            .into_response();
+                    }
+                },
+                Err(err) => {
+                    tracing::error!(
+                        "Failed to inspect running processes for session {}: {}",
+                        session.id,
+                        err
+                    );
+                    return (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "Failed to inspect session state",
+                    )
+                        .into_response();
+                }
+            };
+
+        return respond_with_execution(state, req, indexed_messages, session.id, exec_id).await;
+    }
+
+    create_new_openai_session(state, req, executor_profile_id, indexed_messages).await
+}
+
+async fn create_new_openai_session(
+    state: ProjectServerState,
+    req: ChatCompletionRequest,
+    executor_profile_id: ExecutorProfileId,
+    indexed_messages: Vec<IndexedChatMessage>,
+) -> axum::response::Response {
+    let transcript = transcript_from_messages(&indexed_messages);
+
+    let title = "API Trigger Task".to_string();
 
     let pool = &state.deployment.db().pool;
 
@@ -468,159 +890,98 @@ async fn chat_completions(
                 .into_response();
         }
     };
+    let session = match Session::find_latest_by_workspace_id(pool, workspace.id).await {
+        Ok(Some(session)) => session,
+        Ok(None) => {
+            tracing::error!(
+                "OpenAI workspace {} has no session after startup",
+                workspace.id
+            );
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Failed to find created session",
+            )
+                .into_response();
+        }
+        Err(err) => {
+            tracing::error!(
+                "Failed to load created session for workspace {}: {}",
+                workspace.id,
+                err
+            );
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Failed to find created session",
+            )
+                .into_response();
+        }
+    };
 
-    let exec_id = exec_process.id;
-    let model_str = req.model.clone();
+    state
+        .session_index
+        .record_messages(session.id, indexed_messages.clone())
+        .await;
 
+    respond_with_execution(state, req, indexed_messages, session.id, exec_process.id).await
+}
+
+async fn respond_with_execution(
+    state: ProjectServerState,
+    req: ChatCompletionRequest,
+    request_messages: Vec<IndexedChatMessage>,
+    session_id: Uuid,
+    exec_id: Uuid,
+) -> axum::response::Response {
     if req.stream {
-        let hubs = state.deployment.container().execution_log_hubs().clone();
-        let (tx, rx) = mpsc::channel::<Result<Event, std::io::Error>>(64);
-
+        let stream = wait_for_execution_stream(&state.deployment, exec_id, req.model).await;
+        let deployment = state.deployment.clone();
+        let session_index = state.session_index.clone();
         tokio::spawn(async move {
-            let hub = wait_for_hub(&hubs, exec_id).await;
-            let Some(hub) = hub else {
-                tracing::warn!("No execution log hub found for exec {}", exec_id);
-                return;
-            };
-
-            let completion_id = gen_id();
-            let created = unix_now();
-
-            // Send role header chunk
-            let header = ChatCompletionChunk {
-                id: completion_id.clone(),
-                object: "chat.completion.chunk".to_string(),
-                created,
-                model: model_str.clone(),
-                choices: vec![StreamChoice {
-                    index: 0,
-                    delta: StreamDelta {
-                        role: Some("assistant".to_string()),
-                        content: Some(String::new()),
-                    },
-                    finish_reason: None,
-                }],
-            };
-            if let Ok(data) = serde_json::to_string(&header) {
-                let _ = tx.send(Ok(Event::default().data(data))).await;
-            }
-
-            let mut stream = hub.normalized_history_plus_stream();
-            let mut sent_assistant_entries = HashMap::new();
-            loop {
-                match stream.next().await {
-                    Some(Ok(NormalizedLogEvent::UpsertEntry { index, entry })) => {
-                        if matches!(entry.entry_type, NormalizedEntryType::AssistantMessage)
-                            && let Some(delta) = assistant_delta_for_upsert(
-                                &mut sent_assistant_entries,
-                                index,
-                                &entry.content,
-                            )
-                        {
-                            let chunk = ChatCompletionChunk {
-                                id: completion_id.clone(),
-                                object: "chat.completion.chunk".to_string(),
-                                created,
-                                model: model_str.clone(),
-                                choices: vec![StreamChoice {
-                                    index: 0,
-                                    delta: StreamDelta {
-                                        role: None,
-                                        content: Some(delta),
-                                    },
-                                    finish_reason: None,
-                                }],
-                            };
-                            if let Ok(data) = serde_json::to_string(&chunk) {
-                                if tx.send(Ok(Event::default().data(data))).await.is_err() {
-                                    return;
-                                }
-                            }
-                        }
-                    }
-                    Some(Ok(NormalizedLogEvent::Finished)) | None => {
-                        let stop_chunk = ChatCompletionChunk {
-                            id: completion_id.clone(),
-                            object: "chat.completion.chunk".to_string(),
-                            created,
-                            model: model_str.clone(),
-                            choices: vec![StreamChoice {
-                                index: 0,
-                                delta: StreamDelta {
-                                    role: None,
-                                    content: None,
-                                },
-                                finish_reason: Some("stop".to_string()),
-                            }],
-                        };
-                        if let Ok(data) = serde_json::to_string(&stop_chunk) {
-                            let _ = tx.send(Ok(Event::default().data(data))).await;
-                        }
-                        let _ = tx.send(Ok(Event::default().data("[DONE]"))).await;
-                        return;
-                    }
-                    Some(Ok(NormalizedLogEvent::RemoveEntry { index })) => {
-                        sent_assistant_entries.remove(&index);
-                    }
-                    Some(Err(_)) => {}
-                }
-            }
+            let assistant_text = wait_for_execution_result(&deployment, exec_id)
+                .await
+                .unwrap_or_default();
+            let mut indexed_with_assistant = request_messages;
+            indexed_with_assistant.push(IndexedChatMessage {
+                role: "assistant".to_string(),
+                content: assistant_text,
+            });
+            session_index
+                .record_messages(session_id, indexed_with_assistant)
+                .await;
         });
+        return stream.into_response();
+    }
 
-        let sse_stream = ReceiverStream::new(rx);
-        Sse::new(sse_stream).into_response()
-    } else {
-        // Non-streaming: wait for completion
-        let hubs = state.deployment.container().execution_log_hubs().clone();
-
-        let assistant_text = tokio::spawn(async move {
-            let hub = wait_for_hub(&hubs, exec_id).await;
-            let Some(hub) = hub else {
-                tracing::warn!("No execution log hub found for exec {}", exec_id);
-                return String::new();
-            };
-
-            let mut stream = hub.normalized_history_plus_stream();
-            let mut last_assistant = String::new();
-
-            while let Some(event) = stream.next().await {
-                match event {
-                    Ok(NormalizedLogEvent::UpsertEntry { entry, .. }) => {
-                        if matches!(entry.entry_type, NormalizedEntryType::AssistantMessage)
-                            && !entry.content.trim().is_empty()
-                        {
-                            last_assistant = entry.content.clone();
-                        }
-                    }
-                    Ok(NormalizedLogEvent::Finished) => {
-                        break;
-                    }
-                    _ => {}
-                }
-            }
-
-            last_assistant
-        })
+    let assistant_text = wait_for_execution_result(&state.deployment, exec_id)
         .await
         .unwrap_or_default();
 
-        let completion = ChatCompletion {
-            id: gen_id(),
-            object: "chat.completion".to_string(),
-            created: unix_now(),
-            model: model_str,
-            choices: vec![ChatCompletionChoice {
-                index: 0,
-                message: AssistantMessage {
-                    role: "assistant".to_string(),
-                    content: assistant_text,
-                },
-                finish_reason: "stop".to_string(),
-            }],
-        };
+    let mut indexed_with_assistant = request_messages;
+    indexed_with_assistant.push(IndexedChatMessage {
+        role: "assistant".to_string(),
+        content: assistant_text.clone(),
+    });
+    state
+        .session_index
+        .record_messages(session_id, indexed_with_assistant)
+        .await;
 
-        axum::Json(completion).into_response()
-    }
+    let completion = ChatCompletion {
+        id: gen_id(),
+        object: "chat.completion".to_string(),
+        created: unix_now(),
+        model: req.model,
+        choices: vec![ChatCompletionChoice {
+            index: 0,
+            message: AssistantMessage {
+                role: "assistant".to_string(),
+                content: assistant_text,
+            },
+            finish_reason: "stop".to_string(),
+        }],
+    };
+
+    axum::Json(completion).into_response()
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -665,6 +1026,7 @@ pub async fn start_project_server(
     let state = ProjectServerState {
         deployment,
         project_id: project_uuid,
+        session_index: OpenAiSessionIndex::default(),
     };
     let router = build_project_router(state);
 
@@ -742,7 +1104,27 @@ pub use services::services::config::ProjectOpenAiApiConfig as OpenAiApiConfig;
 mod tests {
     use std::collections::HashMap;
 
-    use super::assistant_delta_for_upsert;
+    use uuid::Uuid;
+
+    use super::{
+        ChatMessage, IndexedChatMessage, MessageContent, OpenAiIndexedSession, PrefixMatch,
+        assistant_delta_for_upsert, follow_up_prompt_from_messages, indexable_messages,
+        select_longest_prefix_match, transcript_from_messages,
+    };
+
+    fn msg(role: &str, content: &str) -> IndexedChatMessage {
+        IndexedChatMessage {
+            role: role.to_string(),
+            content: content.to_string(),
+        }
+    }
+
+    fn chat_msg(role: &str, content: &str) -> ChatMessage {
+        ChatMessage {
+            role: role.to_string(),
+            content: MessageContent::Text(content.to_string()),
+        }
+    }
 
     #[test]
     fn assistant_delta_for_upsert_sends_only_appended_suffix() {
@@ -793,6 +1175,146 @@ mod tests {
         assert_eq!(
             assistant_delta_for_upsert(&mut sent, 1, "goodbye!"),
             Some("!".to_string())
+        );
+    }
+
+    #[test]
+    fn prefix_match_requires_strictly_longer_request() {
+        let session_id = Uuid::new_v4();
+        let entries = vec![OpenAiIndexedSession {
+            session_id,
+            messages: vec![msg("system", "s"), msg("user", "u1")],
+            revision: 1,
+        }];
+
+        assert_eq!(
+            select_longest_prefix_match(
+                &entries,
+                &[
+                    msg("system", "s"),
+                    msg("user", "u1"),
+                    msg("assistant", "a1"),
+                    msg("user", "u2")
+                ]
+            ),
+            Some(PrefixMatch {
+                session_id,
+                prefix_len: 2,
+            })
+        );
+
+        assert_eq!(
+            select_longest_prefix_match(&entries, &[msg("system", "s"), msg("user", "u1")]),
+            None
+        );
+    }
+
+    #[test]
+    fn prefix_match_ignores_non_prefix_candidates() {
+        let entries = vec![OpenAiIndexedSession {
+            session_id: Uuid::new_v4(),
+            messages: vec![msg("user", "x")],
+            revision: 1,
+        }];
+
+        assert_eq!(
+            select_longest_prefix_match(&entries, &[msg("user", "y"), msg("assistant", "z")]),
+            None
+        );
+    }
+
+    #[test]
+    fn prefix_match_prefers_longest_then_latest() {
+        let shorter_id = Uuid::new_v4();
+        let older_long_id = Uuid::new_v4();
+        let newer_long_id = Uuid::new_v4();
+        let request = vec![
+            msg("system", "s"),
+            msg("user", "u1"),
+            msg("assistant", "a1"),
+            msg("user", "u2"),
+        ];
+
+        let entries = vec![
+            OpenAiIndexedSession {
+                session_id: shorter_id,
+                messages: vec![msg("system", "s")],
+                revision: 1,
+            },
+            OpenAiIndexedSession {
+                session_id: older_long_id,
+                messages: vec![msg("system", "s"), msg("user", "u1")],
+                revision: 2,
+            },
+            OpenAiIndexedSession {
+                session_id: newer_long_id,
+                messages: vec![msg("system", "s"), msg("user", "u1")],
+                revision: 3,
+            },
+        ];
+
+        assert_eq!(
+            select_longest_prefix_match(&entries, &request),
+            Some(PrefixMatch {
+                session_id: newer_long_id,
+                prefix_len: 2,
+            })
+        );
+    }
+
+    #[test]
+    fn indexable_messages_collapses_adjacent_duplicate_user_messages() {
+        let messages = vec![
+            chat_msg("system", "rules"),
+            chat_msg("user", "更简洁一点"),
+            chat_msg("user", "更简洁一点"),
+            chat_msg("assistant", "ok"),
+            chat_msg("user", "更简洁一点"),
+        ];
+
+        assert_eq!(
+            indexable_messages(&messages),
+            vec![
+                msg("system", "rules"),
+                msg("user", "更简洁一点"),
+                msg("assistant", "ok"),
+                msg("user", "更简洁一点"),
+            ]
+        );
+    }
+
+    #[test]
+    fn follow_up_prompt_uses_only_trailing_user_messages() {
+        let messages = vec![
+            msg("assistant", "previous answer"),
+            msg("user", "更简洁一点"),
+        ];
+
+        assert_eq!(follow_up_prompt_from_messages(&messages), "更简洁一点");
+    }
+
+    #[test]
+    fn follow_up_prompt_falls_back_to_transcript_without_trailing_user() {
+        let messages = vec![msg("assistant", "previous answer")];
+
+        assert_eq!(
+            follow_up_prompt_from_messages(&messages),
+            "[assistant]: previous answer"
+        );
+    }
+
+    #[test]
+    fn transcript_uses_only_follow_up_suffix_messages() {
+        let all = vec![
+            msg("system", "rules"),
+            msg("user", "u1"),
+            msg("assistant", "a1"),
+            msg("user", "u2"),
+        ];
+
+        assert_eq!(
+            transcript_from_messages(&all[2..]),
+            "[assistant]: a1\n[user]: u2"
         );
     }
 }

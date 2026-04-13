@@ -1,6 +1,7 @@
 use std::{
     collections::HashMap,
     path::{Path, PathBuf},
+    str::FromStr,
     sync::Arc,
 };
 
@@ -18,6 +19,7 @@ use db::{
         execution_process_repo_state::{
             CreateExecutionProcessRepoState, ExecutionProcessRepoState,
         },
+        scratch::{Scratch, ScratchType},
         repo::Repo,
         session::{CreateSession, Session, SessionError},
         task::{Task, TaskStatus},
@@ -32,10 +34,11 @@ use executors::profile::ExecutorConfigs;
 use executors::{
     actions::{
         ExecutorAction, ExecutorActionType,
+        coding_agent_follow_up::CodingAgentFollowUpRequest,
         coding_agent_initial::CodingAgentInitialRequest,
         script::{ScriptContext, ScriptRequest, ScriptRequestLanguage},
     },
-    executors::{ExecutorError, StandardCodingAgentExecutor},
+    executors::{BaseCodingAgent, ExecutorError, StandardCodingAgentExecutor},
     logs::{
         MSG_TYPE_NORMALIZED_FINISHED, MSG_TYPE_NORMALIZED_REMOVE, MSG_TYPE_NORMALIZED_UPSERT,
         NormalizedEntry, NormalizedEntryError, NormalizedEntryType, NormalizedLogEvent,
@@ -59,6 +62,7 @@ use utils::{
 use uuid::Uuid;
 
 use crate::services::{
+    context_archive,
     execution_log_hub::ExecutionLogHub,
     git::{GitService, GitServiceError},
     notification::NotificationService,
@@ -541,6 +545,117 @@ pub trait ContainerService {
         &self,
         workspace: &Workspace,
     ) -> Result<ContainerRef, ContainerError>;
+
+    async fn start_follow_up_execution(
+        &self,
+        workspace: &Workspace,
+        session: &Session,
+        prompt: String,
+        variant: Option<String>,
+        executor: Option<BaseCodingAgent>,
+    ) -> Result<ExecutionProcess, ContainerError> {
+        self.ensure_container_exists(workspace).await?;
+
+        let current_executor =
+            match ExecutionProcess::latest_executor_profile_for_session(&self.db().pool, session.id)
+                .await
+                .map_err(|e| ContainerError::Other(anyhow!(
+                    "Failed to get executor profile: {e}"
+                )))? {
+                Some(profile) => profile.executor,
+                None => {
+                    let executor_str = session.executor.as_ref().ok_or_else(|| {
+                        ContainerError::Other(anyhow!(
+                            "No prior execution and no executor configured on session"
+                        ))
+                    })?;
+                    BaseCodingAgent::from_str(&executor_str.replace('-', "_").to_ascii_uppercase())
+                        .map_err(|_| {
+                            ContainerError::Other(anyhow!("Invalid executor: {}", executor_str))
+                        })?
+                }
+            };
+
+        let switch_decision = context_archive::resolve_executor_switch(current_executor, executor);
+        let executor_profile_id = ExecutorProfileId {
+            executor: switch_decision.requested_executor,
+            variant,
+        };
+
+        let latest_agent_session_id = if switch_decision.switched {
+            None
+        } else {
+            ExecutionProcess::find_latest_coding_agent_turn_session_id(&self.db().pool, session.id)
+                .await?
+        };
+
+        let prompt = if switch_decision.switched {
+            match context_archive::build_executor_switch_prompt_for_workspace(
+                &self.db().pool,
+                workspace,
+                &prompt,
+            )
+            .await
+            {
+                Ok(switch_prompt) => switch_prompt,
+                Err(err) => {
+                    tracing::warn!(
+                        "Failed to build archive-context prompt for executor switch on session {}: {}",
+                        session.id,
+                        err
+                    );
+                    prompt
+                }
+            }
+        } else {
+            prompt
+        };
+
+        let repos = WorkspaceRepo::find_repos_for_workspace(&self.db().pool, workspace.id).await?;
+        let cleanup_action = self.cleanup_actions_for_repos(&repos);
+
+        let working_dir = workspace
+            .agent_working_dir
+            .as_ref()
+            .filter(|dir| !dir.is_empty())
+            .cloned();
+
+        let action_type = if let Some(agent_session_id) = latest_agent_session_id {
+            ExecutorActionType::CodingAgentFollowUpRequest(CodingAgentFollowUpRequest {
+                prompt: prompt.clone(),
+                session_id: agent_session_id,
+                executor_profile_id: executor_profile_id.clone(),
+                working_dir: working_dir.clone(),
+            })
+        } else {
+            ExecutorActionType::CodingAgentInitialRequest(CodingAgentInitialRequest {
+                prompt,
+                executor_profile_id: executor_profile_id.clone(),
+                working_dir,
+            })
+        };
+
+        let action = ExecutorAction::new(action_type, cleanup_action.map(Box::new));
+
+        let execution_process = self
+            .start_execution(
+                workspace,
+                session,
+                &action,
+                &ExecutionProcessRunReason::CodingAgent,
+            )
+            .await?;
+
+        if let Err(e) = Scratch::delete(&self.db().pool, session.id, &ScratchType::DraftFollowUp).await {
+            tracing::debug!(
+                "Failed to delete draft follow-up scratch for session {}: {}",
+                session.id,
+                e
+            );
+        }
+
+        Ok(execution_process)
+    }
 
     async fn is_container_clean(&self, workspace: &Workspace) -> Result<bool, ContainerError>;
 
