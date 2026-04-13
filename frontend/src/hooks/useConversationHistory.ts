@@ -499,11 +499,13 @@ export const useConversationHistory = ({
             p.executionProcess.id,
             'user'
           );
-          // Follow-up prompts can contain content that MDXEditor can't render;
-          // flag them so the UI can fall back to plain text on render error.
+          // User-authored prompts can contain content that MDXEditor can't render;
+          // flag read-only log renderers so they can fall back to plain text.
           if (
             p.executionProcess.executor_action.typ.type ===
-            'CodingAgentFollowUpRequest'
+              'CodingAgentInitialRequest' ||
+            p.executionProcess.executor_action.typ.type ===
+              'CodingAgentFollowUpRequest'
           ) {
             userPatchTypeWithKey.plainTextFallbackOnMarkdownError = true;
           }

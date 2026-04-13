@@ -112,6 +112,7 @@ const TaskPanel = ({ task }: TaskPanelProps) => {
                 value={descriptionContent}
                 disabled
                 taskId={task.id}
+                plainTextFallbackOnRenderError
               />
             )}
           </div>
