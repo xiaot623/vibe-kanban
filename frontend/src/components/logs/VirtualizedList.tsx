@@ -68,9 +68,7 @@ const ItemContent: VirtuosoMessageListProps<
         executionProcessId={data.executionProcessId}
         taskAttempt={attempt}
         task={task}
-        plainTextFallbackOnMarkdownError={
-          data.plainTextFallbackOnMarkdownError
-        }
+        plainTextFallbackOnMarkdownError={data.plainTextFallbackOnMarkdownError}
       />
     );
   }
@@ -106,7 +104,9 @@ const hasStructuredToolUseData = (actionType: ActionType): boolean => {
     case 'plan_presentation':
       return Boolean(actionType.plan.trim());
     case 'todo_management':
-      return actionType.todos.length > 0 || Boolean(actionType.operation.trim());
+      return (
+        actionType.todos.length > 0 || Boolean(actionType.operation.trim())
+      );
     case 'other':
       return Boolean(actionType.description.trim());
     default:
@@ -163,9 +163,11 @@ const VirtualizedList = ({ attempt, task }: VirtualizedListProps) => {
     newLoading: boolean
   ) => {
     const filteredEntries = filterRenderableEntries(newEntries);
-    let scrollModifier: ScrollModifier = InitialDataScrollModifier;
+    let scrollModifier: ScrollModifier | undefined;
 
-    if ((addType === 'running' || addType === 'plan') && !loading) {
+    if (addType === 'initial' || addType === 'historic') {
+      scrollModifier = InitialDataScrollModifier;
+    } else if (addType === 'running' && !loading) {
       scrollModifier = AutoScrollToBottom;
     }
 

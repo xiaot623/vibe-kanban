@@ -114,6 +114,23 @@ const normalizedEntriesToPatches = (entries: NormalizedEntry[]): PatchType[] =>
     content: entry,
   }));
 
+const isLoadingEntry = (entry: PatchTypeWithKey): boolean =>
+  entry.type === 'NORMALIZED_ENTRY' &&
+  entry.content.entry_type.type === 'loading';
+
+const isPlanPresentationEntry = (entry: PatchTypeWithKey): boolean => {
+  if (entry.type !== 'NORMALIZED_ENTRY') {
+    return false;
+  }
+
+  const entryType = entry.content.entry_type;
+  return (
+    entryType.type === 'tool_use' &&
+    (entryType.tool_name === 'ExitPlanMode' ||
+      entryType.action_type.action === 'plan_presentation')
+  );
+};
+
 export const useConversationHistory = ({
   attempt,
   onEntriesUpdated,
@@ -682,15 +699,19 @@ export const useConversationHistory = ({
       const entries = flattenEntriesForEmit(executionProcessState);
       let modifiedAddEntryType = addEntryType;
 
-      // If this is a live-running emit and the last entry is a plan, emit special plan type.
+      // Ignore the synthetic loading row so plan updates do not scroll to an
+      // empty placeholder below the plan body.
       if (addEntryType === 'running' && entries.length > 0) {
-        const lastEntry = entries[entries.length - 1];
+        let lastNonLoadingEntry: PatchTypeWithKey | undefined;
+        for (let i = entries.length - 1; i >= 0; i -= 1) {
+          if (!isLoadingEntry(entries[i])) {
+            lastNonLoadingEntry = entries[i];
+            break;
+          }
+        }
         if (
-          lastEntry.type === 'NORMALIZED_ENTRY' &&
-          lastEntry.content.entry_type.type === 'tool_use' &&
-          (lastEntry.content.entry_type.tool_name === 'ExitPlanMode' ||
-            lastEntry.content.entry_type.action_type.action ===
-              'plan_presentation')
+          lastNonLoadingEntry &&
+          isPlanPresentationEntry(lastNonLoadingEntry)
         ) {
           modifiedAddEntryType = 'plan';
         }

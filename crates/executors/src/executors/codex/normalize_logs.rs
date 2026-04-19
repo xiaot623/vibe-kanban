@@ -438,30 +438,42 @@ impl LogState {
         call_id: String,
         content: String,
         mode: UpdateMode,
-    ) -> (NormalizedEntry, usize, bool) {
+    ) -> Option<(NormalizedEntry, usize, bool)> {
+        let content_is_blank = content.trim().is_empty();
+        let is_append = matches!(mode, UpdateMode::Append);
         let plan_state = self.plans.entry(call_id.clone()).or_default();
+        match mode {
+            UpdateMode::Append => plan_state.plan.push_str(&content),
+            UpdateMode::Set => plan_state.plan = content,
+        }
+
+        if plan_state.plan.trim().is_empty() || (is_append && content_is_blank) {
+            return None;
+        }
+
         let is_new = plan_state.index.is_none();
-        let index = if let Some(index) = plan_state.index {
-            match mode {
-                UpdateMode::Append => plan_state.plan.push_str(&content),
-                UpdateMode::Set => plan_state.plan = content,
-            }
-            index
-        } else {
+        let index = plan_state.index.unwrap_or_else(|| {
             let index = self.entry_index.next();
             plan_state.index = Some(index);
-            plan_state.plan = content;
             index
-        };
+        });
 
-        (plan_state.to_normalized_entry(&call_id), index, is_new)
+        Some((plan_state.to_normalized_entry(&call_id), index, is_new))
     }
 
-    fn plan_append(&mut self, call_id: String, content: String) -> (NormalizedEntry, usize, bool) {
+    fn plan_append(
+        &mut self,
+        call_id: String,
+        content: String,
+    ) -> Option<(NormalizedEntry, usize, bool)> {
         self.plan_update(call_id, content, UpdateMode::Append)
     }
 
-    fn plan_set(&mut self, call_id: String, content: String) -> (NormalizedEntry, usize, bool) {
+    fn plan_set(
+        &mut self,
+        call_id: String,
+        content: String,
+    ) -> Option<(NormalizedEntry, usize, bool)> {
         self.plan_update(call_id, content, UpdateMode::Set)
     }
 }
@@ -956,8 +968,9 @@ fn handle_v2_item_completed(
                 state.in_plan_mode = true;
                 state.assistant = None;
                 state.thinking = None;
-                let (entry, index, is_new) = state.plan_set(id, text);
-                upsert_normalized_entry(&msg_store, index, entry, is_new);
+                if let Some((entry, index, is_new)) = state.plan_set(id, text) {
+                    upsert_normalized_entry(&msg_store, index, entry, is_new);
+                }
             }
         }
         AppThreadItem::Reasoning {
@@ -1347,8 +1360,9 @@ fn handle_server_notification(
             state.in_plan_mode = true;
             state.assistant = None;
             state.thinking = None;
-            let (entry, index, is_new) = state.plan_append(event.item_id, event.delta);
-            upsert_normalized_entry(msg_store, index, entry, is_new);
+            if let Some((entry, index, is_new)) = state.plan_append(event.item_id, event.delta) {
+                upsert_normalized_entry(msg_store, index, entry, is_new);
+            }
         }
         ServerNotification::ItemStarted(event) => {
             handle_v2_item_started(event.item, state, msg_store, entry_index, worktree_path);
@@ -1920,6 +1934,32 @@ mod tests {
 
         tokio::time::sleep(Duration::from_millis(40)).await;
         let entries = collect_entries(msg_store.as_ref());
+        assert!(
+            !entries.iter().any(|entry| {
+                entry
+                    .metadata
+                    .clone()
+                    .and_then(|value| serde_json::from_value::<ToolCallMetadata>(value).ok())
+                    .is_some_and(|metadata| metadata.tool_call_id == "plan-structured-1")
+            }),
+            "whitespace-only plan delta should not create entry"
+        );
+
+        push_json_line(
+            msg_store.as_ref(),
+            json!({
+                "method": "item/plan/delta",
+                "params": {
+                    "threadId": "thread-1",
+                    "turnId": "turn-1",
+                    "itemId": "plan-structured-1",
+                    "delta": "Step 1"
+                }
+            }),
+        );
+
+        tokio::time::sleep(Duration::from_millis(40)).await;
+        let entries = collect_entries(msg_store.as_ref());
         let plan_entry = entries
             .iter()
             .find(|entry| {
@@ -1929,14 +1969,14 @@ mod tests {
                     .and_then(|value| serde_json::from_value::<ToolCallMetadata>(value).ok())
                     .is_some_and(|metadata| metadata.tool_call_id == "plan-structured-1")
             })
-            .expect("plan entry should be present");
-        assert!(matches!(
-            plan_entry.entry_type,
+            .expect("plan entry should be present after visible content");
+        match &plan_entry.entry_type {
             NormalizedEntryType::ToolUse {
-                action_type: ActionType::PlanPresentation { .. },
+                action_type: ActionType::PlanPresentation { plan },
                 ..
-            }
-        ));
+            } => assert_eq!(plan, "   Step 1"),
+            other => panic!("expected plan presentation action, got {other:?}"),
+        }
 
         msg_store.push_finished();
     }
