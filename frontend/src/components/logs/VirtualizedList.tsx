@@ -165,7 +165,7 @@ const VirtualizedList = ({ attempt, task }: VirtualizedListProps) => {
     const filteredEntries = filterRenderableEntries(newEntries);
     let scrollModifier: ScrollModifier | undefined;
 
-    if (addType === 'initial' || addType === 'historic') {
+    if (addType === 'initial') {
       scrollModifier = InitialDataScrollModifier;
     } else if (addType === 'running' && !loading) {
       scrollModifier = AutoScrollToBottom;
