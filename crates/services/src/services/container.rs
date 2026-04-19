@@ -143,6 +143,8 @@ pub trait ContainerService {
 
     fn notification_service(&self) -> &NotificationService;
 
+    fn telegraph_session_store(&self) -> &Arc<telegraph::TelegraphSessionStore>;
+
     fn workspace_to_current_dir(&self, workspace: &Workspace) -> PathBuf;
 
     async fn create(&self, workspace: &Workspace) -> Result<ContainerRef, ContainerError>;
@@ -1126,12 +1128,38 @@ pub trait ContainerService {
         let db = self.db().clone();
         let telegraph_mirror_config =
             telegraph::TelegraphMirrorConfig::from_telegram_config(&self.telegram_config().await);
+        let telegraph_session_store = self.telegraph_session_store().clone();
 
         tokio::spawn(async move {
-            let telegraph_page_title = ExecutionProcess::load_context(&db.pool, execution_id)
-                .await
+            let ctx = ExecutionProcess::load_context(&db.pool, execution_id).await;
+            let telegraph_page_title = ctx
+                .as_ref()
                 .map(|ctx| telegraph::page_title_for_execution(&ctx.task.title, execution_id))
                 .unwrap_or_else(|_| telegraph::page_title_for_execution("", execution_id));
+            let session_id = ctx.as_ref().map(|ctx| ctx.session.id).ok();
+            // Build the "User" section content:
+            // - Initial execution: "task title\ntask description"
+            // - Follow-up execution: the follow-up prompt
+            let user_input: Option<String> = ctx.as_ref().ok().and_then(|ctx| {
+                let action = ctx.execution_process.executor_action().ok()?;
+                match &action.typ {
+                    ExecutorActionType::CodingAgentInitialRequest(_) => {
+                        let title = &ctx.task.title;
+                        let detail = ctx.task.description.as_deref().unwrap_or("");
+                        let text = if detail.is_empty() {
+                            title.clone()
+                        } else {
+                            format!("{}\n{}", title, detail)
+                        };
+                        Some(text)
+                    }
+                    ExecutorActionType::CodingAgentFollowUpRequest(req) => {
+                        Some(req.prompt.clone())
+                    }
+                    _ => None,
+                }
+            });
+
             let store = {
                 let map = msg_stores.read().await;
                 map.get(&execution_id).cloned()
@@ -1144,14 +1172,19 @@ pub trait ContainerService {
             if let Some(store) = store {
                 let mut raw_stream = store.history_plus_stream();
                 let mut normalized_stream = hub.clone().map(|h| h.normalized_history_plus_stream());
-                let telegraph_handle = match (hub.clone(), telegraph_mirror_config.clone()) {
-                    (Some(hub), Some(config)) => Some(telegraph::spawn_telegraph_log_consumer(
-                        execution_id,
-                        telegraph_page_title,
-                        hub.normalized_history_plus_stream(),
-                        config,
-                        db.pool.clone(),
-                    )),
+                let telegraph_handle = match (hub.clone(), telegraph_mirror_config.clone(), session_id) {
+                    (Some(hub), Some(config), Some(sid)) => {
+                        Some(telegraph::spawn_telegraph_log_consumer(
+                            sid,
+                            execution_id,
+                            telegraph_page_title,
+                            hub.normalized_history_plus_stream(),
+                            config,
+                            db.pool.clone(),
+                            telegraph_session_store,
+                            user_input,
+                        ))
+                    }
                     _ => None,
                 };
                 let mut pending_logs: Vec<NewExecutionProcessLog> = Vec::new();

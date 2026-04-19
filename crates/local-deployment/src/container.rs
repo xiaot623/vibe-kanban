@@ -73,6 +73,7 @@ pub struct LocalContainerService {
     approvals: Approvals,
     queued_message_service: QueuedMessageService,
     notification_service: NotificationService,
+    telegraph_session_store: Arc<services::services::telegram::telegraph::TelegraphSessionStore>,
 }
 
 impl LocalContainerService {
@@ -106,6 +107,7 @@ impl LocalContainerService {
             approvals,
             queued_message_service,
             notification_service,
+            telegraph_session_store: services::services::telegram::telegraph::new_telegraph_session_store(),
         };
 
         container.spawn_workspace_cleanup();
@@ -941,6 +943,12 @@ impl ContainerService for LocalContainerService {
 
     fn notification_service(&self) -> &NotificationService {
         &self.notification_service
+    }
+
+    fn telegraph_session_store(
+        &self,
+    ) -> &Arc<services::services::telegram::telegraph::TelegraphSessionStore> {
+        &self.telegraph_session_store
     }
 
     async fn telegram_config(&self) -> services::services::config::TelegramConfig {

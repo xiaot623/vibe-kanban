@@ -21,6 +21,7 @@ use serde::Deserialize;
 use sqlx::SqlitePool;
 use telegraph_rs::{Account, Node, NodeElement, Telegraph};
 use tokio::{
+    sync::Mutex,
     task::JoinHandle,
     time::{Instant, MissedTickBehavior},
 };
@@ -78,6 +79,107 @@ pub async fn ensure_telegraph_config(config: &mut Config) -> Result<bool> {
 
     config.telegram.telegraph_access_token = Some(access_token);
     Ok(true)
+}
+
+/// Per-session in-memory telegraph state shared across all follow-up executions.
+/// Keyed by `session_id`. Each session lock is independent.
+pub type TelegraphSessionStore = Mutex<HashMap<Uuid, Arc<Mutex<SessionTelegraphState>>>>;
+
+pub fn new_telegraph_session_store() -> Arc<TelegraphSessionStore> {
+    Arc::new(Mutex::new(HashMap::new()))
+}
+
+/// In-memory state for all telegraph pages belonging to one session.
+pub struct SessionTelegraphState {
+    /// Ordered list of execution_process_ids in the order they were first seen.
+    execution_order: Vec<Uuid>,
+    /// Per-execution normalized entries (index → entry).
+    entries_by_execution: HashMap<Uuid, BTreeMap<usize, NormalizedEntry>>,
+    /// Per-execution user input to prepend as a "User" section.
+    user_inputs: HashMap<Uuid, String>,
+    /// Current telegraph page metadata (URL/path/title) for the session.
+    page_meta: Vec<TelegraphPageMeta>,
+}
+
+impl SessionTelegraphState {
+    fn new() -> Self {
+        Self {
+            execution_order: Vec::new(),
+            entries_by_execution: HashMap::new(),
+            user_inputs: HashMap::new(),
+            page_meta: Vec::new(),
+        }
+    }
+
+    /// Merge local entries for one execution into the session state.
+    fn merge_execution_entries(
+        &mut self,
+        execution_process_id: Uuid,
+        local_entries: &BTreeMap<usize, NormalizedEntry>,
+        user_input: Option<&str>,
+    ) {
+        if !self.execution_order.contains(&execution_process_id) {
+            self.execution_order.push(execution_process_id);
+        }
+        let slot = self
+            .entries_by_execution
+            .entry(execution_process_id)
+            .or_default();
+        *slot = local_entries.clone();
+        if let Some(input) = user_input {
+            self.user_inputs
+                .entry(execution_process_id)
+                .or_insert_with(|| input.to_owned());
+        }
+    }
+
+    /// Render all entries in execution order, producing one `Vec<Node>` per page.
+    fn render_all_page_contents(&self) -> Option<Vec<String>> {
+        let rendered_entries: Vec<RenderedEntry> = self
+            .execution_order
+            .iter()
+            .flat_map(|eid| {
+                let user_entry = self.user_inputs.get(eid).and_then(|input| {
+                    if input.is_empty() {
+                        None
+                    } else {
+                        Some(RenderedEntry { nodes: section_nodes("User", markdown_nodes(input)) })
+                    }
+                });
+                let agent_entries = self
+                    .entries_by_execution
+                    .get(eid)
+                    .map(|entries| {
+                        entries
+                            .values()
+                            .filter_map(render_entry_nodes)
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_default();
+                user_entry.into_iter().chain(agent_entries)
+            })
+            .collect();
+
+        if rendered_entries.is_empty() {
+            return None;
+        }
+
+        let pages = paginate_rendered_entries(rendered_entries);
+        let mut contents = Vec::with_capacity(pages.len());
+        for nodes in pages {
+            match serde_json::to_string(&nodes)
+                .context("failed to serialize telegraph node content")
+            {
+                Ok(content) => contents.push(content),
+                Err(err) => {
+                    tracing::warn!("Telegraph content serialization failed: {}", err);
+                    return None;
+                }
+            }
+        }
+
+        Some(contents)
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -159,11 +261,14 @@ impl TelegraphClient for TelegraphRsClient {
 }
 
 pub fn spawn_telegraph_log_consumer(
+    session_id: Uuid,
     execution_process_id: Uuid,
     page_title: String,
     stream: NormalizedEventStream,
     config: TelegraphMirrorConfig,
     db_pool: SqlitePool,
+    session_store: Arc<TelegraphSessionStore>,
+    user_input: Option<String>,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
         let client = match TelegraphRsClient::new(&config).await {
@@ -179,24 +284,46 @@ pub fn spawn_telegraph_log_consumer(
         };
 
         run_telegraph_log_consumer_with_client(
+            session_id,
             execution_process_id,
             page_title,
             stream,
             client,
             Some(db_pool),
+            session_store,
+            user_input,
         )
         .await;
     })
 }
 
 async fn run_telegraph_log_consumer_with_client(
+    session_id: Uuid,
     execution_process_id: Uuid,
     page_title: String,
     mut stream: NormalizedEventStream,
     client: Arc<dyn TelegraphClient>,
     db_pool: Option<SqlitePool>,
+    session_store: Arc<TelegraphSessionStore>,
+    user_input: Option<String>,
 ) {
-    let mut consumer = TelegraphLogConsumer::new(execution_process_id, page_title, client, db_pool);
+    // Get or create per-session state (shared, locked per session).
+    let session_state: Arc<Mutex<SessionTelegraphState>> = {
+        let mut store = session_store.lock().await;
+        store
+            .entry(session_id)
+            .or_insert_with(|| Arc::new(Mutex::new(SessionTelegraphState::new())))
+            .clone()
+    };
+
+    let mut consumer = TelegraphLogConsumer::new(
+        execution_process_id,
+        page_title,
+        client,
+        db_pool,
+        session_state,
+        user_input,
+    );
     let mut flush_interval = tokio::time::interval_at(
         Instant::now() + TELEGRAPH_FLUSH_INTERVAL,
         TELEGRAPH_FLUSH_INTERVAL,
@@ -216,7 +343,7 @@ async fn run_telegraph_log_consumer_with_client(
                     }
                     Some(Ok(event)) => {
                         consumer.apply_event(event);
-                        if consumer.page_meta.is_empty() && consumer.has_renderable_content() {
+                        if consumer.no_pages_yet() && consumer.has_renderable_content() {
                             consumer.flush_pending_updates().await;
                         }
                     }
@@ -244,9 +371,15 @@ struct TelegraphLogConsumer {
     page_title: String,
     client: Arc<dyn TelegraphClient>,
     db_pool: Option<SqlitePool>,
-    entries: BTreeMap<usize, NormalizedEntry>,
-    page_meta: Vec<TelegraphPageMeta>,
+    /// Local entries for the current execution only (index → entry).
+    local_entries: BTreeMap<usize, NormalizedEntry>,
+    /// Shared session-level state (page_meta, all executions' entries).
+    session_state: Arc<Mutex<SessionTelegraphState>>,
     dirty: bool,
+    /// True after the first successful flush (pages exist).
+    flushed_once: bool,
+    /// User-provided input to display at the top of this execution's section.
+    user_input: Option<String>,
 }
 
 impl TelegraphLogConsumer {
@@ -255,26 +388,30 @@ impl TelegraphLogConsumer {
         page_title: String,
         client: Arc<dyn TelegraphClient>,
         db_pool: Option<SqlitePool>,
+        session_state: Arc<Mutex<SessionTelegraphState>>,
+        user_input: Option<String>,
     ) -> Self {
         Self {
             execution_process_id,
             page_title,
             client,
             db_pool,
-            entries: BTreeMap::new(),
-            page_meta: Vec::new(),
+            local_entries: BTreeMap::new(),
+            session_state,
             dirty: false,
+            flushed_once: false,
+            user_input,
         }
     }
 
     fn apply_event(&mut self, event: NormalizedLogEvent) {
         match event {
             NormalizedLogEvent::UpsertEntry { index, entry } => {
-                self.entries.insert(index, entry);
+                self.local_entries.insert(index, entry);
                 self.dirty = true;
             }
             NormalizedLogEvent::RemoveEntry { index } => {
-                if self.entries.remove(&index).is_some() {
+                if self.local_entries.remove(&index).is_some() {
                     self.dirty = true;
                 }
             }
@@ -283,7 +420,13 @@ impl TelegraphLogConsumer {
     }
 
     fn has_renderable_content(&self) -> bool {
-        self.render_page_contents().is_some()
+        self.local_entries
+            .values()
+            .any(|e| render_entry_nodes(e).is_some())
+    }
+
+    fn no_pages_yet(&self) -> bool {
+        !self.flushed_once
     }
 
     async fn flush_pending_updates(&mut self) {
@@ -291,7 +434,12 @@ impl TelegraphLogConsumer {
             return;
         }
 
-        let Some(contents) = self.render_page_contents() else {
+        let mut session = self.session_state.lock().await;
+
+        // Merge local entries into session state.
+        session.merge_execution_entries(self.execution_process_id, &self.local_entries, self.user_input.as_deref());
+
+        let Some(contents) = session.render_all_page_contents() else {
             return;
         };
 
@@ -299,8 +447,8 @@ impl TelegraphLogConsumer {
         let mut next_page_meta = Vec::with_capacity(page_count);
 
         for (page_index, content) in contents.iter().enumerate() {
-            let title = page_title_for_page(&self.page_title, page_index, page_count);
-            let update_result = match self.page_meta.get(page_index) {
+            let title = page_title_for_page(&self.page_title, page_index);
+            let update_result = match session.page_meta.get(page_index) {
                 Some(meta) => self.client.edit_page(&meta.path, &title, content).await,
                 None => self.client.create_page(&title, content).await,
             };
@@ -319,41 +467,12 @@ impl TelegraphLogConsumer {
             }
         }
 
-        self.page_meta = next_page_meta;
+        session.page_meta = next_page_meta;
         self.dirty = false;
-        self.persist_page_meta(&self.page_meta).await;
-    }
+        self.flushed_once = true;
 
-    fn render_page_contents(&self) -> Option<Vec<String>> {
-        let rendered_entries = self
-            .entries
-            .values()
-            .filter_map(render_entry_nodes)
-            .collect::<Vec<_>>();
-
-        if rendered_entries.is_empty() {
-            return None;
-        }
-
-        let pages = paginate_rendered_entries(rendered_entries);
-        let mut contents = Vec::with_capacity(pages.len());
-        for nodes in pages {
-            match serde_json::to_string(&nodes)
-                .context("failed to serialize telegraph node content")
-            {
-                Ok(content) => contents.push(content),
-                Err(err) => {
-                    tracing::warn!(
-                        "Telegraph content serialization failed for execution {}: {}",
-                        self.execution_process_id,
-                        err
-                    );
-                    return None;
-                }
-            }
-        }
-
-        Some(contents)
+        // Persist URL cache for this execution_process_id.
+        self.persist_page_meta(&session.page_meta).await;
     }
 
     async fn persist_page_meta(&self, meta: &[TelegraphPageMeta]) {
@@ -423,12 +542,8 @@ fn paginate_rendered_entries(rendered_entries: Vec<RenderedEntry>) -> Vec<Vec<No
     pages
 }
 
-fn page_title_for_page(base_title: &str, page_index: usize, page_count: usize) -> String {
-    if page_count <= 1 {
-        return base_title.to_string();
-    }
-
-    let suffix = format!(" ({}/{})", page_index + 1, page_count);
+fn page_title_for_page(base_title: &str, page_index: usize) -> String {
+    let suffix = format!(" ({})", page_index + 1);
     let available_chars = TELEGRAPH_TITLE_MAX_CHARS.saturating_sub(suffix.chars().count());
     let trimmed_base = truncate_chars(base_title, available_chars.max(1));
     format!("{trimmed_base}{suffix}")
@@ -1257,11 +1372,46 @@ mod tests {
         }
     }
 
+    fn make_session_state() -> Arc<tokio::sync::Mutex<SessionTelegraphState>> {
+        Arc::new(tokio::sync::Mutex::new(SessionTelegraphState::new()))
+    }
+
+    async fn run_consumer_with_client_for_test(
+        execution_process_id: Uuid,
+        page_title: &str,
+        stream: NormalizedEventStream,
+        client: Arc<dyn TelegraphClient>,
+        db_pool: Option<SqlitePool>,
+        session_id: Option<Uuid>,
+        session_store: Option<Arc<TelegraphSessionStore>>,
+    ) {
+        let sid = session_id.unwrap_or_else(Uuid::new_v4);
+        let store = session_store.unwrap_or_else(new_telegraph_session_store);
+        run_telegraph_log_consumer_with_client(
+            sid,
+            execution_process_id,
+            page_title.to_string(),
+            stream,
+            client,
+            db_pool,
+            store,
+            None,
+        )
+        .await;
+    }
+
     #[test]
     fn upsert_and_remove_apply_in_order() {
         let mock = Arc::new(MockTelegraphClient::default());
-        let mut consumer =
-            TelegraphLogConsumer::new(Uuid::new_v4(), "Task Title".to_string(), mock, None);
+        let session_state = make_session_state();
+        let mut consumer = TelegraphLogConsumer::new(
+            Uuid::new_v4(),
+            "Task Title".to_string(),
+            mock,
+            None,
+            session_state,
+            None,
+        );
 
         consumer.apply_event(NormalizedLogEvent::UpsertEntry {
             index: 2,
@@ -1273,22 +1423,38 @@ mod tests {
         });
         consumer.apply_event(NormalizedLogEvent::RemoveEntry { index: 1 });
 
-        let rendered = consumer
-            .render_page_contents()
-            .expect("rendered text should exist");
-        assert_eq!(rendered.len(), 1);
-        assert!(!rendered[0].contains("assistant-1"));
-        assert!(rendered[0].contains("assistant-2"));
-        assert!(rendered[0].contains("Assistant"));
+        // Render via the session state directly
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .expect("build runtime");
+        rt.block_on(async {
+            consumer.flush_pending_updates().await;
+            let session = consumer.session_state.lock().await;
+            let rendered = session
+                .render_all_page_contents()
+                .expect("rendered text should exist");
+            assert_eq!(rendered.len(), 1);
+            assert!(!rendered[0].contains("assistant-1"));
+            assert!(rendered[0].contains("assistant-2"));
+            assert!(rendered[0].contains("Assistant"));
+        });
     }
 
     #[test]
     fn tool_markdown_result_is_rendered() {
         let mock = Arc::new(MockTelegraphClient::default());
-        let mut consumer =
-            TelegraphLogConsumer::new(Uuid::new_v4(), "Task Title".to_string(), mock, None);
+        let session_state = make_session_state();
+        let mut consumer = TelegraphLogConsumer::new(
+            Uuid::new_v4(),
+            "Task Title".to_string(),
+            mock,
+            None,
+            session_state,
+            None,
+        );
 
         consumer.apply_event(NormalizedLogEvent::UpsertEntry {
+
             index: 3,
             entry: entry(
                 NormalizedEntryType::ToolUse {
@@ -1304,13 +1470,20 @@ mod tests {
             ),
         });
 
-        let rendered = consumer
-            .render_page_contents()
-            .expect("rendered text should exist");
-        assert_eq!(rendered.len(), 1);
-        assert!(rendered[0].contains("web [success]"));
-        assert!(rendered[0].contains("Result"));
-        assert!(rendered[0].contains("item"));
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .expect("build runtime");
+        rt.block_on(async {
+            consumer.flush_pending_updates().await;
+            let session = consumer.session_state.lock().await;
+            let rendered = session
+                .render_all_page_contents()
+                .expect("rendered text should exist");
+            assert_eq!(rendered.len(), 1);
+            assert!(rendered[0].contains("web [success]"));
+            assert!(rendered[0].contains("Result"));
+            assert!(rendered[0].contains("item"));
+        });
     }
 
     #[test]
@@ -1341,11 +1514,13 @@ mod tests {
         let stream: NormalizedEventStream =
             Box::pin(UnboundedReceiverStream::new(rx).map(Ok::<_, std::io::Error>));
         let execution_process_id = Uuid::new_v4();
-        let handle = tokio::spawn(run_telegraph_log_consumer_with_client(
+        let handle = tokio::spawn(run_consumer_with_client_for_test(
             execution_process_id,
-            "Task Title".to_string(),
+            "Task Title",
             stream,
             mock.clone(),
+            None,
+            None,
             None,
         ));
 
@@ -1385,22 +1560,27 @@ mod tests {
 
     #[test]
     fn render_splits_into_multiple_pages_when_too_long() {
-        let mock = Arc::new(MockTelegraphClient::default());
-        let mut consumer =
-            TelegraphLogConsumer::new(Uuid::new_v4(), "Task Title".to_string(), mock, None);
+        let session_state = Arc::new(tokio::sync::Mutex::new(SessionTelegraphState::new()));
+        let mut state = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .expect("build runtime")
+            .block_on(async { session_state.lock().await });
+        let exec_id = Uuid::new_v4();
 
+        let mut local_entries = BTreeMap::new();
         for i in 0..(TELEGRAPH_MAX_PAGE_ENTRIES + 30) {
-            consumer.apply_event(NormalizedLogEvent::UpsertEntry {
-                index: i,
-                entry: entry(
+            local_entries.insert(
+                i,
+                entry(
                     NormalizedEntryType::AssistantMessage,
                     &format!("assistant-line-{i}"),
                 ),
-            });
+            );
         }
+        state.merge_execution_entries(exec_id, &local_entries, None);
 
-        let rendered_pages = consumer
-            .render_page_contents()
+        let rendered_pages = state
+            .render_all_page_contents()
             .expect("rendered text should exist");
         assert_eq!(rendered_pages.len(), 2);
         assert!(rendered_pages[0].contains("assistant-line-0"));
@@ -1412,7 +1592,7 @@ mod tests {
 
     #[test]
     fn page_title_for_page_appends_page_counter() {
-        assert_eq!(page_title_for_page("Task Title", 1, 3), "Task Title (2/3)");
+        assert_eq!(page_title_for_page("Task Title", 1), "Task Title (2)");
     }
 
     #[test]
@@ -1505,14 +1685,7 @@ mod tests {
         assert!(!should_initialize_telegraph_account(&config));
     }
 
-    #[tokio::test]
-    async fn page_metadata_is_persisted_to_db() {
-        let mock = Arc::new(MockTelegraphClient::default());
-        let (tx, rx) = mpsc::unbounded_channel::<NormalizedLogEvent>();
-        let stream: NormalizedEventStream =
-            Box::pin(UnboundedReceiverStream::new(rx).map(Ok::<_, std::io::Error>));
-
-        let execution_process_id = Uuid::new_v4();
+    async fn make_test_pool() -> SqlitePool {
         let pool = sqlx::SqlitePool::connect("sqlite::memory:")
             .await
             .expect("create sqlite memory pool");
@@ -1531,12 +1704,26 @@ mod tests {
         .execute(&pool)
         .await
         .expect("create test table");
-        let handle = tokio::spawn(run_telegraph_log_consumer_with_client(
+        pool
+    }
+
+    #[tokio::test]
+    async fn page_metadata_is_persisted_to_db() {
+        let mock = Arc::new(MockTelegraphClient::default());
+        let (tx, rx) = mpsc::unbounded_channel::<NormalizedLogEvent>();
+        let stream: NormalizedEventStream =
+            Box::pin(UnboundedReceiverStream::new(rx).map(Ok::<_, std::io::Error>));
+
+        let execution_process_id = Uuid::new_v4();
+        let pool = make_test_pool().await;
+        let handle = tokio::spawn(run_consumer_with_client_for_test(
             execution_process_id,
-            "Task Title".to_string(),
+            "Task Title",
             stream,
             mock.clone(),
             Some(pool.clone()),
+            None,
+            None,
         ));
 
         tx.send(NormalizedLogEvent::UpsertEntry {
@@ -1566,31 +1753,16 @@ mod tests {
             Box::pin(UnboundedReceiverStream::new(rx).map(Ok::<_, std::io::Error>));
 
         let execution_process_id = Uuid::new_v4();
-        let pool = sqlx::SqlitePool::connect("sqlite::memory:")
-            .await
-            .expect("create sqlite memory pool");
-        sqlx::query(
-            r#"CREATE TABLE execution_process_telegraph_pages (
-                execution_process_id TEXT NOT NULL,
-                page_index INTEGER NOT NULL,
-                url TEXT NOT NULL,
-                path TEXT NOT NULL,
-                title TEXT NOT NULL,
-                created_at DATETIME NOT NULL,
-                updated_at DATETIME NOT NULL,
-                PRIMARY KEY (execution_process_id, page_index)
-            )"#,
-        )
-        .execute(&pool)
-        .await
-        .expect("create test table");
+        let pool = make_test_pool().await;
 
-        let handle = tokio::spawn(run_telegraph_log_consumer_with_client(
+        let handle = tokio::spawn(run_consumer_with_client_for_test(
             execution_process_id,
-            "Task Title".to_string(),
+            "Task Title",
             stream,
             mock.clone(),
             Some(pool.clone()),
+            None,
+            None,
         ));
 
         for i in 0..(TELEGRAPH_MAX_PAGE_ENTRIES + 5) {
@@ -1614,6 +1786,245 @@ mod tests {
                 "https://telegra.ph/mock-1".to_string(),
                 "https://telegra.ph/mock-2".to_string(),
             ]
+        );
+    }
+
+    /// Second execution in same session appends to last existing page when there is room.
+    #[tokio::test]
+    async fn second_execution_appends_to_last_page_when_room() {
+        let mock = Arc::new(MockTelegraphClient::default());
+        let session_id = Uuid::new_v4();
+        let store = new_telegraph_session_store();
+
+        // First execution: a few entries (fits on one page).
+        let exec1 = Uuid::new_v4();
+        {
+            let (tx, rx) = mpsc::unbounded_channel::<NormalizedLogEvent>();
+            let stream: NormalizedEventStream =
+                Box::pin(UnboundedReceiverStream::new(rx).map(Ok::<_, std::io::Error>));
+            let handle = tokio::spawn(run_consumer_with_client_for_test(
+                exec1,
+                "Task Title",
+                stream,
+                mock.clone(),
+                None,
+                Some(session_id),
+                Some(store.clone()),
+            ));
+            tx.send(NormalizedLogEvent::UpsertEntry {
+                index: 0,
+                entry: entry(NormalizedEntryType::AssistantMessage, "first-exec-entry"),
+            })
+            .expect("send");
+            tx.send(NormalizedLogEvent::Finished).expect("send");
+            drop(tx);
+            handle.await.expect("consumer task should finish");
+        }
+        // After first execution: 1 page created.
+        assert_eq!(mock.create_count(), 1);
+        assert_eq!(mock.edit_count(), 0);
+
+        // Second execution in same session: adds a few more entries (still fits on one page).
+        let exec2 = Uuid::new_v4();
+        {
+            let (tx, rx) = mpsc::unbounded_channel::<NormalizedLogEvent>();
+            let stream: NormalizedEventStream =
+                Box::pin(UnboundedReceiverStream::new(rx).map(Ok::<_, std::io::Error>));
+            let handle = tokio::spawn(run_consumer_with_client_for_test(
+                exec2,
+                "Task Title",
+                stream,
+                mock.clone(),
+                None,
+                Some(session_id),
+                Some(store.clone()),
+            ));
+            tx.send(NormalizedLogEvent::UpsertEntry {
+                index: 0,
+                entry: entry(NormalizedEntryType::AssistantMessage, "second-exec-entry"),
+            })
+            .expect("send");
+            tx.send(NormalizedLogEvent::Finished).expect("send");
+            drop(tx);
+            handle.await.expect("consumer task should finish");
+        }
+
+        // Still 1 page total (edits the existing page, no new page created).
+        assert_eq!(mock.create_count(), 1, "no new page should be created");
+        assert!(mock.edit_count() >= 1, "existing page should be edited");
+
+        // Content of page should contain both executions' entries.
+        let session_lock = store.lock().await;
+        let session = session_lock.get(&session_id).expect("session exists");
+        let session = session.lock().await;
+        let contents = session
+            .render_all_page_contents()
+            .expect("should have content");
+        assert_eq!(contents.len(), 1, "should still be one page");
+        assert!(contents[0].contains("first-exec-entry"));
+        assert!(contents[0].contains("second-exec-entry"));
+    }
+
+    /// When second execution exceeds page capacity, new pages are created.
+    #[tokio::test]
+    async fn second_execution_creates_new_pages_on_overflow() {
+        let mock = Arc::new(MockTelegraphClient::default());
+        let session_id = Uuid::new_v4();
+        let store = new_telegraph_session_store();
+
+        // First execution: fill multiple pages.
+        let exec1 = Uuid::new_v4();
+        {
+            let (tx, rx) = mpsc::unbounded_channel::<NormalizedLogEvent>();
+            let stream: NormalizedEventStream =
+                Box::pin(UnboundedReceiverStream::new(rx).map(Ok::<_, std::io::Error>));
+            let handle = tokio::spawn(run_consumer_with_client_for_test(
+                exec1,
+                "Task Title",
+                stream,
+                mock.clone(),
+                None,
+                Some(session_id),
+                Some(store.clone()),
+            ));
+            for i in 0..TELEGRAPH_MAX_PAGE_ENTRIES {
+                tx.send(NormalizedLogEvent::UpsertEntry {
+                    index: i,
+                    entry: entry(
+                        NormalizedEntryType::AssistantMessage,
+                        &format!("exec1-entry-{i}"),
+                    ),
+                })
+                .expect("send");
+            }
+            tx.send(NormalizedLogEvent::Finished).expect("send");
+            drop(tx);
+            handle.await.expect("consumer task should finish");
+        }
+        let creates_after_exec1 = mock.create_count();
+        assert!(creates_after_exec1 >= 1, "exec1 should create at least 1 page");
+
+        // Second execution: adds enough entries to overflow the last page.
+        let exec2 = Uuid::new_v4();
+        {
+            let (tx, rx) = mpsc::unbounded_channel::<NormalizedLogEvent>();
+            let stream: NormalizedEventStream =
+                Box::pin(UnboundedReceiverStream::new(rx).map(Ok::<_, std::io::Error>));
+            let handle = tokio::spawn(run_consumer_with_client_for_test(
+                exec2,
+                "Task Title",
+                stream,
+                mock.clone(),
+                None,
+                Some(session_id),
+                Some(store.clone()),
+            ));
+            // Add enough entries to push beyond the page limit.
+            for i in 0..30 {
+                tx.send(NormalizedLogEvent::UpsertEntry {
+                    index: i,
+                    entry: entry(
+                        NormalizedEntryType::AssistantMessage,
+                        &format!("exec2-entry-{i}"),
+                    ),
+                })
+                .expect("send");
+            }
+            tx.send(NormalizedLogEvent::Finished).expect("send");
+            drop(tx);
+            handle.await.expect("consumer task should finish");
+        }
+
+        // After exec2, total pages > creates_after_exec1 (new pages were created).
+        let total_creates = mock.create_count();
+        assert!(
+            total_creates > creates_after_exec1,
+            "exec2 should have created additional pages"
+        );
+
+        // Both executions' content should appear in the session render.
+        let session_lock = store.lock().await;
+        let session = session_lock.get(&session_id).expect("session exists");
+        let session = session.lock().await;
+        let contents = session
+            .render_all_page_contents()
+            .expect("should have content");
+        assert!(contents.len() >= 2, "should span at least 2 pages");
+        let all_content = contents.join(" ");
+        assert!(all_content.contains("exec1-entry-0"));
+        assert!(all_content.contains("exec2-entry-0"));
+    }
+
+    /// DB URL cache: first execution persists its URLs; second execution under same session
+    /// persists the full session page URL list under the second execution_process_id.
+    #[tokio::test]
+    async fn db_url_cache_persists_per_execution_process() {
+        let mock = Arc::new(MockTelegraphClient::default());
+        let pool = make_test_pool().await;
+        let session_id = Uuid::new_v4();
+        let store = new_telegraph_session_store();
+
+        let exec1 = Uuid::new_v4();
+        {
+            let (tx, rx) = mpsc::unbounded_channel::<NormalizedLogEvent>();
+            let stream: NormalizedEventStream =
+                Box::pin(UnboundedReceiverStream::new(rx).map(Ok::<_, std::io::Error>));
+            let handle = tokio::spawn(run_consumer_with_client_for_test(
+                exec1,
+                "Task Title",
+                stream,
+                mock.clone(),
+                Some(pool.clone()),
+                Some(session_id),
+                Some(store.clone()),
+            ));
+            tx.send(NormalizedLogEvent::UpsertEntry {
+                index: 0,
+                entry: entry(NormalizedEntryType::AssistantMessage, "exec1 content"),
+            })
+            .expect("send");
+            tx.send(NormalizedLogEvent::Finished).expect("send");
+            drop(tx);
+            handle.await.expect("consumer task should finish");
+        }
+
+        let urls_exec1 = get_execution_process_telegraph_urls(&pool, &exec1).await;
+        assert!(!urls_exec1.is_empty(), "exec1 should have persisted URLs");
+
+        let exec2 = Uuid::new_v4();
+        {
+            let (tx, rx) = mpsc::unbounded_channel::<NormalizedLogEvent>();
+            let stream: NormalizedEventStream =
+                Box::pin(UnboundedReceiverStream::new(rx).map(Ok::<_, std::io::Error>));
+            let handle = tokio::spawn(run_consumer_with_client_for_test(
+                exec2,
+                "Task Title",
+                stream,
+                mock.clone(),
+                Some(pool.clone()),
+                Some(session_id),
+                Some(store.clone()),
+            ));
+            tx.send(NormalizedLogEvent::UpsertEntry {
+                index: 0,
+                entry: entry(NormalizedEntryType::AssistantMessage, "exec2 content"),
+            })
+            .expect("send");
+            tx.send(NormalizedLogEvent::Finished).expect("send");
+            drop(tx);
+            handle.await.expect("consumer task should finish");
+        }
+
+        let urls_exec2 = get_execution_process_telegraph_urls(&pool, &exec2).await;
+        assert!(
+            !urls_exec2.is_empty(),
+            "exec2 should have persisted session URLs under its own execution_process_id"
+        );
+        // Both should reference the same pages (session-level state).
+        assert_eq!(
+            urls_exec1.len(),
+            urls_exec2.len(),
+            "exec1 and exec2 should reference the same number of pages (session-level)"
         );
     }
 }
