@@ -1,4 +1,7 @@
-use std::{path::Path, str::FromStr};
+use std::{
+    path::{Path, PathBuf},
+    str::FromStr,
+};
 
 use executors::{command::CommandBuilder, executors::ExecutorError};
 use serde::{Deserialize, Serialize};
@@ -104,8 +107,10 @@ impl EditorConfig {
 
     /// Resolve the editor command to an executable path and args.
     /// This is shared logic used by both check_availability() and spawn_local().
-    async fn resolve_command(&self) -> Result<(std::path::PathBuf, Vec<String>), EditorOpenError> {
-        let command_builder = self.get_command();
+    async fn resolve_command_builder(
+        &self,
+        command_builder: CommandBuilder,
+    ) -> Result<(PathBuf, Vec<String>), EditorOpenError> {
         let command_parts =
             command_builder
                 .build_initial()
@@ -126,6 +131,20 @@ impl EditorConfig {
         })?;
 
         Ok((executable, args))
+    }
+
+    async fn resolve_command(&self) -> Result<(PathBuf, Vec<String>), EditorOpenError> {
+        let command_builder = self.get_command();
+
+        match self.resolve_command_builder(command_builder).await {
+            Err(EditorOpenError::ExecutableNotFound { .. })
+                if matches!(self.editor_type, EditorType::Trae) =>
+            {
+                self.resolve_command_builder(CommandBuilder::new("trae-cn"))
+                    .await
+            }
+            result => result,
+        }
     }
 
     /// Check if the editor is available on the system.
