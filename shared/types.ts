@@ -338,7 +338,7 @@ export type CronProject = { id: string, name: string, updated_at: string, };
 
 export type CronTask = { id: string, enabled: boolean, cron: string, title: string, description: string | null, executor: BaseCodingAgent, mode: string, };
 
-export type Config = { config_version: string, theme: ThemeMode, executor_profile: ExecutorProfileId, review_executor_profile?: ExecutorProfileId, disclaimer_acknowledged: boolean, onboarding_acknowledged: boolean, notifications: NotificationConfig, editor: EditorConfig, github: GitHubConfig, analytics_enabled: boolean, workspace_dir: string | null, last_app_version: string | null, show_release_notes: boolean, language: UiLanguage, git_branch_prefix: string, showcases: ShowcaseState, pr_auto_description_enabled: boolean, pr_auto_description_prompt: string | null, beta_workspaces: boolean, beta_workspaces_invitation_sent: boolean, local_network_access: boolean, local_network_password: string | null, commit_reminder: boolean, proxy: ProxyConfig, daily_mode: DailyModeConfig, telegram: TelegramConfig, mcp_server: McpServerConfig, power_mode: PowerMode, tts: TtsConfig, };
+export type Config = { config_version: string, theme: ThemeMode, executor_profile: ExecutorProfileId, review_executor_profile?: ExecutorProfileId, disclaimer_acknowledged: boolean, onboarding_acknowledged: boolean, notifications: NotificationConfig, editor: EditorConfig, github: GitHubConfig, analytics_enabled: boolean, workspace_dir: string | null, last_app_version: string | null, show_release_notes: boolean, language: UiLanguage, git_branch_prefix: string, showcases: ShowcaseState, pr_auto_description_enabled: boolean, pr_auto_description_prompt: string | null, beta_workspaces: boolean, beta_workspaces_invitation_sent: boolean, local_network_access: boolean, local_network_password: string | null, commit_reminder: boolean, proxy: ProxyConfig, daily_mode: DailyModeConfig, telegram: TelegramConfig, mcp_server: McpServerConfig, power_mode: PowerMode, tts: TtsConfig, openai_compatible_api_projects: { [key in string]?: ProjectOpenAiApiConfig }, };
 
 export type NotificationConfig = { sound_enabled: boolean, push_enabled: boolean, sound_file: SoundFile, };
 
@@ -364,15 +364,21 @@ export type ProxyConfig = { http_proxy: string | null, https_proxy: string | nul
 
 export type DailyModeConfig = { project_id: string | null, };
 
-export type TelegramConfig = { enabled: boolean, bot_token: string | null, chat_id: bigint | null, telegraph_enabled: boolean, telegraph_access_token: string | null, telegraph_short_name: string | null, default_executor: string, default_mode: string, };
+export type TelegramConfig = { enabled: boolean, bot_token: string | null, chat_id: bigint | null, telegraph_enabled: boolean, telegraph_access_token: string | null, telegraph_short_name: string | null, lark_wiki_enabled: boolean, lark_wiki_space_id: string | null, default_executor: string, default_mode: string, };
 
 export enum TtsProvider { REPLICATE = "REPLICATE" }
 
-export type TtsConfig = { provider: TtsProvider, model: string, replicate_api_token: string | null, speed: number, };
-
-export type McpServerConfig = { enabled: boolean, port: number, };
+export type TtsConfig = { provider: TtsProvider, model: string, replicate_api_token: string | null, 
+/**
+ * Playback speed multiplier applied via FFmpeg atempo filter (0.5 – 2.0).
+ */
+speed: number, };
 
 export type ProjectOpenAiApiConfig = { enabled: boolean, port: number, };
+
+export type LarkCliCheckResponse = { available: boolean, path: string | null, };
+
+export type McpServerConfig = { enabled: boolean, port: number, };
 
 export type GitBranch = { name: string, is_current: boolean, is_remote: boolean, last_commit_date: Date, };
 
@@ -459,9 +465,19 @@ export type ReasoningSummary = "auto" | "concise" | "detailed" | "none";
 
 export type ReasoningSummaryFormat = "none" | "experimental";
 
-export type Opencode = { append_prompt: AppendPrompt, model?: string | null, mode?: string | null, 
+export type Opencode = { append_prompt: AppendPrompt, model?: string | null, 
 /**
- * Auto-approve agent actions
+ * Whether to run in plan mode. When `true`, overrides any legacy `mode`
+ * field and sends `"plan"` as the ACP session mode.
+ */
+plan?: boolean | null, 
+/**
+ * Legacy mode string (alias "agent"). Forwarded as ACP session mode when
+ * `plan` is not set. Canonical `plan: true` always wins.
+ */
+mode?: string | null, 
+/**
+ * Auto-approve agent actions.
  */
 auto_approve: boolean, base_command_override?: string | null, additional_params?: Array<string> | null, env?: { [key in string]?: string } | null, };
 

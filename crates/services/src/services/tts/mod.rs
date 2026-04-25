@@ -103,10 +103,12 @@ pub async fn apply_speed(file_path: &PathBuf, speed: f32) -> Result<PathBuf, Tts
 
     let status = tokio::process::Command::new("ffmpeg")
         .args([
-            "-y",                              // overwrite output
-            "-i", file_path.to_str().unwrap_or(""),
-            "-filter:a", &filter,
-            "-vn",                             // no video stream
+            "-y", // overwrite output
+            "-i",
+            file_path.to_str().unwrap_or(""),
+            "-filter:a",
+            &filter,
+            "-vn", // no video stream
             out_path.to_str().unwrap_or(""),
         ])
         .stdout(std::process::Stdio::null())
@@ -162,5 +164,7 @@ pub fn resolve_replicate_token(config: &TtsConfig) -> Option<String> {
             return Some(token.clone());
         }
     }
-    std::env::var("REPLICATE_API_TOKEN").ok().filter(|t| !t.trim().is_empty())
+    std::env::var("REPLICATE_API_TOKEN")
+        .ok()
+        .filter(|t| !t.trim().is_empty())
 }

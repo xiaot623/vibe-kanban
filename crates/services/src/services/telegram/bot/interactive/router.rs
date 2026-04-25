@@ -3,7 +3,9 @@ use std::sync::Arc;
 use teloxide::{prelude::*, types::MessageId, utils::command::BotCommands};
 
 use super::{BotDialogue, CardRenderContext, TelegramBotService};
-use crate::services::telegram::{callback::CallbackAction, format, keyboard, notifier, state::DialogueState};
+use crate::services::telegram::{
+    callback::CallbackAction, format, keyboard, notifier, state::DialogueState,
+};
 
 #[derive(BotCommands, Clone)]
 #[command(rename_rule = "lowercase", description = "Commands:")]

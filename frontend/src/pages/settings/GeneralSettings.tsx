@@ -10,6 +10,14 @@ import {
 } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from '@/components/ui/dialog';
+import {
   Select,
   SelectContent,
   SelectItem,
@@ -20,7 +28,7 @@ import { Label } from '@/components/ui/label';
 import { Input } from '@/components/ui/input';
 import { Alert, AlertDescription } from '@/components/ui/alert';
 import { Checkbox } from '@/components/ui/checkbox';
-import { Loader2, Volume2 } from 'lucide-react';
+import { ExternalLink, Loader2, Volume2 } from 'lucide-react';
 import {
   EditorType,
   PowerMode,
@@ -64,6 +72,14 @@ export function GeneralSettings() {
   const [branchPrefixError, setBranchPrefixError] = useState<string | null>(
     null
   );
+  const [larkSetupOpen, setLarkSetupOpen] = useState(false);
+  const [larkSetupStep, setLarkSetupStep] = useState<1 | 2>(1);
+  const [larkCliCheck, setLarkCliCheck] = useState<{
+    available: boolean;
+    path: string | null;
+  } | null>(null);
+  const [larkCliChecking, setLarkCliChecking] = useState(false);
+  const [larkWikiSpaceIdInput, setLarkWikiSpaceIdInput] = useState('');
   const { setTheme } = useTheme();
 
   // Check editor availability when draft editor changes
@@ -151,6 +167,36 @@ export function GeneralSettings() {
       ''
     );
   }, []);
+
+  const openLarkSetup = useCallback(async () => {
+    setLarkSetupOpen(true);
+    setLarkSetupStep(1);
+    setLarkWikiSpaceIdInput(draft?.telegram?.lark_wiki_space_id ?? '');
+    setLarkCliChecking(true);
+    try {
+      const response = await fetch('/api/lark/check-cli');
+      const body = await response.json();
+      setLarkCliCheck(body.data ?? null);
+    } catch {
+      setLarkCliCheck({ available: false, path: null });
+    } finally {
+      setLarkCliChecking(false);
+    }
+  }, [draft?.telegram?.lark_wiki_space_id]);
+
+  const finishLarkSetup = useCallback(() => {
+    const spaceId = larkWikiSpaceIdInput.trim();
+    if (!spaceId) return;
+
+    updateDraft({
+      telegram: {
+        ...draft!.telegram,
+        lark_wiki_enabled: true,
+        lark_wiki_space_id: spaceId,
+      },
+    });
+    setLarkSetupOpen(false);
+  }, [draft, larkWikiSpaceIdInput, updateDraft]);
 
   const localNetworkPasswordError = useMemo(() => {
     if (!draft?.local_network_access) return null;
@@ -1138,6 +1184,47 @@ export function GeneralSettings() {
                 </div>
               </div>
 
+              {draft?.telegram?.lark_wiki_space_id ? (
+                <div className="ml-6 flex items-center space-x-2">
+                  <Checkbox
+                    id="telegram-lark-wiki-enabled"
+                    checked={draft?.telegram?.lark_wiki_enabled ?? false}
+                    onCheckedChange={(checked: boolean) =>
+                      updateDraft({
+                        telegram: {
+                          ...draft!.telegram,
+                          lark_wiki_enabled: checked,
+                        },
+                      })
+                    }
+                  />
+                  <div className="space-y-0.5">
+                    <Label
+                      htmlFor="telegram-lark-wiki-enabled"
+                      className="cursor-pointer"
+                    >
+                      {t('settings.general.telegram.larkWiki.enabled.label')}
+                    </Label>
+                    <p className="text-sm text-muted-foreground">
+                      {t('settings.general.telegram.larkWiki.enabled.helper')}
+                    </p>
+                  </div>
+                </div>
+              ) : (
+                <div className="ml-6 space-y-2">
+                  <Button
+                    type="button"
+                    variant="outline"
+                    onClick={openLarkSetup}
+                  >
+                    {t('settings.general.telegram.larkWiki.setup.button')}
+                  </Button>
+                  <p className="text-sm text-muted-foreground">
+                    {t('settings.general.telegram.larkWiki.setup.helper')}
+                  </p>
+                </div>
+              )}
+
             </>
           )}
 
@@ -1322,6 +1409,103 @@ export function GeneralSettings() {
           </div>
         </CardContent>
       </Card>
+
+      <Dialog open={larkSetupOpen} onOpenChange={setLarkSetupOpen}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>
+              {t('settings.general.telegram.larkWiki.setup.title')}
+            </DialogTitle>
+            <DialogDescription>
+              {larkSetupStep === 1
+                ? t('settings.general.telegram.larkWiki.setup.step1Description')
+                : t('settings.general.telegram.larkWiki.setup.step2Description')}
+            </DialogDescription>
+          </DialogHeader>
+
+          {larkSetupStep === 1 ? (
+            <div className="space-y-3">
+              {larkCliChecking ? (
+                <div className="flex items-center gap-2 text-sm text-muted-foreground">
+                  <Loader2 className="h-4 w-4 animate-spin" />
+                  {t('settings.general.telegram.larkWiki.setup.checkingCli')}
+                </div>
+              ) : larkCliCheck?.available ? (
+                <Alert>
+                  <AlertDescription>
+                    {t('settings.general.telegram.larkWiki.setup.cliFound', {
+                      path: larkCliCheck.path,
+                    })}
+                  </AlertDescription>
+                </Alert>
+              ) : (
+                <Alert>
+                  <AlertDescription className="space-y-2">
+                    <p>
+                      {t('settings.general.telegram.larkWiki.setup.cliMissing')}
+                    </p>
+                    <a
+                      className="inline-flex items-center gap-1 text-primary underline"
+                      href="https://github.com/chyroc/lark"
+                      target="_blank"
+                      rel="noreferrer"
+                    >
+                      {t('settings.general.telegram.larkWiki.setup.installLink')}
+                      <ExternalLink className="h-3 w-3" />
+                    </a>
+                  </AlertDescription>
+                </Alert>
+              )}
+            </div>
+          ) : (
+            <div className="space-y-2">
+              <Label htmlFor="telegram-lark-wiki-space-id">
+                {t('settings.general.telegram.larkWiki.setup.spaceIdLabel')}
+              </Label>
+              <Input
+                id="telegram-lark-wiki-space-id"
+                value={larkWikiSpaceIdInput}
+                onChange={(e) => setLarkWikiSpaceIdInput(e.target.value)}
+                placeholder={t(
+                  'settings.general.telegram.larkWiki.setup.spaceIdPlaceholder'
+                )}
+              />
+              <p className="text-sm text-muted-foreground">
+                {t('settings.general.telegram.larkWiki.setup.spaceIdHelper')}
+              </p>
+            </div>
+          )}
+
+          <DialogFooter>
+            {larkSetupStep === 2 && (
+              <Button
+                type="button"
+                variant="outline"
+                onClick={() => setLarkSetupStep(1)}
+              >
+                {t('settings.general.telegram.larkWiki.setup.back')}
+              </Button>
+            )}
+            {larkSetupStep === 1 ? (
+              <Button
+                type="button"
+                onClick={() => setLarkSetupStep(2)}
+                disabled={larkCliChecking}
+              >
+                {t('settings.general.telegram.larkWiki.setup.continue')}
+              </Button>
+            ) : (
+              <Button
+                type="button"
+                onClick={finishLarkSetup}
+                disabled={!larkWikiSpaceIdInput.trim()}
+              >
+                {t('settings.general.telegram.larkWiki.setup.finish')}
+              </Button>
+            )}
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
 
       {/* Sticky Save Button */}
       <div className="sticky bottom-0 z-10 bg-background/80 backdrop-blur-sm border-t py-4">

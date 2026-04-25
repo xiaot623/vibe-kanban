@@ -17,14 +17,22 @@
         "null"
       ]
     },
+    "plan": {
+      "description": "Whether to run in plan mode. When `true`, overrides any legacy `mode`\nfield and sends `\"plan\"` as the ACP session mode.",
+      "type": [
+        "boolean",
+        "null"
+      ]
+    },
     "mode": {
+      "description": "Legacy mode string (alias \"agent\"). Forwarded as ACP session mode when\n`plan` is not set. Canonical `plan: true` always wins.",
       "type": [
         "string",
         "null"
       ]
     },
     "auto_approve": {
-      "description": "Auto-approve agent actions",
+      "description": "Auto-approve agent actions.",
       "type": "boolean",
       "default": true
     },

@@ -6,12 +6,18 @@ use std::{
 
 use anyhow::{Context, Result};
 use async_trait::async_trait;
-use db::models::execution_process_telegraph_page::{
-    ExecutionProcessTelegraphPage, NewExecutionProcessTelegraphPage,
+use db::models::{
+    execution_process::{ExecutionContext, ExecutionProcess},
+    execution_process_telegraph_page::{
+        ExecutionProcessTelegraphPage, NewExecutionProcessTelegraphPage,
+    },
 };
-use executors::logs::{
-    ActionType, NormalizedEntry, NormalizedEntryType, NormalizedEventStream, NormalizedLogEvent,
-    ToolStatus,
+use executors::{
+    actions::ExecutorActionType,
+    logs::{
+        ActionType, NormalizedEntry, NormalizedEntryType, NormalizedEventStream,
+        NormalizedLogEvent, ToolStatus,
+    },
 };
 use futures::StreamExt;
 use git2::Config as GitConfig;
@@ -143,7 +149,9 @@ impl SessionTelegraphState {
                     if input.is_empty() {
                         None
                     } else {
-                        Some(RenderedEntry { nodes: section_nodes("User", markdown_nodes(input)) })
+                        Some(RenderedEntry {
+                            nodes: section_nodes("User", markdown_nodes(input)),
+                        })
                     }
                 });
                 let agent_entries = self
@@ -208,6 +216,86 @@ pub async fn get_execution_process_telegraph_urls(
             );
             Vec::new()
         }
+    }
+}
+
+pub async fn append_stage_summary_pages(
+    pool: &SqlitePool,
+    execution_process_id: Uuid,
+    config: &TelegramConfig,
+    entries: Vec<NormalizedEntry>,
+) -> Vec<String> {
+    let Some(mirror_config) = TelegraphMirrorConfig::from_telegram_config(config) else {
+        return Vec::new();
+    };
+    let ctx = match ExecutionProcess::load_context(pool, execution_process_id).await {
+        Ok(ctx) => ctx,
+        Err(err) => {
+            tracing::warn!(
+                "Failed to load execution context for Telegraph summary append execution {}: {}",
+                execution_process_id,
+                err
+            );
+            return Vec::new();
+        }
+    };
+    let existing_urls = get_execution_process_telegraph_urls(pool, &execution_process_id).await;
+    let user_input = existing_urls
+        .is_empty()
+        .then(|| user_input_for_context(&ctx))
+        .flatten();
+    let Some(contents) = render_entries_page_contents(entries, user_input.as_deref()) else {
+        return Vec::new();
+    };
+    let client = match TelegraphRsClient::new(&mirror_config).await {
+        Ok(client) => client,
+        Err(err) => {
+            tracing::warn!(
+                "Failed to initialize Telegraph summary append for execution {}: {}",
+                execution_process_id,
+                err
+            );
+            return Vec::new();
+        }
+    };
+    let page_title = page_title_for_execution(&ctx.task.title, execution_process_id);
+
+    let mut metas = Vec::with_capacity(contents.len());
+    for (page_index, content) in contents.iter().enumerate() {
+        let title = page_title_for_page(&page_title, page_index);
+        match client.create_page(&title, content).await {
+            Ok(meta) => metas.push(meta),
+            Err(err) => {
+                tracing::warn!(
+                    "Telegraph stage summary append failed for execution {} page {}: {}",
+                    execution_process_id,
+                    page_index,
+                    err
+                );
+                break;
+            }
+        }
+    }
+
+    persist_appended_page_meta(pool, execution_process_id, &metas).await;
+    metas.into_iter().map(|meta| meta.url).collect()
+}
+
+fn user_input_for_context(ctx: &ExecutionContext) -> Option<String> {
+    let action = ctx.execution_process.executor_action().ok()?;
+    match &action.typ {
+        ExecutorActionType::CodingAgentInitialRequest(_) => {
+            let title = &ctx.task.title;
+            let detail = ctx.task.description.as_deref().unwrap_or("");
+            let text = if detail.is_empty() {
+                title.clone()
+            } else {
+                format!("{}\n{}", title, detail)
+            };
+            Some(text)
+        }
+        ExecutorActionType::CodingAgentFollowUpRequest(req) => Some(req.prompt.clone()),
+        _ => None,
     }
 }
 
@@ -437,7 +525,11 @@ impl TelegraphLogConsumer {
         let mut session = self.session_state.lock().await;
 
         // Merge local entries into session state.
-        session.merge_execution_entries(self.execution_process_id, &self.local_entries, self.user_input.as_deref());
+        session.merge_execution_entries(
+            self.execution_process_id,
+            &self.local_entries,
+            self.user_input.as_deref(),
+        );
 
         let Some(contents) = session.render_all_page_contents() else {
             return;
@@ -501,6 +593,68 @@ impl TelegraphLogConsumer {
                 err
             );
         }
+    }
+}
+
+fn render_entries_page_contents(
+    entries: Vec<NormalizedEntry>,
+    user_input: Option<&str>,
+) -> Option<Vec<String>> {
+    let has_user_message = entries
+        .iter()
+        .any(|entry| matches!(entry.entry_type, NormalizedEntryType::UserMessage));
+    let mut rendered_entries = Vec::new();
+
+    if !has_user_message && let Some(input) = user_input.filter(|input| !input.trim().is_empty()) {
+        rendered_entries.push(RenderedEntry {
+            nodes: section_nodes("User", markdown_nodes(input)),
+        });
+    }
+
+    rendered_entries.extend(entries.iter().filter_map(render_entry_nodes));
+
+    if rendered_entries.is_empty() {
+        return None;
+    }
+
+    let pages = paginate_rendered_entries(rendered_entries);
+    let mut contents = Vec::with_capacity(pages.len());
+    for nodes in pages {
+        match serde_json::to_string(&nodes).context("failed to serialize telegraph node content") {
+            Ok(content) => contents.push(content),
+            Err(err) => {
+                tracing::warn!("Telegraph content serialization failed: {}", err);
+                return None;
+            }
+        }
+    }
+
+    Some(contents)
+}
+
+async fn persist_appended_page_meta(
+    pool: &SqlitePool,
+    execution_process_id: Uuid,
+    meta: &[TelegraphPageMeta],
+) {
+    let pages = meta
+        .iter()
+        .map(|page| NewExecutionProcessTelegraphPage {
+            page_index: 0,
+            url: &page.url,
+            path: &page.path,
+            title: &page.title,
+        })
+        .collect::<Vec<_>>();
+
+    if let Err(err) =
+        ExecutionProcessTelegraphPage::append_all(pool, execution_process_id, &pages).await
+    {
+        tracing::warn!(
+            "Failed to persist appended telegraph page metadata for execution {}: {}",
+            execution_process_id,
+            err
+        );
     }
 }
 
@@ -1376,6 +1530,24 @@ mod tests {
         Arc::new(tokio::sync::Mutex::new(SessionTelegraphState::new()))
     }
 
+    #[test]
+    fn stage_summary_pages_prepend_user_input_when_missing_from_entries() {
+        let rendered = render_entries_page_contents(
+            vec![entry(
+                NormalizedEntryType::AssistantMessage,
+                "summary complete",
+            )],
+            Some("initial task"),
+        )
+        .expect("pages should render");
+
+        assert_eq!(rendered.len(), 1);
+        assert!(rendered[0].contains("User"));
+        assert!(rendered[0].contains("initial task"));
+        assert!(rendered[0].contains("Assistant"));
+        assert!(rendered[0].contains("summary complete"));
+    }
+
     async fn run_consumer_with_client_for_test(
         execution_process_id: Uuid,
         page_title: &str,
@@ -1454,7 +1626,6 @@ mod tests {
         );
 
         consumer.apply_event(NormalizedLogEvent::UpsertEntry {
-
             index: 3,
             entry: entry(
                 NormalizedEntryType::ToolUse {
@@ -1902,7 +2073,10 @@ mod tests {
             handle.await.expect("consumer task should finish");
         }
         let creates_after_exec1 = mock.create_count();
-        assert!(creates_after_exec1 >= 1, "exec1 should create at least 1 page");
+        assert!(
+            creates_after_exec1 >= 1,
+            "exec1 should create at least 1 page"
+        );
 
         // Second execution: adds enough entries to overflow the last page.
         let exec2 = Uuid::new_v4();

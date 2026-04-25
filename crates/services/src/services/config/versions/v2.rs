@@ -32,6 +32,10 @@ pub struct TelegramConfig {
     pub telegraph_enabled: bool,
     pub telegraph_access_token: Option<String>,
     pub telegraph_short_name: Option<String>,
+    #[serde(default)]
+    pub lark_wiki_enabled: bool,
+    #[serde(default)]
+    pub lark_wiki_space_id: Option<String>,
     #[serde(default = "default_telegram_executor")]
     pub default_executor: String,
     #[serde(default = "default_telegram_mode")]
@@ -55,6 +59,8 @@ impl Default for TelegramConfig {
             telegraph_enabled: false,
             telegraph_access_token: None,
             telegraph_short_name: None,
+            lark_wiki_enabled: false,
+            lark_wiki_space_id: None,
             default_executor: default_telegram_executor(),
             default_mode: default_telegram_mode(),
         }
@@ -478,6 +484,8 @@ mod tests {
         assert!(!parsed.telegraph_enabled);
         assert_eq!(parsed.telegraph_access_token, None);
         assert_eq!(parsed.telegraph_short_name, None);
+        assert!(!parsed.lark_wiki_enabled);
+        assert_eq!(parsed.lark_wiki_space_id, None);
     }
 
     #[test]
@@ -489,6 +497,8 @@ mod tests {
             telegraph_enabled: true,
             telegraph_access_token: Some("access".to_string()),
             telegraph_short_name: Some("vk_beta".to_string()),
+            lark_wiki_enabled: true,
+            lark_wiki_space_id: Some("space_123".to_string()),
             default_executor: "CLAUDE_CODE".to_string(),
             default_mode: "DEFAULT".to_string(),
         };
@@ -500,5 +510,7 @@ mod tests {
         assert!(parsed.telegraph_enabled);
         assert_eq!(parsed.telegraph_access_token.as_deref(), Some("access"));
         assert_eq!(parsed.telegraph_short_name.as_deref(), Some("vk_beta"));
+        assert!(parsed.lark_wiki_enabled);
+        assert_eq!(parsed.lark_wiki_space_id.as_deref(), Some("space_123"));
     }
 }

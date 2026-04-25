@@ -19,8 +19,8 @@ use db::{
         execution_process_repo_state::{
             CreateExecutionProcessRepoState, ExecutionProcessRepoState,
         },
-        scratch::{Scratch, ScratchType},
         repo::Repo,
+        scratch::{Scratch, ScratchType},
         session::{CreateSession, Session, SessionError},
         task::{Task, TaskStatus},
         workspace::{Workspace, WorkspaceError},
@@ -66,7 +66,7 @@ use crate::services::{
     execution_log_hub::ExecutionLogHub,
     git::{GitService, GitServiceError},
     notification::NotificationService,
-    telegram::{notifier as telegram_notifier, telegraph},
+    telegram::{lark_wiki, notifier as telegram_notifier, telegraph},
     workspace_manager::WorkspaceError as WorkspaceManagerError,
     worktree_manager::WorktreeError,
 };
@@ -144,6 +144,8 @@ pub trait ContainerService {
     fn notification_service(&self) -> &NotificationService;
 
     fn telegraph_session_store(&self) -> &Arc<telegraph::TelegraphSessionStore>;
+
+    fn lark_wiki_session_store(&self) -> &Arc<lark_wiki::LarkWikiSessionStore>;
 
     fn workspace_to_current_dir(&self, workspace: &Workspace) -> PathBuf;
 
@@ -558,25 +560,26 @@ pub trait ContainerService {
     ) -> Result<ExecutionProcess, ContainerError> {
         self.ensure_container_exists(workspace).await?;
 
-        let current_executor =
-            match ExecutionProcess::latest_executor_profile_for_session(&self.db().pool, session.id)
-                .await
-                .map_err(|e| ContainerError::Other(anyhow!(
-                    "Failed to get executor profile: {e}"
-                )))? {
-                Some(profile) => profile.executor,
-                None => {
-                    let executor_str = session.executor.as_ref().ok_or_else(|| {
-                        ContainerError::Other(anyhow!(
-                            "No prior execution and no executor configured on session"
-                        ))
-                    })?;
-                    BaseCodingAgent::from_str(&executor_str.replace('-', "_").to_ascii_uppercase())
-                        .map_err(|_| {
-                            ContainerError::Other(anyhow!("Invalid executor: {}", executor_str))
-                        })?
-                }
-            };
+        let current_executor = match ExecutionProcess::latest_executor_profile_for_session(
+            &self.db().pool,
+            session.id,
+        )
+        .await
+        .map_err(|e| ContainerError::Other(anyhow!("Failed to get executor profile: {e}")))?
+        {
+            Some(profile) => profile.executor,
+            None => {
+                let executor_str = session.executor.as_ref().ok_or_else(|| {
+                    ContainerError::Other(anyhow!(
+                        "No prior execution and no executor configured on session"
+                    ))
+                })?;
+                BaseCodingAgent::from_str(&executor_str.replace('-', "_").to_ascii_uppercase())
+                    .map_err(|_| {
+                        ContainerError::Other(anyhow!("Invalid executor: {}", executor_str))
+                    })?
+            }
+        };
 
         let switch_decision = context_archive::resolve_executor_switch(current_executor, executor);
         let executor_profile_id = ExecutorProfileId {
@@ -648,7 +651,9 @@ pub trait ContainerService {
             )
             .await?;
 
-        if let Err(e) = Scratch::delete(&self.db().pool, session.id, &ScratchType::DraftFollowUp).await {
+        if let Err(e) =
+            Scratch::delete(&self.db().pool, session.id, &ScratchType::DraftFollowUp).await
+        {
             tracing::debug!(
                 "Failed to delete draft follow-up scratch for session {}: {}",
                 session.id,
@@ -1126,40 +1131,8 @@ pub trait ContainerService {
         let msg_stores = self.msg_stores().clone();
         let execution_log_hubs = self.execution_log_hubs().clone();
         let db = self.db().clone();
-        let telegraph_mirror_config =
-            telegraph::TelegraphMirrorConfig::from_telegram_config(&self.telegram_config().await);
-        let telegraph_session_store = self.telegraph_session_store().clone();
 
         tokio::spawn(async move {
-            let ctx = ExecutionProcess::load_context(&db.pool, execution_id).await;
-            let telegraph_page_title = ctx
-                .as_ref()
-                .map(|ctx| telegraph::page_title_for_execution(&ctx.task.title, execution_id))
-                .unwrap_or_else(|_| telegraph::page_title_for_execution("", execution_id));
-            let session_id = ctx.as_ref().map(|ctx| ctx.session.id).ok();
-            // Build the "User" section content:
-            // - Initial execution: "task title\ntask description"
-            // - Follow-up execution: the follow-up prompt
-            let user_input: Option<String> = ctx.as_ref().ok().and_then(|ctx| {
-                let action = ctx.execution_process.executor_action().ok()?;
-                match &action.typ {
-                    ExecutorActionType::CodingAgentInitialRequest(_) => {
-                        let title = &ctx.task.title;
-                        let detail = ctx.task.description.as_deref().unwrap_or("");
-                        let text = if detail.is_empty() {
-                            title.clone()
-                        } else {
-                            format!("{}\n{}", title, detail)
-                        };
-                        Some(text)
-                    }
-                    ExecutorActionType::CodingAgentFollowUpRequest(req) => {
-                        Some(req.prompt.clone())
-                    }
-                    _ => None,
-                }
-            });
-
             let store = {
                 let map = msg_stores.read().await;
                 map.get(&execution_id).cloned()
@@ -1172,21 +1145,6 @@ pub trait ContainerService {
             if let Some(store) = store {
                 let mut raw_stream = store.history_plus_stream();
                 let mut normalized_stream = hub.clone().map(|h| h.normalized_history_plus_stream());
-                let telegraph_handle = match (hub.clone(), telegraph_mirror_config.clone(), session_id) {
-                    (Some(hub), Some(config), Some(sid)) => {
-                        Some(telegraph::spawn_telegraph_log_consumer(
-                            sid,
-                            execution_id,
-                            telegraph_page_title,
-                            hub.normalized_history_plus_stream(),
-                            config,
-                            db.pool.clone(),
-                            telegraph_session_store,
-                            user_input,
-                        ))
-                    }
-                    _ => None,
-                };
                 let mut pending_logs: Vec<NewExecutionProcessLog> = Vec::new();
                 let mut flush_interval = tokio::time::interval_at(
                     Instant::now() + LOG_DB_FLUSH_INTERVAL,
@@ -1315,16 +1273,6 @@ pub trait ContainerService {
                         flush_execution_log_batch(&db.pool, execution_id, &mut pending_logs).await;
                         break;
                     }
-                }
-
-                if let Some(handle) = telegraph_handle
-                    && let Err(err) = handle.await
-                {
-                    tracing::debug!(
-                        "Telegraph consumer task join failed for execution {}: {}",
-                        execution_id,
-                        err
-                    );
                 }
             }
         })

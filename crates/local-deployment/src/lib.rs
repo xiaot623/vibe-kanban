@@ -21,7 +21,7 @@ use services::services::{
     project::ProjectService,
     queued_message::QueuedMessageService,
     repo::RepoService,
-    telegram::telegraph,
+    telegram::{lark_wiki, telegraph},
 };
 use tokio::sync::{Mutex, RwLock};
 use utils::{
@@ -105,6 +105,7 @@ impl Deployment for LocalDeployment {
         if let Err(err) = telegraph::ensure_telegraph_config(&mut raw_config).await {
             tracing::warn!("Failed to auto-initialize telegraph config: {err}");
         }
+        let _ = lark_wiki::normalize_lark_wiki_config(&mut raw_config);
 
         // Only save config if there was no parse error
         // (don't overwrite a malformed config file - let user fix it manually)

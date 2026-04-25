@@ -1,9 +1,7 @@
 use std::str::FromStr;
 
 use chrono::Utc;
-use db::models::{
-    task::{CreateTask, Task, TaskStatus, UpdateTask},
-};
+use db::models::task::{CreateTask, Task, TaskStatus, UpdateTask};
 use executors::{executors::BaseCodingAgent, profile::ExecutorConfigs};
 use teloxide::{
     prelude::*,
@@ -1072,8 +1070,7 @@ pub(super) async fn handle_create_review_task(
         Ok(result) => {
             tracing::info!("Created review task {}", result.task.id);
 
-            let message =
-                format_review_task_created_message(result.task.has_in_progress_attempt);
+            let message = format_review_task_created_message(result.task.has_in_progress_attempt);
             let cleanup = review_completion_cleanup_plan(card_context);
             super::ui::finalize_completion_result(bot, chat_id, cleanup, card_context, None)
                 .await?;
@@ -1312,7 +1309,7 @@ pub(super) async fn handle_edit_start(
 pub(super) async fn handle_edit_task_finish(
     bot: &Bot,
     chat_id: ChatId,
-    service: &TelegramBotService,
+    _service: &TelegramBotService,
     task_id: Uuid,
     title: &str,
     description: Option<&str>,

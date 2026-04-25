@@ -604,9 +604,7 @@ pub(super) fn parse_message_as_task(message: &str) -> Option<(String, Option<Str
 }
 
 /// Format the user-facing success message for a newly-created review task.
-pub(super) fn format_review_task_created_message(
-    has_in_progress_attempt: bool,
-) -> String {
+pub(super) fn format_review_task_created_message(has_in_progress_attempt: bool) -> String {
     let mut message = "✅ Review task created".to_string();
     if !has_in_progress_attempt {
         message.push_str("\n⚠️ Created but not auto-started. Open the task and run it manually.");

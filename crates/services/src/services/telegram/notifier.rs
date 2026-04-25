@@ -11,7 +11,6 @@ use std::{
 };
 
 use dashmap::DashMap;
-
 use db::{
     DBService,
     models::{
@@ -37,7 +36,7 @@ use tokio_util::sync::CancellationToken;
 use utils::{log_msg::LogMsg, msg_store::MsgStore};
 use uuid::Uuid;
 
-use super::{EXIT_PLAN_MODE_NAME, flow, format, keyboard, telegraph};
+use super::{EXIT_PLAN_MODE_NAME, flow, format, keyboard, lark_wiki, telegraph};
 use crate::services::{approvals::Approvals, config::Config, git::GitService};
 
 /// Telegram context for event handlers.
@@ -1326,13 +1325,10 @@ async fn emit_stage_summary(
         lines.push("Token usage: n/a".to_string());
     }
 
-    let telegraph_urls = match accumulator.execution_process_id.as_ref() {
-        Some(execution_process_id) => {
-            telegraph::get_execution_process_telegraph_urls(&tg.db.pool, execution_process_id).await
-        }
-        None => Vec::new(),
-    };
+    let telegraph_urls = append_telegraph_stage_summary(tg, accumulator).await;
+    let lark_wiki_url = append_lark_wiki_stage_summary(tg, accumulator).await;
     append_telegraph_log_lines(&mut lines, &telegraph_urls);
+    append_lark_wiki_log_line(&mut lines, lark_wiki_url.as_deref());
 
     let is_daily_task = is_daily_project_task(tg, accumulator.task_project_id).await;
     let summary_markup = stage_summary_keyboard(
@@ -1354,7 +1350,10 @@ async fn emit_stage_summary(
 
     // If we have a flow token and at least one sent message, retroactively edit the
     // last card to include the correct msg_id in the Audio callback button.
-    if let Some(flow_token) = accumulator.flow_context.as_ref().map(|ctx| ctx.flow_token.clone())
+    if let Some(flow_token) = accumulator
+        .flow_context
+        .as_ref()
+        .map(|ctx| ctx.flow_token.clone())
         && let Some(last_msg_id) = sent_ids.last().copied()
         && matches!(
             trigger,
@@ -1382,6 +1381,61 @@ async fn emit_stage_summary(
     }
 
     accumulator.finalize_stage();
+}
+
+async fn append_lark_wiki_stage_summary(
+    tg: &TelegramContext,
+    accumulator: &RunFeedAccumulator,
+) -> Option<String> {
+    let execution_process_id = accumulator.execution_process_id?;
+    let entries = accumulator
+        .iter_entries_for_summary(true)
+        .into_iter()
+        .map(|(_, entry)| entry)
+        .collect();
+    let telegram_config = tg.config.read().await.telegram.clone();
+
+    match lark_wiki::append_stage_summary_markdown(
+        &tg.db.pool,
+        execution_process_id,
+        &telegram_config,
+        entries,
+    )
+    .await
+    {
+        Some(url) => Some(url),
+        None => {
+            lark_wiki::get_execution_process_lark_wiki_url(&tg.db.pool, &execution_process_id).await
+        }
+    }
+}
+
+async fn append_telegraph_stage_summary(
+    tg: &TelegramContext,
+    accumulator: &RunFeedAccumulator,
+) -> Vec<String> {
+    let Some(execution_process_id) = accumulator.execution_process_id else {
+        return Vec::new();
+    };
+    let entries = accumulator
+        .iter_entries_for_summary(true)
+        .into_iter()
+        .map(|(_, entry)| entry)
+        .collect();
+    let telegram_config = tg.config.read().await.telegram.clone();
+
+    let urls = telegraph::append_stage_summary_pages(
+        &tg.db.pool,
+        execution_process_id,
+        &telegram_config,
+        entries,
+    )
+    .await;
+    if urls.is_empty() {
+        telegraph::get_execution_process_telegraph_urls(&tg.db.pool, &execution_process_id).await
+    } else {
+        urls
+    }
 }
 
 async fn should_skip_stage_summary_in_plan_mode(
@@ -1415,6 +1469,12 @@ fn append_telegraph_log_lines(lines: &mut Vec<String>, telegraph_urls: &[String]
                 lines.push(format!("{}. {url}", page_index + 1));
             }
         }
+    }
+}
+
+fn append_lark_wiki_log_line(lines: &mut Vec<String>, lark_wiki_url: Option<&str>) {
+    if let Some(url) = lark_wiki_url.filter(|url| !url.trim().is_empty()) {
+        lines.push(format!("Lark wiki log: {url}"));
     }
 }
 
@@ -1455,7 +1515,10 @@ pub async fn handle_stage_summary_audio(
     if tts::resolve_replicate_token(&tts_config).is_none() {
         if let Err(err) = tg
             .bot
-            .send_message(tg.chat_id, "TTS not configured: Replicate API token is missing.")
+            .send_message(
+                tg.chat_id,
+                "TTS not configured: Replicate API token is missing.",
+            )
             .await
         {
             tracing::warn!("Failed to send TTS not-configured notice: {err}");
@@ -1492,7 +1555,8 @@ pub async fn handle_stage_summary_audio(
             Ok(output) => {
                 // Apply speed adjustment via FFmpeg if needed.
                 let speed = tts_config.speed;
-                let (send_path, speed_path) = match tts::apply_speed(&output.file_path, speed).await {
+                let (send_path, speed_path) = match tts::apply_speed(&output.file_path, speed).await
+                {
                     Ok(p) if p != output.file_path => (p.clone(), Some(p)),
                     Ok(p) => (p, None),
                     Err(err) => {
@@ -1551,11 +1615,8 @@ pub async fn handle_stage_summary_audio(
                 false
             }
         };
-        let audio_markup = stage_summary_reply_keyboard_for_task(
-            &flow_token,
-            source_msg_id,
-            is_daily_task,
-        );
+        let audio_markup =
+            stage_summary_reply_keyboard_for_task(&flow_token, source_msg_id, is_daily_task);
         let _ = tg
             .bot
             .edit_message_reply_markup(tg.chat_id, MessageId(source_msg_id))
@@ -2045,6 +2106,24 @@ mod tests {
     }
 
     #[test]
+    fn append_lark_wiki_log_line_adds_tail_line_when_url_exists() {
+        let mut lines = vec!["line-1".to_string()];
+        append_lark_wiki_log_line(&mut lines, Some("https://example.feishu.cn/wiki/doc"));
+        assert_eq!(
+            lines.last().map(String::as_str),
+            Some("Lark wiki log: https://example.feishu.cn/wiki/doc")
+        );
+    }
+
+    #[test]
+    fn append_lark_wiki_log_line_keeps_original_lines_without_url() {
+        let mut lines = vec!["line-1".to_string()];
+        append_lark_wiki_log_line(&mut lines, None);
+        append_lark_wiki_log_line(&mut lines, Some("  "));
+        assert_eq!(lines, vec!["line-1".to_string()]);
+    }
+
+    #[test]
     fn stage_summary_keyboard_uses_review_done_for_daily_task() {
         let flow_token = "f-ab12c".to_string();
         let markup = stage_summary_keyboard(
@@ -2077,7 +2156,9 @@ mod tests {
                     .as_str()
                     .expect("done callback should exist")
             ),
-            Some(CallbackAction::DoneTask { flow_token: flow_token.clone() })
+            Some(CallbackAction::DoneTask {
+                flow_token: flow_token.clone()
+            })
         );
         assert_eq!(
             CallbackAction::decode(
@@ -2085,7 +2166,10 @@ mod tests {
                     .as_str()
                     .expect("audio callback should exist")
             ),
-            Some(CallbackAction::StageSummaryAudio { flow_token, msg_id: 101 })
+            Some(CallbackAction::StageSummaryAudio {
+                flow_token,
+                msg_id: 101
+            })
         );
     }
 
@@ -2112,7 +2196,9 @@ mod tests {
                     .as_str()
                     .expect("review callback should exist")
             ),
-            Some(CallbackAction::CreateReviewTask { flow_token: flow_token.clone() })
+            Some(CallbackAction::CreateReviewTask {
+                flow_token: flow_token.clone()
+            })
         );
         assert_eq!(
             CallbackAction::decode(
@@ -2120,7 +2206,10 @@ mod tests {
                     .as_str()
                     .expect("audio callback should exist")
             ),
-            Some(CallbackAction::StageSummaryAudio { flow_token, msg_id: 101 })
+            Some(CallbackAction::StageSummaryAudio {
+                flow_token,
+                msg_id: 101
+            })
         );
     }
 

@@ -71,4 +71,45 @@ impl ExecutionProcessTelegraphPage {
 
         Ok(rows)
     }
+
+    pub async fn append_all(
+        pool: &SqlitePool,
+        execution_process_id: Uuid,
+        pages: &[NewExecutionProcessTelegraphPage<'_>],
+    ) -> Result<(), sqlx::Error> {
+        if pages.is_empty() {
+            return Ok(());
+        }
+
+        let mut tx = pool.begin().await?;
+        let now = Utc::now();
+        let next_page_index: i64 = sqlx::query_scalar(
+            r#"SELECT COALESCE(MAX(page_index) + 1, 0)
+               FROM execution_process_telegraph_pages
+               WHERE execution_process_id = ?"#,
+        )
+        .bind(execution_process_id)
+        .fetch_one(&mut *tx)
+        .await?;
+
+        for (offset, page) in pages.iter().enumerate() {
+            sqlx::query(
+                r#"INSERT INTO execution_process_telegraph_pages (
+                        execution_process_id, page_index, url, path, title, created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?)"#,
+            )
+            .bind(execution_process_id)
+            .bind(next_page_index + offset as i64)
+            .bind(page.url)
+            .bind(page.path)
+            .bind(page.title)
+            .bind(now)
+            .bind(now)
+            .execute(&mut *tx)
+            .await?;
+        }
+
+        tx.commit().await?;
+        Ok(())
+    }
 }

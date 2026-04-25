@@ -5,9 +5,11 @@
 //!
 //! The registry is runtime-only: it is reset when the bot restarts.
 
-use std::collections::HashMap;
-use std::path::PathBuf;
-use std::sync::{Arc, OnceLock};
+use std::{
+    collections::HashMap,
+    path::PathBuf,
+    sync::{Arc, OnceLock},
+};
 
 use teloxide::types::MessageId;
 use tokio::sync::RwLock;

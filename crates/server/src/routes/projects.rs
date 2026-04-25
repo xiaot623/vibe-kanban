@@ -20,7 +20,7 @@ use db::models::{
 use deployment::Deployment;
 use futures_util::{SinkExt, StreamExt, TryStreamExt};
 use services::services::{
-    config::{save_config_to_file, ProjectOpenAiApiConfig},
+    config::{ProjectOpenAiApiConfig, save_config_to_file},
     cron_tasks::{
         CronTaskConfig, CronTaskError, load_project_cron_config, save_project_cron_config,
     },
@@ -181,9 +181,7 @@ pub async fn delete_project(
 
                 {
                     let mut config = deployment.config().write().await;
-                    config
-                        .openai_compatible_api_projects
-                        .remove(&project_id);
+                    config.openai_compatible_api_projects.remove(&project_id);
                     let cfg_clone = config.clone();
                     drop(config);
                     // Best-effort save; log on failure but don't fail the delete
@@ -395,9 +393,7 @@ pub async fn update_project_openai_api(
         drop(config);
 
         if let Err(e) = save_config_to_file(&cfg_clone, &config_path()).await {
-            return Err(ApiError::BadRequest(format!(
-                "Failed to save config: {e}"
-            )));
+            return Err(ApiError::BadRequest(format!("Failed to save config: {e}")));
         }
     }
 

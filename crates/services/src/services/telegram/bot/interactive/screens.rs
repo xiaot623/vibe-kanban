@@ -1,7 +1,4 @@
-use db::models::{
-    execution_process::ExecutionProcess, project::Project,
-    task::Task,
-};
+use db::models::{execution_process::ExecutionProcess, project::Project, task::Task};
 use teloxide::{prelude::*, types::InlineKeyboardMarkup};
 use uuid::Uuid;
 
@@ -126,10 +123,7 @@ pub(super) async fn show_pending_approvals(
         let ctx =
             ExecutionProcess::load_context(&service.db.pool, approval.execution_process_id).await;
         if let Ok(ctx) = ctx {
-            text.push_str(&format!(
-                "\n{}",
-                truncate_text(&ctx.task.title, 40)
-            ));
+            text.push_str(&format!("\n{}", truncate_text(&ctx.task.title, 40)));
             rows.push(vec![
                 teloxide::types::InlineKeyboardButton::callback(
                     "✅ Approve".to_string(),

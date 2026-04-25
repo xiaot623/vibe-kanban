@@ -223,6 +223,29 @@
             "label": "启用 Telegra.ph 日志镜像（Beta）",
             "helper": "将标准化执行日志镜像到 Telegra.ph，并在阶段总结消息中追加日志链接。"
           }
+        },
+        "larkWiki": {
+          "enabled": {
+            "label": "启用飞书 Wiki 日志镜像（Beta）",
+            "helper": "将标准化执行日志镜像到每个执行器会话一个飞书 Wiki 文档，并在阶段总结消息中追加文档链接。"
+          },
+          "setup": {
+            "button": "设置飞书 Wiki 日志镜像",
+            "helper": "先在 Telegram 设置中保存 Wiki 空间 ID，然后再启用飞书镜像。",
+            "title": "设置飞书 Wiki 日志镜像",
+            "step1Description": "检查此设备上是否可用 lark-cli。",
+            "step2Description": "选择用于创建执行日志文档的 Wiki 空间。",
+            "checkingCli": "正在检查 lark-cli...",
+            "cliFound": "已找到 lark-cli：{{path}}。",
+            "cliMissing": "未找到 lark-cli。你仍可继续设置，并在运行前安装或完成授权。",
+            "installLink": "打开 lark-cli 安装说明",
+            "spaceIdLabel": "Wiki 空间 ID",
+            "spaceIdPlaceholder": "space_xxx",
+            "spaceIdHelper": "这里仅检测 CLI 并保存空间 ID；运行时授权和权限由 lark-cli 处理。",
+            "back": "返回",
+            "continue": "继续",
+            "finish": "完成设置"
+          }
         }
       },
       "tts": {

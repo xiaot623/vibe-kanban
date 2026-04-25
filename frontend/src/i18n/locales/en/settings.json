@@ -223,6 +223,29 @@
             "label": "Enable Telegra.ph log mirror (Beta)",
             "helper": "Mirror normalized execution logs to Telegra.ph and append the log link to stage summary messages."
           }
+        },
+        "larkWiki": {
+          "enabled": {
+            "label": "Enable Lark Wiki log mirror (Beta)",
+            "helper": "Mirror normalized execution logs to one Lark Wiki doc per executor session and append the doc link to stage summary messages."
+          },
+          "setup": {
+            "button": "Set up Lark Wiki log mirror",
+            "helper": "Stores a Wiki space ID in Telegram settings before enabling the Lark mirror.",
+            "title": "Set up Lark Wiki log mirror",
+            "step1Description": "Check whether lark-cli is available on this machine.",
+            "step2Description": "Choose the Wiki space where execution log docs should be created.",
+            "checkingCli": "Checking for lark-cli...",
+            "cliFound": "lark-cli found at {{path}}.",
+            "cliMissing": "lark-cli was not found. You can continue setup now and install or authenticate it before runtime.",
+            "installLink": "Open lark-cli install instructions",
+            "spaceIdLabel": "Wiki Space ID",
+            "spaceIdPlaceholder": "space_xxx",
+            "spaceIdHelper": "Only detection and this ID are configured here; runtime auth and scopes are handled by lark-cli.",
+            "back": "Back",
+            "continue": "Continue",
+            "finish": "Finish Setup"
+          }
         }
       },
       "tts": {

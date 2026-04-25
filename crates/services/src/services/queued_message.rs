@@ -142,16 +142,20 @@ impl QueuedMessageService {
 
     /// Get the queued message for a session (if any)
     pub fn get_queued(&self, session_id: Uuid) -> Option<QueuedMessage> {
-        self.queue.get(&session_id).map(|r| r.queued_message.clone())
+        self.queue
+            .get(&session_id)
+            .map(|r| r.queued_message.clone())
     }
 
     /// Take (remove and return) the queued message for a session.
     /// Used by finalization flow to consume the queued message.
     pub fn take_queued(&self, session_id: Uuid) -> Option<ConsumedQueuedMessage> {
-        self.queue.remove(&session_id).map(|(_, entry)| ConsumedQueuedMessage {
-            queued_message: entry.queued_message,
-            queue_id: entry.queue_id,
-        })
+        self.queue
+            .remove(&session_id)
+            .map(|(_, entry)| ConsumedQueuedMessage {
+                queued_message: entry.queued_message,
+                queue_id: entry.queue_id,
+            })
     }
 
     pub fn notify_started(&self, queue_id: Uuid, execution_id: Uuid) {
@@ -214,7 +218,10 @@ mod tests {
         let (_, old_waiter) = service.queue_message_with_waiter(session_id, draft("first"));
         let (_, new_waiter) = service.queue_message_with_waiter(session_id, draft("second"));
 
-        assert_eq!(old_waiter.wait_for_start().await, Err(QueueWaitError::Overwritten));
+        assert_eq!(
+            old_waiter.wait_for_start().await,
+            Err(QueueWaitError::Overwritten)
+        );
 
         let consumed = service.take_queued(session_id).expect("queued item");
         let execution_id = uuid::Uuid::new_v4();

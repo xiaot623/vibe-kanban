@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::{collections::HashMap, env, path::PathBuf};
 
 use axum::{
     Json, Router,
@@ -24,7 +24,7 @@ use services::services::{
         editor::{EditorConfig, EditorType},
         save_config_to_file,
     },
-    telegram::telegraph,
+    telegram::{lark_wiki, telegraph},
 };
 use tokio::fs;
 use ts_rs::TS;
@@ -44,6 +44,7 @@ pub fn router() -> Router<DeploymentImpl> {
             get(check_editor_availability),
         )
         .route("/agents/check-availability", get(check_agent_availability))
+        .route("/lark/check-cli", get(check_lark_cli))
 }
 
 #[derive(Debug, Serialize, Deserialize, TS)]
@@ -132,6 +133,7 @@ async fn update_config(
     if let Err(err) = telegraph::ensure_telegraph_config(&mut new_config).await {
         tracing::warn!("Failed to auto-initialize telegraph config during save: {err}");
     }
+    let _ = lark_wiki::normalize_lark_wiki_config(&mut new_config);
 
     match save_config_to_file(&new_config, &config_path).await {
         Ok(_) => {
@@ -151,6 +153,41 @@ async fn update_config(
         }
         Err(e) => ResponseJson(ApiResponse::error(&format!("Failed to save config: {}", e))),
     }
+}
+
+#[derive(Debug, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct LarkCliCheckResponse {
+    pub available: bool,
+    pub path: Option<String>,
+}
+
+async fn check_lark_cli() -> ResponseJson<ApiResponse<LarkCliCheckResponse>> {
+    let path = find_executable_in_path("lark-cli");
+    ResponseJson(ApiResponse::success(LarkCliCheckResponse {
+        available: path.is_some(),
+        path: path.map(|path| path.to_string_lossy().to_string()),
+    }))
+}
+
+fn find_executable_in_path(bin: &str) -> Option<PathBuf> {
+    let paths = env::var_os("PATH")?;
+    for dir in env::split_paths(&paths) {
+        let candidate = dir.join(bin);
+        if candidate.is_file() {
+            return Some(candidate);
+        }
+
+        #[cfg(windows)]
+        {
+            let candidate = dir.join(format!("{bin}.exe"));
+            if candidate.is_file() {
+                return Some(candidate);
+            }
+        }
+    }
+
+    None
 }
 
 /// Track config events when fields transition from false → true

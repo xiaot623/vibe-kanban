@@ -832,10 +832,7 @@ mod tests {
                 },
             ] {
                 let encoded = action.encode();
-                assert!(
-                    encoded.len() <= 64,
-                    "encoded too long: {encoded}"
-                );
+                assert!(encoded.len() <= 64, "encoded too long: {encoded}");
                 let decoded = CallbackAction::decode(&encoded).expect("decode failed");
                 assert_eq!(decoded, action);
             }

@@ -8,8 +8,7 @@
 //!  5. On cancellation signal, call `POST /predictions/{id}/cancel`.
 //!  6. Download the output URL to the audio temp dir.
 
-use std::path::PathBuf;
-use std::time::Duration;
+use std::{path::PathBuf, time::Duration};
 
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
@@ -107,9 +106,7 @@ impl ReplicateTtsClient {
         }
 
         // 4. Create prediction
-        let prediction_id = self
-            .create_prediction(&version_id, input, &cancel)
-            .await?;
+        let prediction_id = self.create_prediction(&version_id, input, &cancel).await?;
 
         // 5. Poll until done
         let output_url = self.poll_prediction(&prediction_id, &cancel).await?;
@@ -122,12 +119,7 @@ impl ReplicateTtsClient {
 
     async fn resolve_version(&self, model_slug: &str) -> Result<String, TtsError> {
         let url = format!("{}/models/{}", REPLICATE_API_BASE, model_slug);
-        let resp = self
-            .http
-            .get(&url)
-            .bearer_auth(&self.token)
-            .send()
-            .await?;
+        let resp = self.http.get(&url).bearer_auth(&self.token).send().await?;
 
         if !resp.status().is_success() {
             let status = resp.status();
@@ -138,10 +130,9 @@ impl ReplicateTtsClient {
         }
 
         let model: ModelResponse = resp.json().await?;
-        model
-            .latest_version
-            .map(|v| v.id)
-            .ok_or_else(|| TtsError::ReplicateApi(format!("Model {model_slug} has no latest_version")))
+        model.latest_version.map(|v| v.id).ok_or_else(|| {
+            TtsError::ReplicateApi(format!("Model {model_slug} has no latest_version"))
+        })
     }
 
     async fn create_prediction(
@@ -196,10 +187,11 @@ impl ReplicateTtsClient {
             let prediction = self.get_prediction(prediction_id).await?;
             match prediction.status.as_str() {
                 "succeeded" => {
-                    let output_url = extract_output_url(prediction.output)
-                        .ok_or_else(|| TtsError::ReplicateApi(
-                            format!("Prediction {prediction_id} succeeded but output URL is missing")
-                        ))?;
+                    let output_url = extract_output_url(prediction.output).ok_or_else(|| {
+                        TtsError::ReplicateApi(format!(
+                            "Prediction {prediction_id} succeeded but output URL is missing"
+                        ))
+                    })?;
                     return Ok(output_url);
                 }
                 "failed" => {
@@ -250,18 +242,12 @@ impl ReplicateTtsClient {
         let resp = self.http.post(&url).bearer_auth(&self.token).send().await?;
         if !resp.status().is_success() {
             let status = resp.status();
-            tracing::warn!(
-                "Failed to cancel Replicate prediction {prediction_id}: {status}"
-            );
+            tracing::warn!("Failed to cancel Replicate prediction {prediction_id}: {status}");
         }
         Ok(())
     }
 
-    async fn download_audio(
-        &self,
-        url: &str,
-        prediction_id: &str,
-    ) -> Result<PathBuf, TtsError> {
+    async fn download_audio(&self, url: &str, prediction_id: &str) -> Result<PathBuf, TtsError> {
         let audio_dir = vibe_cache_dir().join("audio");
         tokio::fs::create_dir_all(&audio_dir).await?;
 
@@ -315,12 +301,12 @@ mod tests {
 
     #[test]
     fn adapter_registry_covers_all_curated_models() {
-        let models = [
-            "minimax/speech-2.8-turbo",
-            "qwen/qwen3-tts",
-        ];
+        let models = ["minimax/speech-2.8-turbo", "qwen/qwen3-tts"];
         for model in models {
-            assert!(adapter_for_model(model).is_some(), "Missing adapter for {model}");
+            assert!(
+                adapter_for_model(model).is_some(),
+                "Missing adapter for {model}"
+            );
         }
     }
 
