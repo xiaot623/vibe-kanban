@@ -13,6 +13,9 @@ use db::models::{
     execution_process_lark_wiki_doc::{
         ExecutionProcessLarkWikiDoc, UpsertExecutionProcessLarkWikiDoc,
     },
+    execution_process_lark_wiki_month_node::{
+        ExecutionProcessLarkWikiMonthNode, UpsertExecutionProcessLarkWikiMonthNode,
+    },
 };
 use executors::{
     actions::{ExecutorAction, ExecutorActionType},
@@ -138,6 +141,13 @@ pub struct LarkWikiDocMeta {
     pub title: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LarkWikiMonthNodeMeta {
+    pub node_token: String,
+    pub obj_token: String,
+    pub title: String,
+}
+
 pub async fn get_execution_process_lark_wiki_url(
     pool: &SqlitePool,
     execution_process_id: &Uuid,
@@ -159,9 +169,12 @@ pub async fn get_execution_process_lark_wiki_url(
 
 #[async_trait]
 pub trait LarkWikiClient: Send + Sync {
+    async fn list_root_nodes(&self, space_id: &str) -> Result<Vec<LarkWikiMonthNodeMeta>>;
+    async fn create_month_node(&self, space_id: &str, month: &str)
+    -> Result<LarkWikiMonthNodeMeta>;
     async fn create_doc(
         &self,
-        space_id: &str,
+        parent_node_token: &str,
         title: &str,
         markdown: &str,
     ) -> Result<LarkWikiDocMeta>;
@@ -178,9 +191,56 @@ struct LarkCliClient;
 
 #[async_trait]
 impl LarkWikiClient for LarkCliClient {
-    async fn create_doc(
+    async fn list_root_nodes(&self, space_id: &str) -> Result<Vec<LarkWikiMonthNodeMeta>> {
+        let params = serde_json::json!({
+            "space_id": space_id,
+            "page_size": 50,
+        })
+        .to_string();
+        let output = run_lark_cli(
+            &[
+                "wiki",
+                "nodes",
+                "list",
+                "--as",
+                "user",
+                "--page-all",
+                "--params",
+                &params,
+            ],
+            None,
+        )
+        .await?;
+
+        parse_lark_wiki_node_list(&output)
+    }
+
+    async fn create_month_node(
         &self,
         space_id: &str,
+        month: &str,
+    ) -> Result<LarkWikiMonthNodeMeta> {
+        let params = serde_json::json!({ "space_id": space_id }).to_string();
+        let data = serde_json::json!({
+            "node_type": "origin",
+            "obj_type": "docx",
+            "title": month,
+        })
+        .to_string();
+        let output = run_lark_cli(
+            &[
+                "wiki", "nodes", "create", "--as", "user", "--params", &params, "--data", &data,
+            ],
+            None,
+        )
+        .await?;
+
+        parse_lark_wiki_node_meta(&output, month)
+    }
+
+    async fn create_doc(
+        &self,
+        parent_node_token: &str,
         title: &str,
         markdown: &str,
     ) -> Result<LarkWikiDocMeta> {
@@ -190,14 +250,14 @@ impl LarkWikiClient for LarkCliClient {
                 "+create",
                 "--as",
                 "user",
-                "--wiki-space",
-                space_id,
+                "--wiki-node",
+                parent_node_token,
                 "--title",
                 title,
                 "--markdown",
                 "-",
             ],
-            markdown,
+            Some(markdown),
         )
         .await?;
 
@@ -225,7 +285,7 @@ impl LarkWikiClient for LarkCliClient {
                 "--markdown",
                 "-",
             ],
-            markdown,
+            Some(markdown),
         )
         .await?;
 
@@ -237,7 +297,7 @@ impl LarkWikiClient for LarkCliClient {
     }
 }
 
-async fn run_lark_cli(args: &[&str], markdown: &str) -> Result<String> {
+async fn run_lark_cli(args: &[&str], stdin: Option<&str>) -> Result<String> {
     let mut child = tokio::process::Command::new(LARK_CLI_BIN)
         .args(args)
         .stdin(Stdio::piped())
@@ -246,11 +306,13 @@ async fn run_lark_cli(args: &[&str], markdown: &str) -> Result<String> {
         .spawn()
         .with_context(|| format!("failed to spawn {LARK_CLI_BIN}"))?;
 
-    if let Some(mut stdin) = child.stdin.take() {
+    if let Some(input) = stdin
+        && let Some(mut stdin) = child.stdin.take()
+    {
         stdin
-            .write_all(markdown.as_bytes())
+            .write_all(input.as_bytes())
             .await
-            .context("failed to write markdown to lark-cli stdin")?;
+            .context("failed to write to lark-cli stdin")?;
     }
 
     let output = child
@@ -269,13 +331,31 @@ async fn run_lark_cli(args: &[&str], markdown: &str) -> Result<String> {
 pub fn parse_lark_doc_meta(output: &str, fallback_title: &str) -> Result<LarkWikiDocMeta> {
     let value: Value =
         serde_json::from_str(output.trim()).context("failed to parse lark-cli JSON")?;
-    let doc_id = find_string_field(&value, &["doc_id", "document_id", "token"])
-        .context("lark-cli response missing doc_id")?;
     let url = find_string_field(&value, &["doc_url", "url", "document_url"])
         .context("lark-cli response missing doc_url")?;
+    let doc_id = find_string_field(&value, &["doc_id", "document_id", "token"])
+        .or_else(|| extract_lark_url_token(&url))
+        .context("lark-cli response missing doc_id")?;
     let title = find_string_field(&value, &["title"]).unwrap_or_else(|| fallback_title.to_string());
 
     Ok(LarkWikiDocMeta { doc_id, url, title })
+}
+
+pub fn parse_lark_wiki_node_meta(
+    output: &str,
+    fallback_title: &str,
+) -> Result<LarkWikiMonthNodeMeta> {
+    let value: Value =
+        serde_json::from_str(output.trim()).context("failed to parse lark-cli JSON")?;
+    find_wiki_node_meta(&value, fallback_title).context("lark-cli response missing wiki node")
+}
+
+pub fn parse_lark_wiki_node_list(output: &str) -> Result<Vec<LarkWikiMonthNodeMeta>> {
+    let value: Value =
+        serde_json::from_str(output.trim()).context("failed to parse lark-cli JSON")?;
+    let mut nodes = Vec::new();
+    collect_wiki_node_meta(&value, &mut nodes);
+    Ok(nodes)
 }
 
 pub async fn append_stage_summary_markdown(
@@ -339,8 +419,26 @@ pub async fn append_stage_summary_markdown(
     let update_result = match existing_doc {
         Some(doc) => client.update_doc(&doc.doc_id, &doc_title, &markdown).await,
         None => {
+            let month_node = match resolve_lark_wiki_month_node(
+                Some(pool),
+                &client,
+                &mirror_config.space_id,
+                ctx.execution_process.started_at,
+            )
+            .await
+            {
+                Ok(month_node) => month_node,
+                Err(err) => {
+                    tracing::warn!(
+                        "Failed to resolve Lark Wiki month node for execution {}: {}",
+                        execution_process_id,
+                        err
+                    );
+                    return existing_url;
+                }
+            };
             client
-                .create_doc(&mirror_config.space_id, &doc_title, &markdown)
+                .create_doc(&month_node.node_token, &doc_title, &markdown)
                 .await
         }
     };
@@ -450,6 +548,131 @@ fn find_string_field(value: &Value, keys: &[&str]) -> Option<String> {
     }
 }
 
+fn find_wiki_node_meta(value: &Value, fallback_title: &str) -> Option<LarkWikiMonthNodeMeta> {
+    match value {
+        Value::Object(map) => {
+            if let Some(meta) = wiki_node_meta_from_object(map, fallback_title) {
+                return Some(meta);
+            }
+
+            map.values()
+                .find_map(|value| find_wiki_node_meta(value, fallback_title))
+        }
+        Value::Array(values) => values
+            .iter()
+            .find_map(|value| find_wiki_node_meta(value, fallback_title)),
+        _ => None,
+    }
+}
+
+fn collect_wiki_node_meta(value: &Value, nodes: &mut Vec<LarkWikiMonthNodeMeta>) {
+    match value {
+        Value::Object(map) => {
+            if let Some(meta) = wiki_node_meta_from_object(map, "") {
+                nodes.push(meta);
+            } else {
+                for value in map.values() {
+                    collect_wiki_node_meta(value, nodes);
+                }
+            }
+        }
+        Value::Array(values) => {
+            for value in values {
+                collect_wiki_node_meta(value, nodes);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn wiki_node_meta_from_object(
+    map: &serde_json::Map<String, Value>,
+    fallback_title: &str,
+) -> Option<LarkWikiMonthNodeMeta> {
+    let node_token = map
+        .get("node_token")
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())?
+        .to_string();
+    let obj_token = map
+        .get("obj_token")
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or("")
+        .to_string();
+    let title = map
+        .get("title")
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or(fallback_title)
+        .to_string();
+
+    Some(LarkWikiMonthNodeMeta {
+        node_token,
+        obj_token,
+        title,
+    })
+}
+
+fn extract_lark_url_token(url: &str) -> Option<String> {
+    let trimmed = url.trim_end_matches('/');
+    for marker in ["/wiki/", "/docx/", "/docs/"] {
+        if let Some((_, token)) = trimmed.rsplit_once(marker) {
+            let token = token.split(['?', '#', '/']).next().unwrap_or("");
+            if !token.trim().is_empty() {
+                return Some(token.to_string());
+            }
+        }
+    }
+
+    None
+}
+
+pub fn lark_wiki_month_for_started_at(started_at: DateTime<Utc>) -> String {
+    started_at.with_timezone(&Local).format("%Y%m").to_string()
+}
+
+async fn resolve_lark_wiki_month_node(
+    pool: Option<&SqlitePool>,
+    client: &dyn LarkWikiClient,
+    space_id: &str,
+    started_at: DateTime<Utc>,
+) -> Result<LarkWikiMonthNodeMeta> {
+    let month = lark_wiki_month_for_started_at(started_at);
+
+    if let Some(pool) = pool {
+        if let Some(cached) =
+            ExecutionProcessLarkWikiMonthNode::find_by_space_and_month(pool, space_id, &month)
+                .await?
+        {
+            return Ok(LarkWikiMonthNodeMeta {
+                node_token: cached.node_token,
+                obj_token: cached.obj_token,
+                title: cached.title,
+            });
+        }
+    }
+
+    let root_nodes = client.list_root_nodes(space_id).await?;
+    let month_node =
+        if let Some(month_node) = root_nodes.into_iter().find(|node| node.title == month) {
+            month_node
+        } else {
+            client.create_month_node(space_id, &month).await?
+        };
+
+    if let Some(pool) = pool {
+        let node = UpsertExecutionProcessLarkWikiMonthNode {
+            node_token: &month_node.node_token,
+            obj_token: &month_node.obj_token,
+            title: &month_node.title,
+        };
+        ExecutionProcessLarkWikiMonthNode::upsert(pool, space_id, &month, &node).await?;
+    }
+
+    Ok(month_node)
+}
+
 pub fn spawn_lark_wiki_log_consumer(
     session_id: Uuid,
     execution_process_id: Uuid,
@@ -494,6 +717,21 @@ async fn run_lark_wiki_log_consumer_with_client(
             .or_insert_with(|| Arc::new(Mutex::new(SessionLarkWikiState::new())))
             .clone()
     };
+    let started_at = match db_pool.as_ref() {
+        Some(pool) => match ExecutionProcess::find_by_id(pool, execution_process_id).await {
+            Ok(Some(process)) => process.started_at,
+            Ok(None) => Utc::now(),
+            Err(err) => {
+                tracing::warn!(
+                    "Failed to load execution started_at for Lark Wiki month node resolution {}: {}",
+                    execution_process_id,
+                    err
+                );
+                Utc::now()
+            }
+        },
+        None => Utc::now(),
+    };
 
     let mut consumer = LarkWikiLogConsumer::new(
         execution_process_id,
@@ -503,6 +741,7 @@ async fn run_lark_wiki_log_consumer_with_client(
         session_state,
         user_input,
         space_id,
+        started_at,
     );
     let mut flush_interval =
         tokio::time::interval_at(Instant::now() + LARK_FLUSH_INTERVAL, LARK_FLUSH_INTERVAL);
@@ -555,6 +794,7 @@ struct LarkWikiLogConsumer {
     flushed_once: bool,
     user_input: Option<String>,
     space_id: String,
+    started_at: DateTime<Utc>,
 }
 
 impl LarkWikiLogConsumer {
@@ -566,6 +806,7 @@ impl LarkWikiLogConsumer {
         session_state: Arc<Mutex<SessionLarkWikiState>>,
         user_input: Option<String>,
         space_id: String,
+        started_at: DateTime<Utc>,
     ) -> Self {
         Self {
             execution_process_id,
@@ -578,6 +819,7 @@ impl LarkWikiLogConsumer {
             flushed_once: false,
             user_input,
             space_id,
+            started_at,
         }
     }
 
@@ -629,8 +871,26 @@ impl LarkWikiLogConsumer {
                     .await
             }
             None => {
+                let month_node = match resolve_lark_wiki_month_node(
+                    self.db_pool.as_ref(),
+                    self.client.as_ref(),
+                    &self.space_id,
+                    self.started_at,
+                )
+                .await
+                {
+                    Ok(month_node) => month_node,
+                    Err(err) => {
+                        tracing::warn!(
+                            "Failed to resolve Lark Wiki month node for execution {}: {}",
+                            self.execution_process_id,
+                            err
+                        );
+                        return;
+                    }
+                };
                 self.client
-                    .create_doc(&self.space_id, &self.doc_title, &markdown)
+                    .create_doc(&month_node.node_token, &self.doc_title, &markdown)
                     .await
             }
         };
@@ -941,18 +1201,40 @@ mod tests {
     struct MockLarkWikiClient {
         creates: StdMutex<Vec<(String, String, String)>>,
         updates: StdMutex<Vec<(String, String, String)>>,
+        root_nodes: StdMutex<Vec<LarkWikiMonthNodeMeta>>,
+        month_creates: StdMutex<Vec<(String, String)>>,
     }
 
     #[async_trait]
     impl LarkWikiClient for MockLarkWikiClient {
-        async fn create_doc(
+        async fn list_root_nodes(&self, _space_id: &str) -> Result<Vec<LarkWikiMonthNodeMeta>> {
+            Ok(self.root_nodes.lock().unwrap().clone())
+        }
+
+        async fn create_month_node(
             &self,
             space_id: &str,
+            month: &str,
+        ) -> Result<LarkWikiMonthNodeMeta> {
+            self.month_creates
+                .lock()
+                .unwrap()
+                .push((space_id.to_string(), month.to_string()));
+            Ok(LarkWikiMonthNodeMeta {
+                node_token: format!("node-{month}"),
+                obj_token: format!("obj-{month}"),
+                title: month.to_string(),
+            })
+        }
+
+        async fn create_doc(
+            &self,
+            parent_node_token: &str,
             title: &str,
             markdown: &str,
         ) -> Result<LarkWikiDocMeta> {
             self.creates.lock().unwrap().push((
-                space_id.to_string(),
+                parent_node_token.to_string(),
                 title.to_string(),
                 markdown.to_string(),
             ));
@@ -1060,6 +1342,151 @@ mod tests {
         assert_eq!(nested.doc_id, "d2");
         assert_eq!(nested.url, "https://y");
         assert_eq!(nested.title, "fallback");
+
+        let wiki_url = parse_lark_doc_meta(
+            r#"{"doc_url":"https://example.feishu.cn/wiki/wiki-token","title":"T"}"#,
+            "fallback",
+        )
+        .unwrap();
+        assert_eq!(wiki_url.doc_id, "wiki-token");
+    }
+
+    #[test]
+    fn parses_wiki_node_responses() {
+        let created = parse_lark_wiki_node_meta(
+            r#"{"data":{"node":{"node_token":"node-1","obj_token":"obj-1","title":"202604"}}}"#,
+            "fallback",
+        )
+        .unwrap();
+        assert_eq!(
+            created,
+            LarkWikiMonthNodeMeta {
+                node_token: "node-1".to_string(),
+                obj_token: "obj-1".to_string(),
+                title: "202604".to_string(),
+            }
+        );
+
+        let listed = parse_lark_wiki_node_list(
+            r#"{"data":{"items":[{"node_token":"node-1","obj_token":"obj-1","title":"202603"},{"node_token":"node-2","obj_token":"obj-2","title":"202604"}]}}"#,
+        )
+        .unwrap();
+        assert_eq!(listed.len(), 2);
+        assert_eq!(listed[1].title, "202604");
+    }
+
+    #[test]
+    fn lark_wiki_month_uses_execution_started_at_local_time() {
+        let started_at = DateTime::parse_from_rfc3339("2026-04-25T02:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+
+        assert_eq!(lark_wiki_month_for_started_at(started_at), "202604");
+    }
+
+    async fn create_month_nodes_table(pool: &SqlitePool) {
+        sqlx::query(
+            r#"CREATE TABLE execution_process_lark_wiki_month_nodes (
+                space_id TEXT NOT NULL,
+                month TEXT NOT NULL,
+                node_token TEXT NOT NULL,
+                obj_token TEXT NOT NULL,
+                title TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                PRIMARY KEY (space_id, month)
+            )"#,
+        )
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn month_node_cache_hit_skips_lark_cli_resolution() {
+        let pool = SqlitePool::connect(":memory:").await.unwrap();
+        create_month_nodes_table(&pool).await;
+        ExecutionProcessLarkWikiMonthNode::upsert(
+            &pool,
+            "space-1",
+            "202604",
+            &UpsertExecutionProcessLarkWikiMonthNode {
+                node_token: "cached-node",
+                obj_token: "cached-obj",
+                title: "202604",
+            },
+        )
+        .await
+        .unwrap();
+        let client = MockLarkWikiClient::default();
+        let started_at = DateTime::parse_from_rfc3339("2026-04-25T02:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+
+        let node = resolve_lark_wiki_month_node(Some(&pool), &client, "space-1", started_at)
+            .await
+            .unwrap();
+
+        assert_eq!(node.node_token, "cached-node");
+        assert!(client.month_creates.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn month_node_root_list_hit_is_cached() {
+        let pool = SqlitePool::connect(":memory:").await.unwrap();
+        create_month_nodes_table(&pool).await;
+        let client = MockLarkWikiClient::default();
+        client
+            .root_nodes
+            .lock()
+            .unwrap()
+            .push(LarkWikiMonthNodeMeta {
+                node_token: "listed-node".to_string(),
+                obj_token: "listed-obj".to_string(),
+                title: "202604".to_string(),
+            });
+        let started_at = DateTime::parse_from_rfc3339("2026-04-25T02:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+
+        let node = resolve_lark_wiki_month_node(Some(&pool), &client, "space-1", started_at)
+            .await
+            .unwrap();
+
+        assert_eq!(node.node_token, "listed-node");
+        assert!(client.month_creates.lock().unwrap().is_empty());
+        let cached =
+            ExecutionProcessLarkWikiMonthNode::find_by_space_and_month(&pool, "space-1", "202604")
+                .await
+                .unwrap()
+                .unwrap();
+        assert_eq!(cached.node_token, "listed-node");
+    }
+
+    #[tokio::test]
+    async fn month_node_list_miss_creates_and_caches() {
+        let pool = SqlitePool::connect(":memory:").await.unwrap();
+        create_month_nodes_table(&pool).await;
+        let client = MockLarkWikiClient::default();
+        let started_at = DateTime::parse_from_rfc3339("2026-04-25T02:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+
+        let node = resolve_lark_wiki_month_node(Some(&pool), &client, "space-1", started_at)
+            .await
+            .unwrap();
+
+        assert_eq!(node.node_token, "node-202604");
+        assert_eq!(
+            client.month_creates.lock().unwrap().as_slice(),
+            &[("space-1".to_string(), "202604".to_string())]
+        );
+        let cached =
+            ExecutionProcessLarkWikiMonthNode::find_by_space_and_month(&pool, "space-1", "202604")
+                .await
+                .unwrap()
+                .unwrap();
+        assert_eq!(cached.node_token, "node-202604");
     }
 
     #[tokio::test]
@@ -1078,6 +1505,7 @@ mod tests {
         .execute(&pool)
         .await
         .unwrap();
+        create_month_nodes_table(&pool).await;
 
         let session_id = Uuid::new_v4();
         let exec1 = Uuid::new_v4();
@@ -1132,6 +1560,7 @@ mod tests {
         .await;
 
         assert_eq!(client.creates.lock().unwrap().len(), 1);
+        assert!(client.creates.lock().unwrap()[0].0.starts_with("node-"));
         let updates = client.updates.lock().unwrap();
         assert_eq!(updates.len(), 1);
         assert_eq!(updates[0].0, "doc-1");
