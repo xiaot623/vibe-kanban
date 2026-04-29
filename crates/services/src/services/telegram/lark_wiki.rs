@@ -1,9 +1,4 @@
-use std::{
-    collections::{BTreeMap, HashMap},
-    process::Stdio,
-    sync::Arc,
-    time::Duration,
-};
+use std::process::Stdio;
 
 use anyhow::{Context, Result};
 use async_trait::async_trait;
@@ -19,25 +14,15 @@ use db::models::{
 };
 use executors::{
     actions::{ExecutorAction, ExecutorActionType},
-    logs::{
-        ActionType, NormalizedEntry, NormalizedEntryType, NormalizedEventStream,
-        NormalizedLogEvent, ToolResultValueType, ToolStatus,
-    },
+    logs::{ActionType, NormalizedEntry, NormalizedEntryType, ToolResultValueType, ToolStatus},
 };
-use futures::StreamExt;
 use serde_json::Value;
 use sqlx::SqlitePool;
-use tokio::{
-    io::AsyncWriteExt,
-    sync::Mutex,
-    task::JoinHandle,
-    time::{Instant, MissedTickBehavior},
-};
+use tokio::io::AsyncWriteExt;
 use uuid::Uuid;
 
 use crate::services::config::{Config, TelegramConfig};
 
-const LARK_FLUSH_INTERVAL: Duration = Duration::from_secs(2);
 const LARK_CLI_BIN: &str = "lark-cli";
 const LARK_TITLE_MAX_CHARS: usize = 240;
 
@@ -66,72 +51,6 @@ pub fn normalize_lark_wiki_config(config: &mut Config) -> bool {
 
     config.telegram.lark_wiki_space_id = normalized;
     true
-}
-
-pub type LarkWikiSessionStore = Mutex<HashMap<Uuid, Arc<Mutex<SessionLarkWikiState>>>>;
-
-pub fn new_lark_wiki_session_store() -> Arc<LarkWikiSessionStore> {
-    Arc::new(Mutex::new(HashMap::new()))
-}
-
-pub struct SessionLarkWikiState {
-    execution_order: Vec<Uuid>,
-    entries_by_execution: HashMap<Uuid, BTreeMap<usize, NormalizedEntry>>,
-    user_inputs: HashMap<Uuid, String>,
-    doc_meta: Option<LarkWikiDocMeta>,
-}
-
-impl SessionLarkWikiState {
-    fn new() -> Self {
-        Self {
-            execution_order: Vec::new(),
-            entries_by_execution: HashMap::new(),
-            user_inputs: HashMap::new(),
-            doc_meta: None,
-        }
-    }
-
-    fn merge_execution_entries(
-        &mut self,
-        execution_process_id: Uuid,
-        local_entries: &BTreeMap<usize, NormalizedEntry>,
-        user_input: Option<&str>,
-    ) {
-        if !self.execution_order.contains(&execution_process_id) {
-            self.execution_order.push(execution_process_id);
-        }
-
-        self.entries_by_execution
-            .insert(execution_process_id, local_entries.clone());
-
-        if let Some(input) = user_input.filter(|input| !input.trim().is_empty()) {
-            self.user_inputs
-                .entry(execution_process_id)
-                .or_insert_with(|| input.to_owned());
-        }
-    }
-
-    fn render_all_markdown(&self) -> Option<String> {
-        let mut sections = Vec::new();
-
-        for execution_id in &self.execution_order {
-            if let Some(input) = self.user_inputs.get(execution_id)
-                && !input.trim().is_empty()
-            {
-                sections.push(render_text_entry("User", input));
-            }
-
-            if let Some(entries) = self.entries_by_execution.get(execution_id) {
-                sections.extend(entries.values().filter_map(render_entry_markdown));
-            }
-        }
-
-        if sections.is_empty() {
-            None
-        } else {
-            Some(sections.join("\n\n---\n\n"))
-        }
-    }
 }
 
 #[derive(Debug, Clone)]
@@ -365,6 +284,25 @@ pub async fn append_stage_summary_markdown(
     entries: Vec<NormalizedEntry>,
 ) -> Option<String> {
     let mirror_config = LarkWikiMirrorConfig::from_telegram_config(config)?;
+    let client = LarkCliClient;
+
+    append_stage_summary_markdown_with_client(
+        pool,
+        execution_process_id,
+        &mirror_config.space_id,
+        &client,
+        entries,
+    )
+    .await
+}
+
+async fn append_stage_summary_markdown_with_client(
+    pool: &SqlitePool,
+    execution_process_id: Uuid,
+    space_id: &str,
+    client: &dyn LarkWikiClient,
+    entries: Vec<NormalizedEntry>,
+) -> Option<String> {
     let ctx = match ExecutionProcess::load_context(pool, execution_process_id).await {
         Ok(ctx) => ctx,
         Err(err) => {
@@ -390,17 +328,24 @@ pub async fn append_stage_summary_markdown(
                 return None;
             }
         };
-    let user_input = current_execution_doc
-        .is_none()
-        .then(|| user_input_for_context(&ctx))
-        .flatten();
+    if let Some(doc) = current_execution_doc {
+        if !doc.is_pending_claim() {
+            return Some(doc.url);
+        }
+
+        return find_session_lark_wiki_doc(pool, ctx.execution_process.session_id)
+            .await
+            .ok()
+            .flatten()
+            .map(|doc| doc.url);
+    }
+    let user_input = user_input_for_context(&ctx);
     let markdown = render_entries_markdown(entries, user_input.as_deref())?;
     let doc_title = doc_title_for_execution(
         &ctx.task.title,
         ctx.execution_process.executor_action().ok(),
         ctx.execution_process.started_at,
     );
-    let client = LarkCliClient;
 
     let existing_doc =
         match find_session_lark_wiki_doc(pool, ctx.execution_process.session_id).await {
@@ -416,13 +361,28 @@ pub async fn append_stage_summary_markdown(
         };
 
     let existing_url = existing_doc.as_ref().map(|doc| doc.url.clone());
+    match ExecutionProcessLarkWikiDoc::try_claim_append(pool, execution_process_id, &doc_title)
+        .await
+    {
+        Ok(true) => {}
+        Ok(false) => return existing_url,
+        Err(err) => {
+            tracing::warn!(
+                "Failed to claim Lark Wiki append for execution {}: {}",
+                execution_process_id,
+                err
+            );
+            return existing_url;
+        }
+    }
+
     let update_result = match existing_doc {
         Some(doc) => client.update_doc(&doc.doc_id, &doc_title, &markdown).await,
         None => {
             let month_node = match resolve_lark_wiki_month_node(
                 Some(pool),
-                &client,
-                &mirror_config.space_id,
+                client,
+                space_id,
                 ctx.execution_process.started_at,
             )
             .await
@@ -434,6 +394,7 @@ pub async fn append_stage_summary_markdown(
                         execution_process_id,
                         err
                     );
+                    release_lark_wiki_pending_claim(pool, execution_process_id).await;
                     return existing_url;
                 }
             };
@@ -451,6 +412,7 @@ pub async fn append_stage_summary_markdown(
                 execution_process_id,
                 err
             );
+            release_lark_wiki_pending_claim(pool, execution_process_id).await;
             return existing_url;
         }
     };
@@ -469,6 +431,18 @@ pub async fn append_stage_summary_markdown(
     }
 
     Some(meta.url)
+}
+
+async fn release_lark_wiki_pending_claim(pool: &SqlitePool, execution_process_id: Uuid) {
+    if let Err(err) =
+        ExecutionProcessLarkWikiDoc::release_pending_claim(pool, execution_process_id).await
+    {
+        tracing::warn!(
+            "Failed to release Lark Wiki pending claim for execution {}: {}",
+            execution_process_id,
+            err
+        );
+    }
 }
 
 fn user_input_for_context(ctx: &ExecutionContext) -> Option<String> {
@@ -497,6 +471,7 @@ async fn find_session_lark_wiki_doc(
     for process in processes {
         if let Some(doc) =
             ExecutionProcessLarkWikiDoc::find_by_execution_process_id(pool, process.id).await?
+            && !doc.is_pending_claim()
         {
             return Ok(Some(doc));
         }
@@ -671,269 +646,6 @@ async fn resolve_lark_wiki_month_node(
     }
 
     Ok(month_node)
-}
-
-pub fn spawn_lark_wiki_log_consumer(
-    session_id: Uuid,
-    execution_process_id: Uuid,
-    doc_title: String,
-    stream: NormalizedEventStream,
-    config: LarkWikiMirrorConfig,
-    db_pool: SqlitePool,
-    session_store: Arc<LarkWikiSessionStore>,
-    user_input: Option<String>,
-) -> JoinHandle<()> {
-    tokio::spawn(async move {
-        run_lark_wiki_log_consumer_with_client(
-            session_id,
-            execution_process_id,
-            doc_title,
-            stream,
-            Arc::new(LarkCliClient) as Arc<dyn LarkWikiClient>,
-            Some(db_pool),
-            session_store,
-            user_input,
-            config.space_id,
-        )
-        .await;
-    })
-}
-
-async fn run_lark_wiki_log_consumer_with_client(
-    session_id: Uuid,
-    execution_process_id: Uuid,
-    doc_title: String,
-    mut stream: NormalizedEventStream,
-    client: Arc<dyn LarkWikiClient>,
-    db_pool: Option<SqlitePool>,
-    session_store: Arc<LarkWikiSessionStore>,
-    user_input: Option<String>,
-    space_id: String,
-) {
-    let session_state: Arc<Mutex<SessionLarkWikiState>> = {
-        let mut store = session_store.lock().await;
-        store
-            .entry(session_id)
-            .or_insert_with(|| Arc::new(Mutex::new(SessionLarkWikiState::new())))
-            .clone()
-    };
-    let started_at = match db_pool.as_ref() {
-        Some(pool) => match ExecutionProcess::find_by_id(pool, execution_process_id).await {
-            Ok(Some(process)) => process.started_at,
-            Ok(None) => Utc::now(),
-            Err(err) => {
-                tracing::warn!(
-                    "Failed to load execution started_at for Lark Wiki month node resolution {}: {}",
-                    execution_process_id,
-                    err
-                );
-                Utc::now()
-            }
-        },
-        None => Utc::now(),
-    };
-
-    let mut consumer = LarkWikiLogConsumer::new(
-        execution_process_id,
-        doc_title,
-        client,
-        db_pool,
-        session_state,
-        user_input,
-        space_id,
-        started_at,
-    );
-    let mut flush_interval =
-        tokio::time::interval_at(Instant::now() + LARK_FLUSH_INTERVAL, LARK_FLUSH_INTERVAL);
-    flush_interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
-
-    loop {
-        tokio::select! {
-            _ = flush_interval.tick() => {
-                consumer.flush_pending_updates().await;
-            }
-            next = stream.next() => {
-                match next {
-                    Some(Ok(NormalizedLogEvent::Finished)) => {
-                        consumer.flush_pending_updates().await;
-                        break;
-                    }
-                    Some(Ok(event)) => {
-                        consumer.apply_event(event);
-                        if consumer.no_doc_yet() && consumer.has_renderable_content() {
-                            consumer.flush_pending_updates().await;
-                        }
-                    }
-                    Some(Err(err)) => {
-                        tracing::warn!(
-                            "Lark Wiki consumer stream error for execution {}: {}",
-                            execution_process_id,
-                            err
-                        );
-                        consumer.flush_pending_updates().await;
-                        break;
-                    }
-                    None => {
-                        consumer.flush_pending_updates().await;
-                        break;
-                    }
-                }
-            }
-        }
-    }
-}
-
-struct LarkWikiLogConsumer {
-    execution_process_id: Uuid,
-    doc_title: String,
-    client: Arc<dyn LarkWikiClient>,
-    db_pool: Option<SqlitePool>,
-    local_entries: BTreeMap<usize, NormalizedEntry>,
-    session_state: Arc<Mutex<SessionLarkWikiState>>,
-    dirty: bool,
-    flushed_once: bool,
-    user_input: Option<String>,
-    space_id: String,
-    started_at: DateTime<Utc>,
-}
-
-impl LarkWikiLogConsumer {
-    fn new(
-        execution_process_id: Uuid,
-        doc_title: String,
-        client: Arc<dyn LarkWikiClient>,
-        db_pool: Option<SqlitePool>,
-        session_state: Arc<Mutex<SessionLarkWikiState>>,
-        user_input: Option<String>,
-        space_id: String,
-        started_at: DateTime<Utc>,
-    ) -> Self {
-        Self {
-            execution_process_id,
-            doc_title,
-            client,
-            db_pool,
-            local_entries: BTreeMap::new(),
-            session_state,
-            dirty: false,
-            flushed_once: false,
-            user_input,
-            space_id,
-            started_at,
-        }
-    }
-
-    fn apply_event(&mut self, event: NormalizedLogEvent) {
-        match event {
-            NormalizedLogEvent::UpsertEntry { index, entry } => {
-                self.local_entries.insert(index, entry);
-                self.dirty = true;
-            }
-            NormalizedLogEvent::RemoveEntry { index } => {
-                if self.local_entries.remove(&index).is_some() {
-                    self.dirty = true;
-                }
-            }
-            NormalizedLogEvent::Finished => {}
-        }
-    }
-
-    fn has_renderable_content(&self) -> bool {
-        self.local_entries
-            .values()
-            .any(|entry| render_entry_markdown(entry).is_some())
-    }
-
-    fn no_doc_yet(&self) -> bool {
-        !self.flushed_once
-    }
-
-    async fn flush_pending_updates(&mut self) {
-        if !self.dirty {
-            return;
-        }
-
-        let mut session = self.session_state.lock().await;
-        session.merge_execution_entries(
-            self.execution_process_id,
-            &self.local_entries,
-            self.user_input.as_deref(),
-        );
-
-        let Some(markdown) = session.render_all_markdown() else {
-            return;
-        };
-
-        let update_result = match session.doc_meta.as_ref() {
-            Some(meta) => {
-                self.client
-                    .update_doc(&meta.doc_id, &self.doc_title, &markdown)
-                    .await
-            }
-            None => {
-                let month_node = match resolve_lark_wiki_month_node(
-                    self.db_pool.as_ref(),
-                    self.client.as_ref(),
-                    &self.space_id,
-                    self.started_at,
-                )
-                .await
-                {
-                    Ok(month_node) => month_node,
-                    Err(err) => {
-                        tracing::warn!(
-                            "Failed to resolve Lark Wiki month node for execution {}: {}",
-                            self.execution_process_id,
-                            err
-                        );
-                        return;
-                    }
-                };
-                self.client
-                    .create_doc(&month_node.node_token, &self.doc_title, &markdown)
-                    .await
-            }
-        };
-
-        let meta = match update_result {
-            Ok(meta) => meta,
-            Err(err) => {
-                tracing::warn!(
-                    "Lark Wiki mirror update failed for execution {}: {}",
-                    self.execution_process_id,
-                    err
-                );
-                return;
-            }
-        };
-
-        session.doc_meta = Some(meta.clone());
-        self.dirty = false;
-        self.flushed_once = true;
-        self.persist_doc_meta(&meta).await;
-    }
-
-    async fn persist_doc_meta(&self, meta: &LarkWikiDocMeta) {
-        let Some(db_pool) = self.db_pool.as_ref() else {
-            return;
-        };
-
-        let doc = UpsertExecutionProcessLarkWikiDoc {
-            doc_id: &meta.doc_id,
-            url: &meta.url,
-            title: &meta.title,
-        };
-
-        if let Err(err) =
-            ExecutionProcessLarkWikiDoc::upsert(db_pool, self.execution_process_id, &doc).await
-        {
-            tracing::warn!(
-                "Failed to persist Lark Wiki metadata for execution {}: {}",
-                self.execution_process_id,
-                err
-            );
-        }
-    }
 }
 
 pub fn doc_title_for_execution(
@@ -1190,7 +902,10 @@ mod tests {
     use std::sync::Mutex as StdMutex;
 
     use executors::{
-        actions::{ExecutorAction, coding_agent_initial::CodingAgentInitialRequest},
+        actions::{
+            ExecutorAction, coding_agent_follow_up::CodingAgentFollowUpRequest,
+            coding_agent_initial::CodingAgentInitialRequest,
+        },
         executors::BaseCodingAgent,
         profile::ExecutorProfileId,
     };
@@ -1489,10 +1204,82 @@ mod tests {
         assert_eq!(cached.node_token, "node-202604");
     }
 
-    #[tokio::test]
-    async fn mock_client_reuses_session_doc_and_persists_urls_per_execution() {
-        let pool = SqlitePool::connect(":memory:").await.unwrap();
-        sqlx::query(
+    async fn create_lark_summary_test_schema(pool: &SqlitePool) {
+        for sql in [
+            r#"CREATE TABLE projects (
+                id BLOB PRIMARY KEY,
+                name TEXT NOT NULL,
+                default_agent_working_dir TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )"#,
+            r#"CREATE TABLE tasks (
+                id BLOB PRIMARY KEY,
+                project_id BLOB NOT NULL,
+                title TEXT NOT NULL,
+                description TEXT,
+                status TEXT NOT NULL,
+                parent_workspace_id BLOB,
+                source_cron_task_id BLOB,
+                diff_additions INTEGER,
+                diff_deletions INTEGER,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )"#,
+            r#"CREATE TABLE workspaces (
+                id BLOB PRIMARY KEY,
+                task_id BLOB NOT NULL,
+                container_ref TEXT,
+                branch TEXT NOT NULL DEFAULT 'main',
+                agent_working_dir TEXT,
+                setup_completed_at TEXT,
+                archived INTEGER NOT NULL DEFAULT 0,
+                pinned INTEGER NOT NULL DEFAULT 0,
+                name TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )"#,
+            r#"CREATE TABLE sessions (
+                id BLOB PRIMARY KEY,
+                workspace_id BLOB NOT NULL,
+                executor TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )"#,
+            r#"CREATE TABLE execution_processes (
+                id BLOB PRIMARY KEY,
+                session_id BLOB NOT NULL,
+                run_reason TEXT NOT NULL,
+                executor_action TEXT NOT NULL,
+                status TEXT NOT NULL,
+                exit_code INTEGER,
+                dropped INTEGER NOT NULL DEFAULT 0,
+                started_at TEXT NOT NULL,
+                completed_at TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )"#,
+            r#"CREATE TABLE repos (
+                id BLOB PRIMARY KEY,
+                path TEXT NOT NULL,
+                name TEXT NOT NULL,
+                display_name TEXT NOT NULL,
+                setup_script TEXT,
+                cleanup_script TEXT,
+                copy_files TEXT,
+                parallel_setup_script INTEGER NOT NULL DEFAULT 0,
+                dev_server_script TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )"#,
+            r#"CREATE TABLE workspace_repos (
+                id BLOB PRIMARY KEY,
+                workspace_id BLOB NOT NULL,
+                repo_id BLOB NOT NULL,
+                target_branch TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )"#,
             r#"CREATE TABLE execution_process_lark_wiki_docs (
                 execution_process_id BLOB PRIMARY KEY NOT NULL,
                 doc_id TEXT NOT NULL,
@@ -1501,83 +1288,294 @@ mod tests {
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL
             )"#,
+        ] {
+            sqlx::query(sql).execute(pool).await.unwrap();
+        }
+        create_month_nodes_table(pool).await;
+    }
+
+    async fn insert_lark_summary_test_context(
+        pool: &SqlitePool,
+        session_id: Uuid,
+        execution_ids: &[Uuid],
+    ) {
+        let now = Utc::now();
+        let project_id = Uuid::new_v4();
+        let task_id = Uuid::new_v4();
+        let workspace_id = Uuid::new_v4();
+
+        sqlx::query("INSERT INTO projects (id, name, created_at, updated_at) VALUES (?, ?, ?, ?)")
+            .bind(project_id)
+            .bind("Project")
+            .bind(now)
+            .bind(now)
+            .execute(pool)
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO tasks (id, project_id, title, description, status, created_at, updated_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?)",
         )
-        .execute(&pool)
+        .bind(task_id)
+        .bind(project_id)
+        .bind("Task title")
+        .bind("Task detail")
+        .bind("todo")
+        .bind(now)
+        .bind(now)
+        .execute(pool)
         .await
         .unwrap();
-        create_month_nodes_table(&pool).await;
+        sqlx::query(
+            "INSERT INTO workspaces (id, task_id, branch, created_at, updated_at)
+             VALUES (?, ?, ?, ?, ?)",
+        )
+        .bind(workspace_id)
+        .bind(task_id)
+        .bind("main")
+        .bind(now)
+        .bind(now)
+        .execute(pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO sessions (id, workspace_id, executor, created_at, updated_at)
+             VALUES (?, ?, ?, ?, ?)",
+        )
+        .bind(session_id)
+        .bind(workspace_id)
+        .bind("GEMINI")
+        .bind(now)
+        .bind(now)
+        .execute(pool)
+        .await
+        .unwrap();
 
-        let session_id = Uuid::new_v4();
-        let exec1 = Uuid::new_v4();
-        let exec2 = Uuid::new_v4();
-        let store = new_lark_wiki_session_store();
-        let client = Arc::new(MockLarkWikiClient::default());
-        let entry = |content: &str| NormalizedEntry {
+        for (idx, execution_id) in execution_ids.iter().enumerate() {
+            let action = if idx == 0 {
+                ExecutorAction::new(
+                    ExecutorActionType::CodingAgentInitialRequest(CodingAgentInitialRequest {
+                        prompt: "initial prompt".to_string(),
+                        executor_profile_id: ExecutorProfileId {
+                            executor: BaseCodingAgent::Gemini,
+                            variant: None,
+                        },
+                        working_dir: None,
+                    }),
+                    None,
+                )
+            } else {
+                ExecutorAction::new(
+                    ExecutorActionType::CodingAgentFollowUpRequest(CodingAgentFollowUpRequest {
+                        prompt: "follow-up prompt".to_string(),
+                        session_id: "agent-session".to_string(),
+                        executor_profile_id: ExecutorProfileId {
+                            executor: BaseCodingAgent::Gemini,
+                            variant: None,
+                        },
+                        working_dir: None,
+                    }),
+                    None,
+                )
+            };
+            sqlx::query(
+                "INSERT INTO execution_processes (
+                    id, session_id, run_reason, executor_action, status, dropped,
+                    started_at, created_at, updated_at
+                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            )
+            .bind(*execution_id)
+            .bind(session_id)
+            .bind("codingagent")
+            .bind(serde_json::to_string(&action).unwrap())
+            .bind("completed")
+            .bind(false)
+            .bind(now + chrono::Duration::seconds(idx as i64))
+            .bind(now + chrono::Duration::seconds(idx as i64))
+            .bind(now + chrono::Duration::seconds(idx as i64))
+            .execute(pool)
+            .await
+            .unwrap();
+        }
+    }
+
+    fn assistant_entry(content: &str) -> NormalizedEntry {
+        NormalizedEntry {
             timestamp: None,
             entry_type: NormalizedEntryType::AssistantMessage,
             content: content.to_string(),
             metadata: None,
-        };
+        }
+    }
 
-        let stream1 = Box::pin(futures::stream::iter(vec![
-            Ok(NormalizedLogEvent::UpsertEntry {
-                index: 0,
-                entry: entry("first"),
-            }),
-            Ok(NormalizedLogEvent::Finished),
-        ]));
-        run_lark_wiki_log_consumer_with_client(
-            session_id,
+    #[tokio::test]
+    async fn final_write_creates_doc_with_full_normalized_entries_and_returns_url() {
+        let pool = SqlitePool::connect(":memory:").await.unwrap();
+        let session_id = Uuid::new_v4();
+        let exec1 = Uuid::new_v4();
+        create_lark_summary_test_schema(&pool).await;
+        insert_lark_summary_test_context(&pool, session_id, &[exec1]).await;
+        let client = MockLarkWikiClient::default();
+
+        let url = append_stage_summary_markdown_with_client(
+            &pool,
             exec1,
-            "title-1".to_string(),
-            stream1,
-            client.clone(),
-            Some(pool.clone()),
-            store.clone(),
-            Some("initial prompt".to_string()),
-            "space-1".to_string(),
+            "space-1",
+            &client,
+            vec![assistant_entry("first"), assistant_entry("final")],
         )
         .await;
 
-        let stream2 = Box::pin(futures::stream::iter(vec![
-            Ok(NormalizedLogEvent::UpsertEntry {
-                index: 0,
-                entry: entry("second"),
-            }),
-            Ok(NormalizedLogEvent::Finished),
-        ]));
-        run_lark_wiki_log_consumer_with_client(
-            session_id,
-            exec2,
-            "title-2".to_string(),
-            stream2,
-            client.clone(),
-            Some(pool.clone()),
-            store,
-            Some("follow-up".to_string()),
-            "space-1".to_string(),
-        )
-        .await;
-
-        assert_eq!(client.creates.lock().unwrap().len(), 1);
-        assert!(client.creates.lock().unwrap()[0].0.starts_with("node-"));
-        let updates = client.updates.lock().unwrap();
-        assert_eq!(updates.len(), 1);
-        assert_eq!(updates[0].0, "doc-1");
-        assert!(updates[0].2.contains("first"));
-        assert!(updates[0].2.contains("second"));
-
+        assert_eq!(url.as_deref(), Some("https://lark.example/doc-1"));
+        let creates = client.creates.lock().unwrap();
+        assert_eq!(creates.len(), 1);
+        assert!(creates[0].2.contains("first"));
+        assert!(creates[0].2.contains("final"));
         assert_eq!(
             get_execution_process_lark_wiki_url(&pool, &exec1)
                 .await
                 .as_deref(),
             Some("https://lark.example/doc-1")
         );
+    }
+
+    #[tokio::test]
+    async fn final_write_reuses_existing_session_doc_for_follow_up_execution() {
+        let pool = SqlitePool::connect(":memory:").await.unwrap();
+        let session_id = Uuid::new_v4();
+        let exec1 = Uuid::new_v4();
+        let exec2 = Uuid::new_v4();
+        create_lark_summary_test_schema(&pool).await;
+        insert_lark_summary_test_context(&pool, session_id, &[exec1, exec2]).await;
+        let client = MockLarkWikiClient::default();
+
+        let first_url = append_stage_summary_markdown_with_client(
+            &pool,
+            exec1,
+            "space-1",
+            &client,
+            vec![assistant_entry("first")],
+        )
+        .await;
+        let second_url = append_stage_summary_markdown_with_client(
+            &pool,
+            exec2,
+            "space-1",
+            &client,
+            vec![assistant_entry("second")],
+        )
+        .await;
+
+        assert_eq!(first_url.as_deref(), Some("https://lark.example/doc-1"));
+        assert_eq!(second_url.as_deref(), Some("https://lark.example/doc-1"));
+        assert_eq!(client.creates.lock().unwrap().len(), 1);
+        let updates = client.updates.lock().unwrap();
+        assert_eq!(updates.len(), 1);
+        assert_eq!(updates[0].0, "doc-1");
+        assert!(updates[0].2.contains("second"));
         assert_eq!(
             get_execution_process_lark_wiki_url(&pool, &exec2)
                 .await
                 .as_deref(),
             Some("https://lark.example/doc-1")
         );
+    }
+
+    #[tokio::test]
+    async fn final_write_skips_duplicate_append_when_current_execution_has_url() {
+        let pool = SqlitePool::connect(":memory:").await.unwrap();
+        let session_id = Uuid::new_v4();
+        let exec1 = Uuid::new_v4();
+        create_lark_summary_test_schema(&pool).await;
+        insert_lark_summary_test_context(&pool, session_id, &[exec1]).await;
+        let doc = UpsertExecutionProcessLarkWikiDoc {
+            doc_id: "doc-existing",
+            url: "https://lark.example/existing",
+            title: "existing",
+        };
+        ExecutionProcessLarkWikiDoc::upsert(&pool, exec1, &doc)
+            .await
+            .unwrap();
+        let client = MockLarkWikiClient::default();
+
+        let url = append_stage_summary_markdown_with_client(
+            &pool,
+            exec1,
+            "space-1",
+            &client,
+            vec![assistant_entry("duplicate")],
+        )
+        .await;
+
+        assert_eq!(url.as_deref(), Some("https://lark.example/existing"));
+        assert!(client.creates.lock().unwrap().is_empty());
+        assert!(client.updates.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn final_write_skips_append_when_current_execution_is_pending_claimed() {
+        let pool = SqlitePool::connect(":memory:").await.unwrap();
+        let session_id = Uuid::new_v4();
+        let exec1 = Uuid::new_v4();
+        let exec2 = Uuid::new_v4();
+        create_lark_summary_test_schema(&pool).await;
+        insert_lark_summary_test_context(&pool, session_id, &[exec1, exec2]).await;
+        let doc = UpsertExecutionProcessLarkWikiDoc {
+            doc_id: "doc-existing",
+            url: "https://lark.example/existing",
+            title: "existing",
+        };
+        ExecutionProcessLarkWikiDoc::upsert(&pool, exec1, &doc)
+            .await
+            .unwrap();
+        assert!(
+            ExecutionProcessLarkWikiDoc::try_claim_append(&pool, exec2, "pending")
+                .await
+                .unwrap()
+        );
+        let client = MockLarkWikiClient::default();
+
+        let url = append_stage_summary_markdown_with_client(
+            &pool,
+            exec2,
+            "space-1",
+            &client,
+            vec![assistant_entry("second")],
+        )
+        .await;
+
+        assert_eq!(url.as_deref(), Some("https://lark.example/existing"));
+        assert!(client.creates.lock().unwrap().is_empty());
+        assert!(client.updates.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn final_write_returns_url_for_telegram_tail_line() {
+        let pool = SqlitePool::connect(":memory:").await.unwrap();
+        let session_id = Uuid::new_v4();
+        let exec1 = Uuid::new_v4();
+        let exec2 = Uuid::new_v4();
+        create_lark_summary_test_schema(&pool).await;
+        insert_lark_summary_test_context(&pool, session_id, &[exec1, exec2]).await;
+        let doc = UpsertExecutionProcessLarkWikiDoc {
+            doc_id: "doc-existing",
+            url: "https://lark.example/existing",
+            title: "existing",
+        };
+        ExecutionProcessLarkWikiDoc::upsert(&pool, exec1, &doc)
+            .await
+            .unwrap();
+        let client = MockLarkWikiClient::default();
+
+        let url = append_stage_summary_markdown_with_client(
+            &pool,
+            exec2,
+            "missing-space",
+            &client,
+            vec![assistant_entry("second")],
+        )
+        .await;
+
+        assert_eq!(url.as_deref(), Some("https://lark.example/doc-1"));
     }
 }

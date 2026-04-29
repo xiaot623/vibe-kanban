@@ -240,6 +240,10 @@ pub async fn append_stage_summary_pages(
         }
     };
     let existing_urls = get_execution_process_telegraph_urls(pool, &execution_process_id).await;
+    if !existing_urls.is_empty() {
+        return existing_urls;
+    }
+
     let user_input = existing_urls
         .is_empty()
         .then(|| user_input_for_context(&ctx))
@@ -260,14 +264,101 @@ pub async fn append_stage_summary_pages(
     };
     let page_title = page_title_for_execution(&ctx.task.title, execution_process_id);
 
-    let mut metas = Vec::with_capacity(contents.len());
-    for (page_index, content) in contents.iter().enumerate() {
-        let title = page_title_for_page(&page_title, page_index);
-        match client.create_page(&title, content).await {
+    append_stage_summary_pages_with_client(
+        pool,
+        execution_process_id,
+        ctx.execution_process.session_id,
+        &page_title,
+        contents,
+        &client,
+    )
+    .await
+}
+
+async fn append_stage_summary_pages_with_client(
+    pool: &SqlitePool,
+    execution_process_id: Uuid,
+    session_id: Uuid,
+    page_title: &str,
+    contents: Vec<String>,
+    client: &dyn TelegraphClient,
+) -> Vec<String> {
+    let mut metas = match find_session_telegraph_pages(pool, session_id).await {
+        Ok(pages) => pages,
+        Err(err) => {
+            tracing::warn!(
+                "Failed to find existing Telegraph pages for session {}: {}",
+                session_id,
+                err
+            );
+            Vec::new()
+        }
+    };
+
+    let mut content_iter = contents.into_iter();
+    if let Some(first_content) = content_iter.next() {
+        match metas.last().cloned() {
+            Some(last_meta) => {
+                let update_result =
+                    append_content_to_existing_page(client, &last_meta, &first_content).await;
+                match update_result {
+                    Ok(meta) => {
+                        if let Some(last) = metas.last_mut() {
+                            *last = meta;
+                        }
+                    }
+                    Err(err) => {
+                        tracing::warn!(
+                            "Telegraph page append failed for execution {} path {}: {}",
+                            execution_process_id,
+                            last_meta.path,
+                            err
+                        );
+                        match client
+                            .create_page(
+                                &page_title_for_page(page_title, metas.len()),
+                                &first_content,
+                            )
+                            .await
+                        {
+                            Ok(meta) => metas.push(meta),
+                            Err(create_err) => {
+                                tracing::warn!(
+                                    "Telegraph fallback create failed for execution {}: {}",
+                                    execution_process_id,
+                                    create_err
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+            None => {
+                match client
+                    .create_page(&page_title_for_page(page_title, 0), &first_content)
+                    .await
+                {
+                    Ok(meta) => metas.push(meta),
+                    Err(err) => {
+                        tracing::warn!(
+                            "Telegraph stage summary create failed for execution {} page 0: {}",
+                            execution_process_id,
+                            err
+                        );
+                    }
+                }
+            }
+        };
+    }
+
+    for content in content_iter {
+        let page_index = metas.len();
+        let title = page_title_for_page(page_title, page_index);
+        match client.create_page(&title, &content).await {
             Ok(meta) => metas.push(meta),
             Err(err) => {
                 tracing::warn!(
-                    "Telegraph stage summary append failed for execution {} page {}: {}",
+                    "Telegraph stage summary create failed for execution {} page {}: {}",
                     execution_process_id,
                     page_index,
                     err
@@ -277,8 +368,56 @@ pub async fn append_stage_summary_pages(
         }
     }
 
-    persist_appended_page_meta(pool, execution_process_id, &metas).await;
-    metas.into_iter().map(|meta| meta.url).collect()
+    let urls = metas
+        .iter()
+        .map(|meta| meta.url.clone())
+        .collect::<Vec<_>>();
+    persist_replaced_page_meta(pool, execution_process_id, &metas).await;
+    urls
+}
+
+async fn append_content_to_existing_page(
+    client: &dyn TelegraphClient,
+    meta: &TelegraphPageMeta,
+    content: &str,
+) -> Result<TelegraphPageMeta> {
+    let mut existing_nodes = client.get_page_content(&meta.path).await?;
+    let mut new_nodes: Vec<Node> =
+        serde_json::from_str(content).context("failed to parse rendered Telegraph content")?;
+
+    if !existing_nodes.is_empty() && !new_nodes.is_empty() {
+        existing_nodes.push(horizontal_rule());
+    }
+    existing_nodes.append(&mut new_nodes);
+
+    let merged_content = serde_json::to_string(&existing_nodes)
+        .context("failed to serialize merged Telegraph content")?;
+    client
+        .edit_page(&meta.path, &meta.title, &merged_content)
+        .await
+}
+
+async fn find_session_telegraph_pages(
+    pool: &SqlitePool,
+    session_id: Uuid,
+) -> Result<Vec<TelegraphPageMeta>, sqlx::Error> {
+    let processes = ExecutionProcess::find_by_session_id(pool, session_id, false).await?;
+    for process in processes.into_iter().rev() {
+        let pages =
+            ExecutionProcessTelegraphPage::find_by_execution_process_id(pool, process.id).await?;
+        if !pages.is_empty() {
+            return Ok(pages
+                .into_iter()
+                .map(|page| TelegraphPageMeta {
+                    url: page.url,
+                    path: page.path,
+                    title: page.title,
+                })
+                .collect());
+        }
+    }
+
+    Ok(Vec::new())
 }
 
 fn user_input_for_context(ctx: &ExecutionContext) -> Option<String> {
@@ -303,6 +442,7 @@ fn user_input_for_context(ctx: &ExecutionContext) -> Option<String> {
 pub trait TelegraphClient: Send + Sync {
     async fn create_page(&self, title: &str, content: &str) -> Result<TelegraphPageMeta>;
     async fn edit_page(&self, path: &str, title: &str, content: &str) -> Result<TelegraphPageMeta>;
+    async fn get_page_content(&self, path: &str) -> Result<Vec<Node>>;
 }
 
 #[derive(Clone)]
@@ -345,6 +485,14 @@ impl TelegraphClient for TelegraphRsClient {
             .context("edit_page failed")?;
 
         Ok(page_meta_from_page(page))
+    }
+
+    async fn get_page_content(&self, path: &str) -> Result<Vec<Node>> {
+        let page = Telegraph::get_page(path, true)
+            .await
+            .context("get_page failed")?;
+
+        Ok(page.content.unwrap_or_default())
     }
 }
 
@@ -632,7 +780,7 @@ fn render_entries_page_contents(
     Some(contents)
 }
 
-async fn persist_appended_page_meta(
+async fn persist_replaced_page_meta(
     pool: &SqlitePool,
     execution_process_id: Uuid,
     meta: &[TelegraphPageMeta],
@@ -648,10 +796,10 @@ async fn persist_appended_page_meta(
         .collect::<Vec<_>>();
 
     if let Err(err) =
-        ExecutionProcessTelegraphPage::append_all(pool, execution_process_id, &pages).await
+        ExecutionProcessTelegraphPage::replace_all(pool, execution_process_id, &pages).await
     {
         tracing::warn!(
-            "Failed to persist appended telegraph page metadata for execution {}: {}",
+            "Failed to persist telegraph page metadata for execution {}: {}",
             execution_process_id,
             err
         );
@@ -1444,6 +1592,7 @@ fn page_meta_from_page(page: telegraph_rs::Page) -> TelegraphPageMeta {
 mod tests {
     use std::sync::{Arc, Mutex};
 
+    use chrono::Utc;
     use executors::logs::{
         ActionType, NormalizedEntry, NormalizedEntryType, NormalizedLogEvent, ToolResult,
         ToolStatus,
@@ -1457,6 +1606,7 @@ mod tests {
     #[derive(Default)]
     struct MockTelegraphClient {
         calls: Mutex<Vec<String>>,
+        pages: Mutex<HashMap<String, String>>,
     }
 
     impl MockTelegraphClient {
@@ -1492,9 +1642,14 @@ mod tests {
                 .iter()
                 .filter(|call| call.starts_with("create:"))
                 .count();
+            let path = format!("mock-{create_index}");
+            self.pages
+                .lock()
+                .expect("lock pages")
+                .insert(path.clone(), content.to_string());
             Ok(TelegraphPageMeta {
                 url: format!("https://telegra.ph/mock-{create_index}"),
-                path: format!("mock-{create_index}"),
+                path,
                 title: title.to_string(),
             })
         }
@@ -1509,11 +1664,26 @@ mod tests {
                 .lock()
                 .expect("lock calls")
                 .push(format!("edit:{path}:{title}:{content}"));
+            self.pages
+                .lock()
+                .expect("lock pages")
+                .insert(path.to_string(), content.to_string());
             Ok(TelegraphPageMeta {
                 url: format!("https://telegra.ph/{path}"),
                 path: path.to_string(),
                 title: title.to_string(),
             })
+        }
+
+        async fn get_page_content(&self, path: &str) -> Result<Vec<Node>> {
+            let content = self
+                .pages
+                .lock()
+                .expect("lock pages")
+                .get(path)
+                .cloned()
+                .unwrap_or_default();
+            Ok(serde_json::from_str(&content).unwrap_or_default())
         }
     }
 
@@ -1876,6 +2046,110 @@ mod tests {
         .await
         .expect("create test table");
         pool
+    }
+
+    async fn insert_test_execution_processes(
+        pool: &SqlitePool,
+        session_id: Uuid,
+        execution_ids: &[Uuid],
+    ) {
+        sqlx::query(
+            r#"CREATE TABLE execution_processes (
+                id BLOB PRIMARY KEY,
+                session_id BLOB NOT NULL,
+                run_reason TEXT NOT NULL,
+                executor_action TEXT NOT NULL,
+                status TEXT NOT NULL,
+                exit_code INTEGER,
+                dropped INTEGER NOT NULL DEFAULT 0,
+                started_at TEXT NOT NULL,
+                completed_at TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )"#,
+        )
+        .execute(pool)
+        .await
+        .expect("create execution_processes");
+
+        let now = Utc::now();
+        for (idx, execution_id) in execution_ids.iter().enumerate() {
+            let ts = now + chrono::Duration::seconds(idx as i64);
+            sqlx::query(
+                r#"INSERT INTO execution_processes (
+                    id, session_id, run_reason, executor_action, status, dropped,
+                    started_at, created_at, updated_at
+                ) VALUES (?, ?, 'codingagent', '{}', 'completed', 0, ?, ?, ?)"#,
+            )
+            .bind(*execution_id)
+            .bind(session_id)
+            .bind(ts)
+            .bind(ts)
+            .bind(ts)
+            .execute(pool)
+            .await
+            .expect("insert execution process");
+        }
+    }
+
+    #[tokio::test]
+    async fn final_summary_append_edits_existing_session_page() {
+        let pool = make_test_pool().await;
+        let mock = MockTelegraphClient::default();
+        let session_id = Uuid::new_v4();
+        let exec1 = Uuid::new_v4();
+        let exec2 = Uuid::new_v4();
+        insert_test_execution_processes(&pool, session_id, &[exec1, exec2]).await;
+
+        let first_urls = append_stage_summary_pages_with_client(
+            &pool,
+            exec1,
+            session_id,
+            "Task Title",
+            render_entries_page_contents(
+                vec![entry(
+                    NormalizedEntryType::AssistantMessage,
+                    "first summary",
+                )],
+                Some("initial prompt"),
+            )
+            .unwrap(),
+            &mock,
+        )
+        .await;
+        let second_urls = append_stage_summary_pages_with_client(
+            &pool,
+            exec2,
+            session_id,
+            "Task Title",
+            render_entries_page_contents(
+                vec![entry(
+                    NormalizedEntryType::AssistantMessage,
+                    "second summary",
+                )],
+                Some("follow-up prompt"),
+            )
+            .unwrap(),
+            &mock,
+        )
+        .await;
+
+        assert_eq!(first_urls, vec!["https://telegra.ph/mock-1".to_string()]);
+        assert_eq!(second_urls, vec!["https://telegra.ph/mock-1".to_string()]);
+        assert_eq!(mock.create_count(), 1);
+        assert_eq!(mock.edit_count(), 1);
+
+        let calls = mock.all_calls();
+        let edit_call = calls
+            .iter()
+            .find(|call| call.starts_with("edit:"))
+            .expect("existing page should be edited");
+        assert!(edit_call.contains("first summary"));
+        assert!(edit_call.contains("second summary"));
+        assert_eq!(
+            get_execution_process_telegraph_urls(&pool, &exec2).await,
+            vec!["https://telegra.ph/mock-1".to_string()]
+        );
     }
 
     #[tokio::test]

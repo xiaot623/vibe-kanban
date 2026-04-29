@@ -75,6 +75,7 @@ impl SessionManager {
             | AcpEvent::ModelInfo(..)
             | AcpEvent::Error(..)
             | AcpEvent::Done(..)
+            | AcpEvent::PromptUsage(..)
             | AcpEvent::Other(..) => return None,
 
             AcpEvent::User(..)

@@ -72,6 +72,21 @@ impl ExecutionProcessTelegraphPage {
         Ok(rows)
     }
 
+    pub async fn find_by_execution_process_id(
+        pool: &SqlitePool,
+        execution_process_id: Uuid,
+    ) -> Result<Vec<Self>, sqlx::Error> {
+        sqlx::query_as(
+            r#"SELECT execution_process_id, page_index, url, path, title, created_at, updated_at
+               FROM execution_process_telegraph_pages
+               WHERE execution_process_id = ?
+               ORDER BY page_index ASC"#,
+        )
+        .bind(execution_process_id)
+        .fetch_all(pool)
+        .await
+    }
+
     pub async fn append_all(
         pool: &SqlitePool,
         execution_process_id: Uuid,

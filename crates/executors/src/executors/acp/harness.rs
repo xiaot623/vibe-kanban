@@ -491,6 +491,10 @@ impl AcpAgentHarness {
                             // Send the prompt and await completion to obtain stop_reason
                             match conn.prompt(req).await {
                                 Ok(resp) => {
+                                    if let Some(usage) = resp.usage {
+                                        let _ =
+                                            log_tx.send(AcpEvent::PromptUsage(usage).to_string());
+                                    }
                                     // Emit done with stop_reason
                                     let stop_reason = serde_json::to_string(&resp.stop_reason)
                                         .unwrap_or_default();

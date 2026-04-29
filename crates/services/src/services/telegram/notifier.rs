@@ -1281,6 +1281,7 @@ async fn emit_stage_summary(
     let token_usage = changed.token_usage.or(overall.token_usage);
 
     if changed.assistant_messages.is_empty() {
+        let _ = append_lark_wiki_stage_summary(tg, accumulator, trigger).await;
         if matches!(trigger, SummaryTrigger::ExecutionFinished)
             && let Some(session_id) = accumulator.session_id
         {
@@ -1312,21 +1313,10 @@ async fn emit_stage_summary(
         lines.push("Model info: n/a".to_string());
     }
 
-    if let Some(usage) = token_usage {
-        if usage.model_context_window > 0 {
-            lines.push(format!(
-                "Token usage: total={} / context={}",
-                usage.total_tokens, usage.model_context_window
-            ));
-        } else {
-            lines.push(format!("Token usage: total={}", usage.total_tokens));
-        }
-    } else {
-        lines.push("Token usage: n/a".to_string());
-    }
+    append_token_usage_line(&mut lines, token_usage.as_ref());
 
     let telegraph_urls = append_telegraph_stage_summary(tg, accumulator).await;
-    let lark_wiki_url = append_lark_wiki_stage_summary(tg, accumulator).await;
+    let lark_wiki_url = append_lark_wiki_stage_summary(tg, accumulator, trigger).await;
     append_telegraph_log_lines(&mut lines, &telegraph_urls);
     append_lark_wiki_log_line(&mut lines, lark_wiki_url.as_deref());
 
@@ -1386,13 +1376,26 @@ async fn emit_stage_summary(
 async fn append_lark_wiki_stage_summary(
     tg: &TelegramContext,
     accumulator: &RunFeedAccumulator,
+    trigger: SummaryTrigger,
 ) -> Option<String> {
+    if !matches!(
+        trigger,
+        SummaryTrigger::ExecutionFinished | SummaryTrigger::TaskLeftInProgress
+    ) {
+        return None;
+    }
+
     let execution_process_id = accumulator.execution_process_id?;
-    let entries = accumulator
+    let entries: Vec<NormalizedEntry> = accumulator
         .iter_entries_for_summary(true)
         .into_iter()
         .map(|(_, entry)| entry)
         .collect();
+    if entries.is_empty() {
+        return lark_wiki::get_execution_process_lark_wiki_url(&tg.db.pool, &execution_process_id)
+            .await;
+    }
+
     let telegram_config = tg.config.read().await.telegram.clone();
 
     match lark_wiki::append_stage_summary_markdown(
@@ -1475,6 +1478,21 @@ fn append_telegraph_log_lines(lines: &mut Vec<String>, telegraph_urls: &[String]
 fn append_lark_wiki_log_line(lines: &mut Vec<String>, lark_wiki_url: Option<&str>) {
     if let Some(url) = lark_wiki_url.filter(|url| !url.trim().is_empty()) {
         lines.push(format!("Lark wiki log: {url}"));
+    }
+}
+
+fn append_token_usage_line(lines: &mut Vec<String>, token_usage: Option<&TokenUsageInfo>) {
+    if let Some(usage) = token_usage {
+        if usage.model_context_window > 0 {
+            lines.push(format!(
+                "Token usage: total={} / context={}",
+                usage.total_tokens, usage.model_context_window
+            ));
+        } else {
+            lines.push(format!("Token usage: total={}", usage.total_tokens));
+        }
+    } else {
+        lines.push("Token usage: n/a".to_string());
     }
 }
 
@@ -2124,6 +2142,20 @@ mod tests {
     }
 
     #[test]
+    fn append_token_usage_line_renders_total_only_without_context_window() {
+        let mut lines = Vec::new();
+        append_token_usage_line(
+            &mut lines,
+            Some(&TokenUsageInfo {
+                total_tokens: 654,
+                model_context_window: 0,
+            }),
+        );
+
+        assert_eq!(lines, vec!["Token usage: total=654".to_string()]);
+    }
+
+    #[test]
     fn stage_summary_keyboard_uses_review_done_for_daily_task() {
         let flow_token = "f-ab12c".to_string();
         let markup = stage_summary_keyboard(
@@ -2580,6 +2612,42 @@ mod tests {
         assert_eq!(
             acc.collect_summary_data(true).assistant_messages,
             vec!["Final".to_string()]
+        );
+    }
+
+    #[test]
+    fn summary_changed_entries_exclude_already_finalized_stage() {
+        let mut acc = RunFeedAccumulator::default();
+
+        let _ = acc.apply_patch(
+            &executors::logs::utils::patch::ConversationPatch::add_normalized_entry(
+                0,
+                entry(NormalizedEntryType::AssistantMessage, "First round"),
+            ),
+        );
+        acc.finalize_stage();
+        let _ = acc.apply_patch(
+            &executors::logs::utils::patch::ConversationPatch::add_normalized_entry(
+                1,
+                entry(NormalizedEntryType::AssistantMessage, "Second round"),
+            ),
+        );
+
+        let changed: Vec<String> = acc
+            .iter_entries_for_summary(true)
+            .into_iter()
+            .map(|(_, entry)| entry.content)
+            .collect();
+        let overall: Vec<String> = acc
+            .iter_entries_for_summary(false)
+            .into_iter()
+            .map(|(_, entry)| entry.content)
+            .collect();
+
+        assert_eq!(changed, vec!["Second round".to_string()]);
+        assert_eq!(
+            overall,
+            vec!["First round".to_string(), "Second round".to_string()]
         );
     }
 

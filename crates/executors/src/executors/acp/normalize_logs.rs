@@ -216,6 +216,22 @@ pub fn normalize_logs(msg_store: Arc<MsgStore>, worktree_path: &Path) {
                         };
                         msg_store.push_patch(ConversationPatch::add_normalized_entry(idx, entry));
                     }
+                    AcpEvent::PromptUsage(usage) => {
+                        let idx = entry_index.next();
+                        let total_tokens = usage.total_tokens.min(u32::MAX as u64) as u32;
+                        let entry = NormalizedEntry {
+                            timestamp: None,
+                            entry_type: NormalizedEntryType::TokenUsageInfo(
+                                crate::logs::TokenUsageInfo {
+                                    total_tokens,
+                                    model_context_window: 0,
+                                },
+                            ),
+                            content: format!("Tokens used: {total_tokens}"),
+                            metadata: None,
+                        };
+                        msg_store.push_patch(ConversationPatch::add_normalized_entry(idx, entry));
+                    }
                     AcpEvent::RequestPermission(perm) => {
                         if let Ok(tc) = agent_client_protocol::ToolCall::try_from(perm.tool_call) {
                             handle_tool_call(
@@ -1262,6 +1278,30 @@ mod tests {
             other => panic!("expected token usage info entry, got {other:?}"),
         }
         assert_eq!(entry.content, "Tokens used: 321 / Context window: 1048576");
+    }
+
+    #[tokio::test]
+    async fn prompt_response_usage_normalizes_to_total_only_token_usage_entry() {
+        let worktree = create_temp_dir("prompt-usage");
+        let msg_store = Arc::new(MsgStore::new());
+        normalize_logs(msg_store.clone(), &worktree);
+
+        let usage = agent_client_protocol::Usage::new(654, 300, 354);
+        msg_store.push_stdout(format!(
+            "{}\n",
+            serde_json::to_string(&AcpEvent::PromptUsage(usage))
+                .expect("serialize prompt usage event")
+        ));
+
+        let entry = wait_for_token_usage_entry(msg_store.as_ref()).await;
+        match entry.entry_type {
+            NormalizedEntryType::TokenUsageInfo(usage) => {
+                assert_eq!(usage.total_tokens, 654);
+                assert_eq!(usage.model_context_window, 0);
+            }
+            other => panic!("expected token usage info entry, got {other:?}"),
+        }
+        assert_eq!(entry.content, "Tokens used: 654");
     }
 
     #[tokio::test]

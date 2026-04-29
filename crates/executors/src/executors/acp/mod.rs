@@ -26,6 +26,7 @@ pub enum AcpEvent {
     AvailableCommands(Vec<agent_client_protocol::AvailableCommand>),
     CurrentMode(agent_client_protocol::SessionModeId),
     Usage(agent_client_protocol::UsageUpdate),
+    PromptUsage(agent_client_protocol::Usage),
     RequestPermission(agent_client_protocol::RequestPermissionRequest),
     ApprovalResponse(ApprovalResponse),
     Error(String),

@@ -66,7 +66,7 @@ use crate::services::{
     execution_log_hub::ExecutionLogHub,
     git::{GitService, GitServiceError},
     notification::NotificationService,
-    telegram::{lark_wiki, notifier as telegram_notifier, telegraph},
+    telegram::{notifier as telegram_notifier, telegraph},
     workspace_manager::WorkspaceError as WorkspaceManagerError,
     worktree_manager::WorktreeError,
 };
@@ -144,8 +144,6 @@ pub trait ContainerService {
     fn notification_service(&self) -> &NotificationService;
 
     fn telegraph_session_store(&self) -> &Arc<telegraph::TelegraphSessionStore>;
-
-    fn lark_wiki_session_store(&self) -> &Arc<lark_wiki::LarkWikiSessionStore>;
 
     fn workspace_to_current_dir(&self, workspace: &Workspace) -> PathBuf;
 
