@@ -104,13 +104,6 @@ impl Pi {
             builder = builder.extend_params(["--thinking", thinking.as_str()]);
         }
 
-        match self.mode() {
-            PiMode::Approve => {
-                builder = builder.extend_params(["--extension-policy", "balanced"]);
-            }
-            PiMode::Default => {}
-        }
-
         apply_overrides(builder, &self.cmd)
     }
 
@@ -521,10 +514,7 @@ impl PiRunContext {
                 map
             }
         };
-        params.insert(
-            "requestId".to_string(),
-            Value::String(request.request_id.clone()),
-        );
+        params.insert("id".to_string(), Value::String(request.request_id.clone()));
         rpc.send_command("extension_ui_response", Value::Object(params))
             .await?;
 
@@ -651,9 +641,9 @@ mod tests {
     }
 
     #[test]
-    fn approve_mode_adds_extension_policy_flag() {
+    fn approve_mode_has_no_extension_policy_flag() {
         let params = command_params(&pi_with_mode(Some(true)));
-        assert!(has_arg_pair(&params, "--extension-policy", "balanced"));
+        assert!(!has_arg_pair(&params, "--extension-policy", "balanced"));
         assert!(!params.iter().any(|arg| arg == "--no-tools"));
     }
 
@@ -672,7 +662,6 @@ mod tests {
             "extension_ui_response",
             json!({
                 "id": "req-1",
-                "requestId": "req-1",
                 "confirmed": true
             }),
         );

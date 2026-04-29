@@ -12,18 +12,6 @@
           "model": "opus",
           "plan": true
         }
-      },
-      "SONNET": {
-        "CLAUDE_CODE": {
-          "model": "sonnet",
-          "dangerously_skip_permissions": true
-        }
-      },
-      "OPUS": {
-        "CLAUDE_CODE": {
-          "model": "opus",
-          "dangerously_skip_permissions": true
-        }
       }
     },
     "GEMINI": {
@@ -35,26 +23,14 @@
       },
       "PLAN": {
         "GEMINI": {
-          "model": "gemini-3-pro-preview",
+          "model": "gemini-3.1-pro-preview",
           "plan": true,
           "yolo": false
         }
       },
-      "FLASH": {
-        "GEMINI": {
-          "model": "gemini-3-flash-preview",
-          "yolo": true
-        }
-      },
-      "PRO": {
-        "GEMINI": {
-          "model": "gemini-3-pro-preview",
-          "yolo": true
-        }
-      },
       "APPROVALS": {
         "GEMINI": {
-          "model": "gemini-3-pro-preview",
+          "model": "gemini-3.1-pro-preview",
           "yolo": false
         }
       }
@@ -62,39 +38,19 @@
     "CODEX": {
       "DEFAULT": {
         "CODEX": {
-          "model": "gpt-5.2",
+          "append_prompt": null,
           "sandbox": "danger-full-access",
+          "model": "gpt-5.5",
           "model_reasoning_effort": "medium"
         }
       },
       "PLAN": {
         "CODEX": {
-          "model": "gpt-5.2",
+          "append_prompt": null,
           "sandbox": "danger-full-access",
-          "model_reasoning_effort": "medium",
+          "model": "gpt-5.5",
+          "model_reasoning_effort": "high",
           "plan": true
-        }
-      },
-      "HIGH": {
-        "CODEX": {
-          "model": "gpt-5.3-codex",
-          "sandbox": "danger-full-access",
-          "model_reasoning_effort": "xhigh"
-        }
-      },
-      "APPROVALS": {
-        "CODEX": {
-          "model": "gpt-5.2",
-          "sandbox": "workspace-write",
-          "ask_for_approval": "unless-trusted",
-          "model_reasoning_effort": "high"
-        }
-      },
-      "CODEX": {
-        "CODEX": {
-          "model": "gpt-5.3-codex",
-          "sandbox": "danger-full-access",
-          "model_reasoning_effort": "high"
         }
       }
     },
@@ -102,20 +58,20 @@
       "DEFAULT": {
         "OPENCODE": {
           "auto_approve": true,
-          "model": "opencode/big-pickle"
+          "model": "google/gemini-3.1-flash-lite-preview"
         }
       },
       "PLAN": {
         "OPENCODE": {
           "plan": true,
           "auto_approve": true,
-          "model": "opencode/big-pickle"
+          "model": "google/gemini-3.1-flash-lite-preview"
         }
       },
       "APPROVALS": {
         "OPENCODE": {
           "auto_approve": false,
-          "model": "opencode/big-pickle"
+          "model": "google/gemini-3.1-flash-lite-preview"
         }
       }
     },
@@ -129,13 +85,15 @@
     "PI": {
       "DEFAULT": {
         "PI": {
-          "model": "gpt-5.3-codex"
+          "model": "openai-codex/gpt-5.5",
+          "thinking": "medium"
         }
       },
       "APPROVE": {
         "PI": {
-          "model": "gpt-5.3-codex",
-          "approve": true
+          "model": "openai-codex/gpt-5.5",
+          "approve": true,
+          "thinking": "medium"
         }
       }
     }

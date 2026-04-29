@@ -149,9 +149,19 @@ impl ToolCallState {
                     .as_ref()
                     .and_then(|input| extract_first_string(input, &["/command", "/cmd"]))
                     .unwrap_or_default();
-                let output = self.output.as_ref().map(stringify_value);
+                let output = self.output.as_ref().map(tool_output_text);
                 let exit_code = self.output.as_ref().and_then(|value| {
-                    extract_first_i32(value, &["/exit_code", "/exitCode", "/code"])
+                    extract_first_i32(
+                        value,
+                        &[
+                            "/exit_code",
+                            "/exitCode",
+                            "/code",
+                            "/details/exit_code",
+                            "/details/exitCode",
+                            "/details/code",
+                        ],
+                    )
                 });
 
                 (
@@ -198,13 +208,7 @@ impl ToolCallState {
                 ActionType::Tool {
                     tool_name: self.tool_name.clone(),
                     arguments: self.input.clone(),
-                    result: self.output.as_ref().map(|output| {
-                        if output.is_string() {
-                            ToolResult::markdown(stringify_value(output))
-                        } else {
-                            ToolResult::json(output.clone())
-                        }
-                    }),
+                    result: self.output.as_ref().map(tool_result),
                 },
                 self.tool_name.clone(),
             ),
@@ -397,6 +401,8 @@ impl LogState {
         let has_error = payload
             .pointer("/error")
             .is_some_and(|value| !value.is_null())
+            || extract_first_bool(payload, &["/isError", "/is_error", "/result/isError"])
+                .unwrap_or(false)
             || status_string == "error"
             || status_string == "failed";
 
@@ -700,6 +706,12 @@ fn extract_first_i32(value: &Value, pointers: &[&str]) -> Option<i32> {
     })
 }
 
+fn extract_first_bool(value: &Value, pointers: &[&str]) -> Option<bool> {
+    pointers
+        .iter()
+        .find_map(|pointer| value.pointer(pointer).and_then(Value::as_bool))
+}
+
 fn extract_first_value(value: &Value, pointers: &[&str]) -> Option<Value> {
     pointers.iter().find_map(|pointer| {
         value
@@ -714,6 +726,49 @@ fn stringify_value(value: &Value) -> String {
         Value::String(value) => value.clone(),
         _ => value.to_string(),
     }
+}
+
+fn tool_output_text(value: &Value) -> String {
+    structured_content_text(value).unwrap_or_else(|| stringify_value(value))
+}
+
+fn tool_result(value: &Value) -> ToolResult {
+    if let Some(text) = structured_content_text(value) {
+        ToolResult::markdown(text)
+    } else if value.is_string() {
+        ToolResult::markdown(stringify_value(value))
+    } else {
+        ToolResult::json(value.clone())
+    }
+}
+
+fn structured_content_text(value: &Value) -> Option<String> {
+    let content = value
+        .pointer("/content")
+        .or_else(|| value.pointer("/result/content"))?;
+
+    match content {
+        Value::String(value) => Some(value.clone()).filter(|value| !value.trim().is_empty()),
+        Value::Array(items) => {
+            let text = items
+                .iter()
+                .filter_map(content_item_text)
+                .collect::<Vec<_>>()
+                .join("\n");
+            (!text.trim().is_empty()).then_some(text)
+        }
+        Value::Object(_) => content_item_text(content),
+        _ => None,
+    }
+}
+
+fn content_item_text(value: &Value) -> Option<String> {
+    match value {
+        Value::String(value) => Some(value.clone()),
+        Value::Object(_) => extract_first_string(value, &["/text", "/content", "/value"]),
+        _ => None,
+    }
+    .filter(|value| !value.trim().is_empty())
 }
 
 fn make_relative_path(path: &str, worktree_path: &Path) -> String {
@@ -913,6 +968,93 @@ mod tests {
             .and_then(|result| result.output.clone())
             .expect("tool output should be set");
         assert_eq!(output, "hel");
+    }
+
+    #[test]
+    fn tool_execution_end_uses_is_error_flag() {
+        let (mut state, msg_store) = new_state();
+        let worktree_path = Path::new("/tmp");
+
+        state.handle_pi_event(
+            "tool_execution_end",
+            &json!({
+                "id": "tool-1",
+                "tool_name": "bash",
+                "isError": true,
+                "result": {
+                    "content": [{ "type": "text", "text": "command failed" }],
+                    "details": { "exitCode": 2 }
+                }
+            }),
+            worktree_path,
+        );
+
+        let entries = collect_entries(&msg_store);
+        let tool_entry = entries
+            .iter()
+            .find(|entry| matches!(entry.entry_type, NormalizedEntryType::ToolUse { .. }))
+            .expect("tool entry should exist");
+
+        let NormalizedEntryType::ToolUse {
+            action_type,
+            status,
+            ..
+        } = &tool_entry.entry_type
+        else {
+            unreachable!();
+        };
+
+        assert!(matches!(status, ToolStatus::Failed));
+        let ActionType::CommandRun { result, .. } = action_type else {
+            panic!("expected command run action");
+        };
+        let result = result.as_ref().expect("command result should be set");
+        assert_eq!(result.output.as_deref(), Some("command failed"));
+        assert!(matches!(
+            result.exit_status,
+            Some(CommandExitStatus::ExitCode { code: 2 })
+        ));
+    }
+
+    #[test]
+    fn generic_tool_result_prefers_structured_content_text() {
+        let (mut state, msg_store) = new_state();
+        let worktree_path = Path::new("/tmp");
+
+        state.handle_pi_event(
+            "tool_execution_end",
+            &json!({
+                "id": "tool-1",
+                "tool_name": "fetch",
+                "result": {
+                    "content": [
+                        { "type": "text", "text": "first line" },
+                        { "type": "text", "text": "second line" }
+                    ],
+                    "details": { "url": "https://example.com" }
+                }
+            }),
+            worktree_path,
+        );
+
+        let entries = collect_entries(&msg_store);
+        let tool_entry = entries
+            .iter()
+            .find(|entry| matches!(entry.entry_type, NormalizedEntryType::ToolUse { .. }))
+            .expect("tool entry should exist");
+
+        let NormalizedEntryType::ToolUse { action_type, .. } = &tool_entry.entry_type else {
+            unreachable!();
+        };
+        let ActionType::Tool { result, .. } = action_type else {
+            panic!("expected generic tool action");
+        };
+        let result = result.as_ref().expect("tool result should be set");
+        assert!(matches!(
+            result.r#type,
+            crate::logs::ToolResultValueType::Markdown
+        ));
+        assert_eq!(result.value.as_str(), Some("first line\nsecond line"));
     }
 
     #[test]
