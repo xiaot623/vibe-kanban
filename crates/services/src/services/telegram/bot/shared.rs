@@ -539,7 +539,6 @@ fn parse_executor(raw: &str) -> Result<BaseCodingAgent, String> {
         "GEMINI" => Some(BaseCodingAgent::Gemini),
         "CODEX" => Some(BaseCodingAgent::Codex),
         "OPENCODE" => Some(BaseCodingAgent::Opencode),
-        "DROID" => Some(BaseCodingAgent::Droid),
         "PI" => Some(BaseCodingAgent::Pi),
         _ => None,
     };

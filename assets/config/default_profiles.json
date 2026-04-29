@@ -75,13 +75,6 @@
         }
       }
     },
-    "DROID": {
-      "DEFAULT": {
-        "DROID": {
-          "autonomy": "skip-permissions-unsafe"
-        }
-      }
-    },
     "PI": {
       "DEFAULT": {
         "PI": {

@@ -1375,17 +1375,6 @@ mod tests {
     }
 
     #[test]
-    fn droid_skills_dir_resolution_is_rejected() {
-        let home_dir = PathBuf::from("/tmp/example-home");
-        let err = resolve_agent_skills_dir(BaseCodingAgent::Droid, &home_dir)
-            .expect_err("droid should not be supported");
-        assert!(
-            err.to_string()
-                .contains("is not supported for Skills manager")
-        );
-    }
-
-    #[test]
     fn discover_skills_only_includes_directories_with_skill_md() {
         let temp = TestTempDir::new("discover-skills");
         write_skill(&temp.path().join("valid-skill"), "Valid", "Valid skill");

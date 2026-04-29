@@ -19,21 +19,16 @@ use crate::{
     approvals::ExecutorApprovalService,
     command::{CommandBuildError, CommandParts},
     env::ExecutionEnv,
-    executors::{
-        claude::ClaudeCode, codex::Codex, droid::Droid, gemini::Gemini, opencode::Opencode, pi::Pi,
-    },
+    executors::{claude::ClaudeCode, codex::Codex, gemini::Gemini, opencode::Opencode, pi::Pi},
     mcp_config::McpConfig,
 };
 
 pub mod acp;
 pub mod claude;
 pub mod codex;
-pub mod droid;
 pub mod gemini;
 pub mod opencode;
 pub mod pi;
-#[cfg(feature = "qa-mode")]
-pub mod qa_mock;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, TS)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
@@ -92,7 +87,6 @@ pub enum CodingAgent {
     Gemini,
     Codex,
     Opencode,
-    Droid,
     Pi,
     #[cfg(feature = "qa-mode")]
     QaMock(QaMockExecutor),
@@ -118,14 +112,6 @@ impl CodingAgent {
                 self.preconfigured_mcp(mcp_port),
                 false,
             ),
-            Self::Droid(_) => McpConfig::new(
-                vec!["mcpServers".to_string()],
-                serde_json::json!({
-                    "mcpServers": {}
-                }),
-                self.preconfigured_mcp(mcp_port),
-                false,
-            ),
             _ => McpConfig::new(
                 vec!["mcpServers".to_string()],
                 serde_json::json!({
@@ -143,11 +129,7 @@ impl CodingAgent {
 
     pub fn capabilities(&self) -> Vec<BaseAgentCapability> {
         match self {
-            Self::ClaudeCode(_)
-            | Self::Gemini(_)
-            | Self::Droid(_)
-            | Self::Opencode(_)
-            | Self::Pi(_) => {
+            Self::ClaudeCode(_) | Self::Gemini(_) | Self::Opencode(_) | Self::Pi(_) => {
                 vec![BaseAgentCapability::SessionFork]
             }
             Self::Codex(_) => vec![
