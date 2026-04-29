@@ -1,0 +1,192 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1400 980" width="1400" height="980">
+  <style>
+    text { font-family: Arial, Helvetica, sans-serif; }
+    .title { fill: #111827; font-size: 28px; font-weight: 700; }
+    .subtitle { fill: #6b7280; font-size: 14px; }
+    .layer-title { fill: #111827; font-size: 18px; font-weight: 700; }
+    .layer-subtitle { fill: #6b7280; font-size: 12px; }
+    .node-title { fill: #111827; font-size: 15px; font-weight: 700; }
+    .node-text { fill: #374151; font-size: 13px; }
+    .small { fill: #6b7280; font-size: 12px; }
+    .tiny { fill: #6b7280; font-size: 11px; }
+  </style>
+  <defs>
+    <filter id="soft-shadow" x="-10%" y="-10%" width="120%" height="130%">
+      <feDropShadow dx="0" dy="3" stdDeviation="3" flood-color="#111827" flood-opacity="0.10"/>
+    </filter>
+    <marker id="arrow-blue" markerWidth="8" markerHeight="6" refX="7.5" refY="3" orient="auto" markerUnits="strokeWidth">
+      <polygon points="0 0, 8 3, 0 6" fill="#2563eb"/>
+    </marker>
+    <marker id="arrow-orange" markerWidth="8" markerHeight="6" refX="7.5" refY="3" orient="auto" markerUnits="strokeWidth">
+      <polygon points="0 0, 8 3, 0 6" fill="#ea580c"/>
+    </marker>
+    <marker id="arrow-green" markerWidth="8" markerHeight="6" refX="7.5" refY="3" orient="auto" markerUnits="strokeWidth">
+      <polygon points="0 0, 8 3, 0 6" fill="#059669"/>
+    </marker>
+    <marker id="arrow-gray" markerWidth="8" markerHeight="6" refX="7.5" refY="3" orient="auto" markerUnits="strokeWidth">
+      <polygon points="0 0, 8 3, 0 6" fill="#6b7280"/>
+    </marker>
+    <marker id="arrow-purple" markerWidth="8" markerHeight="6" refX="7.5" refY="3" orient="auto" markerUnits="strokeWidth">
+      <polygon points="0 0, 8 3, 0 6" fill="#7c3aed"/>
+    </marker>
+  </defs>
+  <rect width="1400" height="980" fill="#ffffff"/>
+
+  <text x="60" y="48" class="title">Vibe Kanban Multi-Agent Coordination Architecture</text>
+  <text x="60" y="74" class="subtitle">A local-first system for turning work intent into isolated, observable, reviewable agentic software delivery.</text>
+
+  <rect x="60" y="104" width="970" height="122" rx="12" fill="#eff6ff" stroke="#bfdbfe" stroke-width="1.5"/>
+  <text x="78" y="134" text-anchor="start" class="layer-title">Presentation Layer</text>
+  <text x="78" y="158" text-anchor="start" class="layer-subtitle">Entry points for intent, feedback, observation, and delivery decisions.</text>
+  <rect x="60" y="254" width="970" height="166" rx="12" fill="#fff7ed" stroke="#fed7aa" stroke-width="1.5"/>
+  <text x="78" y="284" text-anchor="start" class="layer-title">Orchestration Layer</text>
+  <text x="78" y="308" text-anchor="start" class="layer-subtitle">Routes task attempts onto concrete executor runtimes while preserving isolation and observability.</text>
+  <rect x="60" y="448" width="970" height="260" rx="12" fill="#f0fdfa" stroke="#99f6e4" stroke-width="1.5"/>
+  <text x="78" y="478" text-anchor="start" class="layer-title">Domain Layer</text>
+  <text x="78" y="502" text-anchor="start" class="layer-subtitle">A semantic model for agentic software delivery.</text>
+  <rect x="60" y="740" width="970" height="116" rx="12" fill="#f9fafb" stroke="#d1d5db" stroke-width="1.5"/>
+  <text x="78" y="770" text-anchor="start" class="layer-title">Persistence Layer</text>
+  <text x="78" y="794" text-anchor="start" class="layer-subtitle">Local source of truth for state, code isolation, execution history, and artifacts.</text>
+
+  <rect x="94" y="174" width="142" height="38" rx="9" fill="#ffffff" stroke="#bfdbfe" stroke-width="1.5"/>
+  <text x="165.0" y="198" text-anchor="middle" class="node-text">Human Workspace</text>
+  <rect x="254" y="174" width="142" height="38" rx="9" fill="#ffffff" stroke="#bfdbfe" stroke-width="1.5"/>
+  <text x="325.0" y="198" text-anchor="middle" class="node-text">Agent Workspace</text>
+  <rect x="414" y="174" width="126" height="38" rx="9" fill="#ffffff" stroke="#bfdbfe" stroke-width="1.5"/>
+  <text x="477.0" y="198" text-anchor="middle" class="node-text">Chat Surface</text>
+  <rect x="558" y="174" width="112" height="38" rx="9" fill="#ffffff" stroke="#bfdbfe" stroke-width="1.5"/>
+  <text x="614.0" y="198" text-anchor="middle" class="node-text">CLI Entry</text>
+  <rect x="688" y="174" width="116" height="38" rx="9" fill="#ffffff" stroke="#bfdbfe" stroke-width="1.5"/>
+  <text x="746.0" y="198" text-anchor="middle" class="node-text">MCP Entry</text>
+  <rect x="822" y="174" width="166" height="38" rx="9" fill="#ffffff" stroke="#bfdbfe" stroke-width="1.5"/>
+  <text x="905.0" y="198" text-anchor="middle" class="node-text">Desktop / Mobile</text>
+
+  <rect x="92" y="328" width="220" height="76" rx="9" fill="#ffffff" stroke="#fed7aa" stroke-width="1.5"/>
+  <text x="112" y="352" text-anchor="start" class="node-title">Task Attempt Context</text>
+  <text x="112" y="374" text-anchor="start" class="small">task, workspace, session</text>
+  <text x="112" y="391" text-anchor="start" class="small">repo set, branch, run reason</text>
+  <rect x="372" y="320" width="258" height="82" rx="14" fill="#ffffff" stroke="#fb923c" stroke-width="1.5" filter="url(#soft-shadow)"/>
+  <rect x="382" y="331" width="238" height="56" rx="10" fill="#ffffff" stroke="#fed7aa" stroke-width="1.5"/>
+  <text x="501" y="354" text-anchor="middle" class="node-title">Executor Router</text>
+  <text x="501" y="375" text-anchor="middle" class="small">profile, variant, working directory</text>
+  <rect x="704" y="318" width="286" height="90" rx="9" fill="#ffffff" stroke="#fed7aa" stroke-width="1.5"/>
+  <text x="724" y="342" text-anchor="start" class="node-title">Executor Runtime Targets</text>
+  <rect x="724" y="354" width="76" height="22" rx="6" fill="#fff7ed" stroke="#fed7aa" stroke-width="1"/>
+  <text x="762" y="369" text-anchor="middle" class="tiny">Claude Code</text>
+  <rect x="812" y="354" width="76" height="22" rx="6" fill="#fff7ed" stroke="#fed7aa" stroke-width="1"/>
+  <text x="850" y="369" text-anchor="middle" class="tiny">Codex</text>
+  <rect x="900" y="354" width="70" height="22" rx="6" fill="#fff7ed" stroke="#fed7aa" stroke-width="1"/>
+  <text x="935" y="369" text-anchor="middle" class="tiny">Gemini</text>
+  <rect x="724" y="382" width="76" height="22" rx="6" fill="#fff7ed" stroke="#fed7aa" stroke-width="1"/>
+  <text x="762" y="397" text-anchor="middle" class="tiny">OpenCode</text>
+  <rect x="812" y="382" width="76" height="22" rx="6" fill="#fff7ed" stroke="#fed7aa" stroke-width="1"/>
+  <text x="850" y="397" text-anchor="middle" class="tiny">Droid</text>
+  <rect x="900" y="382" width="70" height="22" rx="6" fill="#fff7ed" stroke="#fed7aa" stroke-width="1"/>
+  <text x="935" y="397" text-anchor="middle" class="tiny">Pi</text>
+  <path d="M 312 366 L 372 366" stroke="#ea580c" stroke-width="2" fill="none" marker-end="url(#arrow-orange)"/>
+  <rect x="328" y="345" width="38" height="18" rx="4" fill="#ffffff" stroke="#ffffff" stroke-width="1.5"/>
+  <text x="347" y="358" text-anchor="middle" class="tiny">route</text>
+  <path d="M 630 366 L 704 366" stroke="#ea580c" stroke-width="2" fill="none" marker-end="url(#arrow-orange)"/>
+  <rect x="648" y="345" width="46" height="18" rx="4" fill="#ffffff" stroke="#ffffff" stroke-width="1.5"/>
+  <text x="671" y="358" text-anchor="middle" class="tiny">spawn</text>
+
+  <rect x="92" y="522" width="260" height="132" rx="10" fill="#ffffff" stroke="#99f6e4" stroke-width="1.5"/>
+  <text x="110" y="550" text-anchor="start" class="node-title">Work Intent</text>
+  <text x="110" y="572" text-anchor="start" class="small">Delivery objects and context</text>
+  <text x="110" y="594" text-anchor="start" class="node-text">Project, Repository</text>
+  <text x="110" y="611" text-anchor="start" class="node-text">Task, Subtask</text>
+  <text x="110" y="628" text-anchor="start" class="node-text">Attempt, Workspace</text>
+  <text x="110" y="645" text-anchor="start" class="node-text">Session, Review</text>
+  <rect x="386" y="522" width="278" height="132" rx="10" fill="#ffffff" stroke="#99f6e4" stroke-width="1.5"/>
+  <text x="404" y="550" text-anchor="start" class="node-title">Execution Story</text>
+  <text x="404" y="572" text-anchor="start" class="small">Traces become semantic records</text>
+  <text x="404" y="594" text-anchor="start" class="node-text">Raw Execution Trace</text>
+  <text x="404" y="611" text-anchor="start" class="node-text">Semantic Agent Event</text>
+  <text x="404" y="628" text-anchor="start" class="node-text">Activity Timeline</text>
+  <text x="404" y="645" text-anchor="start" class="node-text">Reviewable Work Record</text>
+  <rect x="698" y="522" width="292" height="132" rx="10" fill="#ffffff" stroke="#99f6e4" stroke-width="1.5"/>
+  <text x="716" y="550" text-anchor="start" class="node-title">Collaboration Projection</text>
+  <text x="716" y="572" text-anchor="start" class="small">Execution meaning leaves the app</text>
+  <text x="716" y="594" text-anchor="start" class="node-text">Digest, Notification Thread</text>
+  <text x="716" y="611" text-anchor="start" class="node-text">Knowledge Archive</text>
+  <text x="716" y="628" text-anchor="start" class="node-text">External Review Context</text>
+  <text x="716" y="645" text-anchor="start" class="node-text">Feedback Channel</text>
+  <path d="M 352 583 L 386 583" stroke="#2563eb" stroke-width="2" fill="none" marker-end="url(#arrow-blue)"/>
+  <rect x="356" y="562" width="28" height="18" rx="4" fill="#ffffff" stroke="#ffffff" stroke-width="1.5"/>
+  <text x="370" y="575" text-anchor="middle" class="tiny">run</text>
+  <path d="M 664 583 L 698 583" stroke="#2563eb" stroke-width="2" fill="none" marker-end="url(#arrow-blue)"/>
+  <rect x="669" y="562" width="30" height="18" rx="4" fill="#ffffff" stroke="#ffffff" stroke-width="1.5"/>
+  <text x="684" y="575" text-anchor="middle" class="tiny">share</text>
+  <path d="M 844 666 C 844 692 220 692 220 666" stroke="#7c3aed" stroke-width="2" fill="none" marker-end="url(#arrow-purple)"/>
+  <rect x="448" y="675" width="158" height="20" rx="5" fill="#ffffff" stroke="#ffffff" stroke-width="1.5"/>
+  <text x="527" y="689" text-anchor="middle" class="tiny">feedback and follow-up</text>
+
+  <rect x="92" y="808" width="174" height="36" rx="9" fill="#ffffff" stroke="#d1d5db" stroke-width="1.5"/>
+  <text x="179.0" y="831" text-anchor="middle" class="node-text">Structured State</text>
+  <rect x="292" y="808" width="154" height="36" rx="9" fill="#ffffff" stroke="#d1d5db" stroke-width="1.5"/>
+  <text x="369.0" y="831" text-anchor="middle" class="node-text">Code State</text>
+  <rect x="472" y="808" width="188" height="36" rx="9" fill="#ffffff" stroke="#d1d5db" stroke-width="1.5"/>
+  <text x="566.0" y="831" text-anchor="middle" class="node-text">Execution History</text>
+  <rect x="686" y="808" width="122" height="36" rx="9" fill="#ffffff" stroke="#d1d5db" stroke-width="1.5"/>
+  <text x="747.0" y="831" text-anchor="middle" class="node-text">Config</text>
+  <rect x="834" y="808" width="136" height="36" rx="9" fill="#ffffff" stroke="#d1d5db" stroke-width="1.5"/>
+  <text x="902.0" y="831" text-anchor="middle" class="node-text">Artifacts</text>
+
+  <path d="M 545 226 L 545 254" stroke="#2563eb" stroke-width="2" fill="none" marker-end="url(#arrow-blue)"/>
+  <rect x="444" y="231" width="202" height="19" rx="4" fill="#ffffff" stroke="#ffffff" stroke-width="1.5"/>
+  <text x="545" y="245" text-anchor="middle" class="tiny">intent, feedback, decision</text>
+  <path d="M 545 420 L 545 448" stroke="#ea580c" stroke-width="2" fill="none" marker-end="url(#arrow-orange)"/>
+  <rect x="477" y="425" width="136" height="19" rx="4" fill="#ffffff" stroke="#ffffff" stroke-width="1.5"/>
+  <text x="545" y="439" text-anchor="middle" class="tiny">materialize work</text>
+  <path d="M 545 708 L 545 740" stroke="#059669" stroke-width="2" fill="none" marker-end="url(#arrow-green)"/>
+  <rect x="453" y="716" width="184" height="19" rx="4" fill="#ffffff" stroke="#ffffff" stroke-width="1.5"/>
+  <text x="545" y="730" text-anchor="middle" class="tiny">persist facts, isolate code</text>
+
+  <path d="M 992 584 C 1046 560 1046 414 992 382" stroke="#6b7280" stroke-width="1.8" stroke-dasharray="5,4" fill="none" marker-end="url(#arrow-gray)"/>
+  <rect x="944" y="492" width="94" height="19" rx="4" fill="#ffffff" stroke="#ffffff" stroke-width="1.5"/>
+  <text x="991" y="506" text-anchor="middle" class="tiny">state stream</text>
+  <path d="M 990 522 L 1048 522 L 1048 212 L 990 212" stroke="#6b7280" stroke-width="1.8" stroke-dasharray="5,4" fill="none" marker-end="url(#arrow-gray)"/>
+  <rect x="884" y="414" width="98" height="19" rx="4" fill="#ffffff" stroke="#ffffff" stroke-width="1.5"/>
+  <text x="933" y="428" text-anchor="middle" class="tiny">live timeline</text>
+
+  <rect x="1070" y="104" width="270" height="726" rx="14" fill="#faf5ff" stroke="#ddd6fe" stroke-width="1.5"/>
+  <text x="1205" y="134" text-anchor="middle" class="layer-title">Delivery Feedback Loop</text>
+  <text x="1205" y="156" text-anchor="middle" class="layer-subtitle">Agent work remains bounded by review.</text>
+  <rect x="1110" y="195" width="190" height="42" rx="9" fill="#ffffff" stroke="#ddd6fe" stroke-width="1.5"/>
+  <text x="1205" y="221" text-anchor="middle" class="node-text">Plan</text>
+  <rect x="1110" y="275" width="190" height="42" rx="9" fill="#ffffff" stroke="#ddd6fe" stroke-width="1.5"/>
+  <text x="1205" y="301" text-anchor="middle" class="node-text">Create Task</text>
+  <rect x="1110" y="355" width="190" height="42" rx="9" fill="#ffffff" stroke="#ddd6fe" stroke-width="1.5"/>
+  <text x="1205" y="381" text-anchor="middle" class="node-text">Isolate Workspace</text>
+  <rect x="1110" y="435" width="190" height="42" rx="9" fill="#ffffff" stroke="#ddd6fe" stroke-width="1.5"/>
+  <text x="1205" y="461" text-anchor="middle" class="node-text">Run Agent</text>
+  <rect x="1110" y="515" width="190" height="42" rx="9" fill="#ffffff" stroke="#ddd6fe" stroke-width="1.5"/>
+  <text x="1205" y="541" text-anchor="middle" class="node-text">Observe Trace</text>
+  <rect x="1110" y="595" width="190" height="42" rx="9" fill="#ffffff" stroke="#ddd6fe" stroke-width="1.5"/>
+  <text x="1205" y="621" text-anchor="middle" class="node-text">Review Output</text>
+  <rect x="1110" y="675" width="190" height="42" rx="9" fill="#ffffff" stroke="#ddd6fe" stroke-width="1.5"/>
+  <text x="1205" y="701" text-anchor="middle" class="node-text">Follow-up / Retry / Merge</text>
+  <path d="M 1205 237 L 1205 275" stroke="#7c3aed" stroke-width="2" fill="none" marker-end="url(#arrow-purple)"/>
+  <path d="M 1205 317 L 1205 355" stroke="#7c3aed" stroke-width="2" fill="none" marker-end="url(#arrow-purple)"/>
+  <path d="M 1205 397 L 1205 435" stroke="#7c3aed" stroke-width="2" fill="none" marker-end="url(#arrow-purple)"/>
+  <path d="M 1205 477 L 1205 515" stroke="#7c3aed" stroke-width="2" fill="none" marker-end="url(#arrow-purple)"/>
+  <path d="M 1205 557 L 1205 595" stroke="#7c3aed" stroke-width="2" fill="none" marker-end="url(#arrow-purple)"/>
+  <path d="M 1205 637 L 1205 675" stroke="#7c3aed" stroke-width="2" fill="none" marker-end="url(#arrow-purple)"/>
+  <path d="M 1110 696 C 1052 696 1052 216 1110 216" stroke="#7c3aed" stroke-width="1.8" stroke-dasharray="5,4" fill="none" marker-end="url(#arrow-purple)"/>
+  <rect x="1032" y="448" width="70" height="19" rx="4" fill="#ffffff" stroke="#ffffff" stroke-width="1.5"/>
+  <text x="1067" y="462" text-anchor="middle" class="tiny">iterate</text>
+  <path d="M 1030 366 L 1070 366" stroke="#ea580c" stroke-width="2" fill="none" marker-end="url(#arrow-orange)"/>
+  <path d="M 1030 583 L 1070 583" stroke="#6b7280" stroke-width="1.8" stroke-dasharray="5,4" fill="none" marker-end="url(#arrow-gray)"/>
+
+  <rect x="60" y="892" width="760" height="48" rx="9" fill="#ffffff" stroke="#e5e7eb" stroke-width="1.5"/>
+  <line x1="80" y1="912" x2="118" y2="912" stroke="#2563eb" stroke-width="2" marker-end="url(#arrow-blue)"/>
+  <text x="130" y="916" text-anchor="start" class="tiny">primary work flow</text>
+  <line x1="278" y1="912" x2="316" y2="912" stroke="#ea580c" stroke-width="2" marker-end="url(#arrow-orange)"/>
+  <text x="328" y="916" text-anchor="start" class="tiny">control and scheduling</text>
+  <line x1="520" y1="912" x2="558" y2="912" stroke="#6b7280" stroke-width="1.8" stroke-dasharray="5,4" marker-end="url(#arrow-gray)"/>
+  <text x="570" y="916" text-anchor="start" class="tiny">async event stream</text>
+  <line x1="80" y1="930" x2="118" y2="930" stroke="#059669" stroke-width="2" marker-end="url(#arrow-green)"/>
+  <text x="130" y="934" text-anchor="start" class="tiny">local facts</text>
+  <path d="M 278 930 C 290 922 304 938 316 930" stroke="#7c3aed" stroke-width="2" fill="none" marker-end="url(#arrow-purple)"/>
+  <text x="328" y="934" text-anchor="start" class="tiny">feedback loop</text>
+</svg>

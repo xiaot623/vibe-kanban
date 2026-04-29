@@ -34,17 +34,9 @@ The product surface is multi-surface rather than cloud-only: a React web UI, a T
 - **Session**: the persisted agent conversation attached to a workspace, used for follow-ups, resume, and review flows.
 - **Execution Process**: an individual runnable step inside a session, such as setup, coding-agent execution, cleanup, or a preview/dev server.
 
-## Business architecture
+## Architecture
 
-This view focuses on how work enters Vibe Kanban, how the product orchestrates local execution, and where review and PR workflows stay user-controlled. Editable source: [business-architecture.excalidraw](docs/images/architecture/business-architecture.excalidraw).
-
-![Business architecture diagram showing developer inputs, Vibe Kanban as the orchestration hub, supported coding agents, isolated git worktrees, review and preview loops, editor and PR flow, and optional MCP, Telegram, and mobile entry points](docs/images/architecture/business-architecture.svg)
-
-## System architecture
-
-This view maps the runtime boundaries between desktop (Tauri), mobile-over-LAN, Telegram, and CLI clients, the Axum server, service orchestration, executor layer, and persistence including execution-log archives. Editable source: [system-architecture.excalidraw](docs/images/architecture/system-architecture.excalidraw).
-
-![System architecture diagram showing desktop (Tauri), mobile over LAN, Telegram bot, and CLI clients; the Axum API/realtime layer; orchestration/services and executor/integration layers; and persistence including local repositories/worktrees plus execution log archives](docs/images/architecture/system-architecture.svg)
+![multi-agent coordination architecture](docs/images/multi-agent-coordination-architecture.svg)
 
 ## Development
 
