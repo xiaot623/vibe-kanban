@@ -55,7 +55,7 @@ export function AgentIcon({ agent, className = 'h-4 w-4' }: AgentIconProps) {
       iconPath = `/agents/droid${suffix}.svg`;
       break;
     case BaseCodingAgent.PI:
-      iconPath = `/agents/opencode${suffix}.svg`;
+      iconPath = `/agents/pi-mono${suffix}.svg`;
       break;
     default:
       return null;

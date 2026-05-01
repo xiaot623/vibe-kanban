@@ -25,8 +25,12 @@ pub fn fallback_command() -> &'static str {
 
 pub fn receipt_command_spec(agent_session_id: &str) -> ReceiptCommandSpec {
     let mut spec = package_command("@ccusage/codex", "ccusage-codex");
-    spec.primary.args.extend(["--id".to_string(), agent_session_id.to_string()]);
-    spec.fallback.args.extend(["--id".to_string(), agent_session_id.to_string()]);
+    spec.primary
+        .args
+        .extend(["--id".to_string(), agent_session_id.to_string()]);
+    spec.fallback
+        .args
+        .extend(["--id".to_string(), agent_session_id.to_string()]);
     spec
 }
 

@@ -1,0 +1,33 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="400" height="{{total_height}}" viewBox="0 0 400 {{total_height}}">
+  <defs>
+    <style>
+      .bg { fill: #fdfdfd; }
+      .text { fill: #222222; font-family: "Courier New", Courier, monospace; font-size: 14px; }
+      .muted { fill: #666666; font-family: "Courier New", Courier, monospace; font-size: 13px; }
+      .bold { font-weight: bold; font-size: 15px; }
+      .line { stroke: #222222; stroke-width: 1.5; }
+      .dashed { stroke: #222222; stroke-width: 1; stroke-dasharray: 4 4; }
+    </style>
+  </defs>
+  <rect width="100%" height="100%" class="bg" />
+  <path d="M 0 0 L 8 8 L 16 0 L 24 8 L 32 0 L 40 8 L 48 0 L 56 8 L 64 0 L 72 8 L 80 0 L 88 8 L 96 0 L 104 8 L 112 0 L 120 8 L 128 0 L 136 8 L 144 0 L 152 8 L 160 0 L 168 8 L 176 0 L 184 8 L 192 0 L 200 8 L 208 0 L 216 8 L 224 0 L 232 8 L 240 0 L 248 8 L 256 0 L 264 8 L 272 0 L 280 8 L 288 0 L 296 8 L 304 0 L 312 8 L 320 0 L 328 8 L 336 0 L 344 8 L 352 0 L 360 8 L 368 0 L 376 8 L 384 0 L 392 8 L 400 0 L 400 -10 L 0 -10 Z" fill="#333333" />
+  <path d="M 0 {{total_height}} L 8 {{total_height_minus_8}} L 16 {{total_height}} L 24 {{total_height_minus_8}} L 32 {{total_height}} L 40 {{total_height_minus_8}} L 48 {{total_height}} L 56 {{total_height_minus_8}} L 64 {{total_height}} L 72 {{total_height_minus_8}} L 80 {{total_height}} L 88 {{total_height_minus_8}} L 96 {{total_height}} L 104 {{total_height_minus_8}} L 112 {{total_height}} L 120 {{total_height_minus_8}} L 128 {{total_height}} L 136 {{total_height_minus_8}} L 144 {{total_height}} L 152 {{total_height_minus_8}} L 160 {{total_height}} L 168 {{total_height_minus_8}} L 176 {{total_height}} L 184 {{total_height_minus_8}} L 192 {{total_height}} L 200 {{total_height_minus_8}} L 208 {{total_height}} L 216 {{total_height_minus_8}} L 224 {{total_height}} L 232 {{total_height_minus_8}} L 240 {{total_height}} L 248 {{total_height_minus_8}} L 256 {{total_height}} L 264 {{total_height_minus_8}} L 272 {{total_height}} L 280 {{total_height_minus_8}} L 288 {{total_height}} L 296 {{total_height_minus_8}} L 304 {{total_height}} L 312 {{total_height_minus_8}} L 320 {{total_height}} L 328 {{total_height_minus_8}} L 336 {{total_height}} L 344 {{total_height_minus_8}} L 352 {{total_height}} L 360 {{total_height_minus_8}} L 368 {{total_height}} L 376 {{total_height_minus_8}} L 384 {{total_height}} L 392 {{total_height_minus_8}} L 400 {{total_height}} L 400 {{total_height_plus_10}} L 0 {{total_height_plus_10}} Z" fill="#333333" />
+  <g transform="translate(168, 30)">{{icon_svg}}</g>
+  <g transform="translate(20, 130)">
+    <text x="0" y="0" class="text">Task</text><text x="360" y="0" class="text" text-anchor="end">{{task_title_short}}</text>
+    <text x="0" y="28" class="text">Session</text><text x="360" y="28" class="text" text-anchor="end">{{session_id_short}}</text>
+    <text x="0" y="56" class="text">Date</text><text x="360" y="56" class="text" text-anchor="end">{{done_at}}</text>
+  </g>
+  <line x1="20" y1="215" x2="380" y2="215" class="line" />
+  {{detail_rows}}
+  {{model_rows}}
+  <line x1="20" y1="{{footer_y_minus_30}}" x2="380" y2="{{footer_y_minus_30}}" class="dashed" />
+  <g transform="translate(200, {{footer_y}})">
+    <text x="0" y="0" class="text" text-anchor="middle">CASHIER: {{executor_name}}</text>
+    <text x="0" y="24" class="text" text-anchor="middle">Thank you for building!</text>
+  </g>
+  <line x1="20" y1="{{credits_y_minus_30}}" x2="380" y2="{{credits_y_minus_30}}" class="dashed" />
+  <g transform="translate(200, {{credits_y}})">
+    <text x="0" y="0" class="muted" text-anchor="middle">Powered by Vibe Kanban distribution</text>
+  </g>
+</svg>
