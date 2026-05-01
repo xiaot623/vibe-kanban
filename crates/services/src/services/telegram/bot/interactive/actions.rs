@@ -882,39 +882,37 @@ pub(super) async fn handle_done_task(
     chat_id: ChatId,
     service: &TelegramBotService,
     flow_token: &str,
-    card_context: Option<CardRenderContext>,
+    _card_context: Option<CardRenderContext>,
 ) -> ResponseResult<()> {
     if parse_legacy_task_token(flow_token).is_some() {
-        super::ui::render_or_send_card(
+        send_done_task_result(
             bot,
             chat_id,
-            card_context,
             "This older card is not flow-aware anymore; use a newer summary/run card.",
-            Some(super::ui::empty_inline_keyboard()),
         )
         .await?;
         return Ok(());
     }
 
-    let Some(flow_ctx) =
-        resolve_flow_context_or_render_unavailable(bot, chat_id, service, flow_token, card_context)
-            .await?
-    else {
+    let flow_ctx = flow::resolve_flow_context(&service.db.pool, flow_token)
+        .await
+        .map_err(to_request_error)?;
+    let Some(flow_ctx) = flow_ctx else {
+        send_done_task_result(bot, chat_id, unavailable_flow_message()).await?;
         return Ok(());
     };
 
-    let Some(task) = super::ui::load_task_or_render_error(
-        bot,
-        chat_id,
-        &service.db.pool,
-        flow_ctx.task_id,
-        card_context,
-        "Task not found. It may have been deleted.",
-        "Failed to load task",
-    )
-    .await?
-    else {
-        return Ok(());
+    let task = match Task::find_by_id(&service.db.pool, flow_ctx.task_id).await {
+        Ok(Some(task)) => task,
+        Ok(None) => {
+            send_done_task_result(bot, chat_id, "Task not found. It may have been deleted.")
+                .await?;
+            return Ok(());
+        }
+        Err(err) => {
+            send_done_task_result(bot, chat_id, format!("Failed to load task: {err}")).await?;
+            return Ok(());
+        }
     };
 
     let daily_project_id = {
@@ -922,26 +920,17 @@ pub(super) async fn handle_done_task(
         config.daily_mode.project_id.clone()
     };
     let Some(daily_project_id) = daily_project_id else {
-        super::ui::render_or_send_card(
-            bot,
-            chat_id,
-            card_context,
-            "Daily Mode is not configured.",
-            Some(super::ui::empty_inline_keyboard()),
-        )
-        .await?;
+        send_done_task_result(bot, chat_id, "Daily Mode is not configured.").await?;
         return Ok(());
     };
 
     let daily_project_id = match Uuid::parse_str(&daily_project_id) {
         Ok(id) => id,
         Err(e) => {
-            super::ui::render_or_send_card(
+            send_done_task_result(
                 bot,
                 chat_id,
-                card_context,
                 format!("Daily Mode project id is invalid. Please reconfigure it: {e}"),
-                Some(super::ui::empty_inline_keyboard()),
             )
             .await?;
             return Ok(());
@@ -949,12 +938,10 @@ pub(super) async fn handle_done_task(
     };
 
     if task.project_id != daily_project_id {
-        super::ui::render_or_send_card(
+        send_done_task_result(
             bot,
             chat_id,
-            card_context,
             "Done is only available for Daily Project tasks from this card.",
-            Some(super::ui::empty_inline_keyboard()),
         )
         .await?;
         return Ok(());
@@ -965,24 +952,20 @@ pub(super) async fn handle_done_task(
         .await
     {
         Ok(true) => {
-            super::ui::render_or_send_card(
+            send_done_task_result(
                 bot,
                 chat_id,
-                card_context,
                 "Cannot mark Done while another executor flow for this task is still running.",
-                Some(super::ui::empty_inline_keyboard()),
             )
             .await?;
             return Ok(());
         }
         Ok(false) => {}
         Err(err) => {
-            super::ui::render_or_send_card(
+            send_done_task_result(
                 bot,
                 chat_id,
-                card_context,
                 format!("Failed to validate concurrent flows: {err}"),
-                Some(super::ui::empty_inline_keyboard()),
             )
             .await?;
             return Ok(());
@@ -1002,11 +985,24 @@ pub(super) async fn handle_done_task(
         }
     };
 
-    super::ui::render_or_send_card(
+    send_done_task_result(
         bot,
         chat_id,
-        card_context,
         format_done_task_status_message(&task.title, status_updated, &status_errors),
+    )
+    .await?;
+    Ok(())
+}
+
+async fn send_done_task_result(
+    bot: &Bot,
+    chat_id: ChatId,
+    text: impl Into<String>,
+) -> ResponseResult<()> {
+    format::send_rich_then_plain(
+        bot,
+        chat_id,
+        &text.into(),
         Some(super::ui::empty_inline_keyboard()),
     )
     .await?;
