@@ -27,7 +27,7 @@ use db::{
     },
 };
 use executors::logs::{
-    NormalizedEntry, NormalizedEntryType, TokenUsageInfo, ToolStatus,
+    ActionType, NormalizedEntry, NormalizedEntryType, TokenUsageInfo, ToolStatus,
     utils::patch::extract_normalized_entry_from_patch,
 };
 use teloxide::{prelude::*, types::MessageId};
@@ -535,6 +535,20 @@ struct EntryUpdate {
     current: NormalizedEntry,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StableTextKind {
+    Assistant,
+    Thinking,
+}
+
+#[derive(Debug, Default)]
+struct ToolTurnAggregation {
+    current_user_turn_entry_index: Option<usize>,
+    telegram_message_id: Option<MessageId>,
+    appended_terminal_tool_indexes: HashSet<usize>,
+    rendered_rows: Vec<String>,
+}
+
 #[derive(Default)]
 struct RunFeedAccumulator {
     entries_by_index: BTreeMap<usize, NormalizedEntry>,
@@ -549,9 +563,10 @@ struct RunFeedAccumulator {
     execution_process_id: Option<Uuid>,
     flow_context: Option<flow::TelegramFlowContext>,
     sent_pending_approvals: HashSet<String>,
-    sent_terminal_tool_updates: HashSet<(usize, &'static str)>,
-    active_assistant_entry_index: Option<usize>,
-    active_assistant_message_id: Option<MessageId>,
+    active_stable_text_entry_index: Option<usize>,
+    active_stable_text_message_id: Option<MessageId>,
+    active_stable_text_kind: Option<StableTextKind>,
+    tool_turn: ToolTurnAggregation,
 }
 
 impl RunFeedAccumulator {
@@ -663,56 +678,128 @@ impl RunFeedAccumulator {
         self.current_seq = 0;
         self.last_summary_seq = 0;
         self.sent_pending_approvals.clear();
-        self.sent_terminal_tool_updates.clear();
-        self.clear_active_assistant();
+        self.clear_active_stable_text();
+        self.tool_turn = ToolTurnAggregation::default();
     }
 
-    fn clear_active_assistant(&mut self) {
-        self.active_assistant_entry_index = None;
-        self.active_assistant_message_id = None;
+    fn clear_active_stable_text(&mut self) {
+        self.active_stable_text_entry_index = None;
+        self.active_stable_text_message_id = None;
+        self.active_stable_text_kind = None;
     }
 
-    fn active_assistant_message_id(&self) -> Option<MessageId> {
-        self.active_assistant_message_id
+    fn active_stable_text_message_id(&self) -> Option<MessageId> {
+        self.active_stable_text_message_id
     }
 
-    fn set_active_assistant_message_id(&mut self, message_id: MessageId) {
-        self.active_assistant_entry_index = None;
-        self.active_assistant_message_id = Some(message_id);
+    fn set_active_stable_text_message_id(&mut self, kind: StableTextKind, message_id: MessageId) {
+        self.active_stable_text_entry_index = None;
+        self.active_stable_text_kind = Some(kind);
+        self.active_stable_text_message_id = Some(message_id);
     }
 
-    fn track_active_assistant_entry(&mut self, entry_index: usize) {
-        self.active_assistant_entry_index = Some(entry_index);
+    fn track_active_stable_text_entry(&mut self, entry_index: usize, kind: StableTextKind) {
+        self.active_stable_text_entry_index = Some(entry_index);
+        self.active_stable_text_kind = Some(kind);
     }
 
-    fn take_active_assistant_message_id(&mut self) -> Option<MessageId> {
-        let message_id = self.active_assistant_message_id.take();
-        self.active_assistant_entry_index = None;
+    fn take_active_stable_text_message_id(&mut self) -> Option<MessageId> {
+        let message_id = self.active_stable_text_message_id.take();
+        self.active_stable_text_entry_index = None;
+        self.active_stable_text_kind = None;
+        message_id
+    }
+
+    fn flushable_active_stable_text(&self) -> Option<(StableTextKind, String)> {
+        let entry_index = self.active_stable_text_entry_index?;
+        let kind = self.active_stable_text_kind?;
+        let entry = self.entries_by_index.get(&entry_index)?;
+        if stable_text_kind_for_entry_type(&entry.entry_type) != Some(kind) {
+            return None;
+        }
+        Some((kind, entry.content.clone()))
+    }
+
+    fn note_user_turn(&mut self, entry_index: usize) {
+        self.tool_turn.current_user_turn_entry_index = Some(entry_index);
+        self.reset_tool_turn_aggregation();
+    }
+
+    fn reset_tool_turn_aggregation(&mut self) {
+        self.tool_turn.telegram_message_id = None;
+        self.tool_turn.appended_terminal_tool_indexes.clear();
+        self.tool_turn.rendered_rows.clear();
+    }
+
+    fn append_terminal_tool_row(&mut self, entry_index: usize, row: String) -> bool {
+        if !self
+            .tool_turn
+            .appended_terminal_tool_indexes
+            .insert(entry_index)
+        {
+            return false;
+        }
+        self.tool_turn.rendered_rows.push(row);
+        true
+    }
+
+    fn take_tool_turn_message_id(&mut self) -> Option<MessageId> {
+        let message_id = self.tool_turn.telegram_message_id.take();
+        self.tool_turn.appended_terminal_tool_indexes.clear();
+        self.tool_turn.rendered_rows.clear();
         message_id
     }
 }
 
 fn classify_entry_behavior(entry: &NormalizedEntry) -> EntryDeliveryBehavior {
     match &entry.entry_type {
-        NormalizedEntryType::Thinking | NormalizedEntryType::Loading => {
-            EntryDeliveryBehavior::Ignore
-        }
+        NormalizedEntryType::Thinking => EntryDeliveryBehavior::RealtimeAndSummary,
+        NormalizedEntryType::Loading => EntryDeliveryBehavior::Ignore,
         NormalizedEntryType::UserFeedback { .. } => EntryDeliveryBehavior::RealtimeOnly,
         NormalizedEntryType::ErrorMessage { .. } => EntryDeliveryBehavior::Ignore,
         NormalizedEntryType::NextAction { .. } => EntryDeliveryBehavior::RealtimeAndSummaryTrigger,
         NormalizedEntryType::ToolUse { status, .. } => match status {
             ToolStatus::PendingApproval { .. }
+            | ToolStatus::Success
+            | ToolStatus::Failed
             | ToolStatus::Denied { .. }
             | ToolStatus::TimedOut => EntryDeliveryBehavior::RealtimeAndSummary,
-            ToolStatus::Created | ToolStatus::Success | ToolStatus::Failed => {
-                EntryDeliveryBehavior::SummaryOnly
-            }
+            ToolStatus::Created => EntryDeliveryBehavior::SummaryOnly,
         },
         NormalizedEntryType::UserMessage
         | NormalizedEntryType::SystemMessage
         | NormalizedEntryType::TokenUsageInfo(_) => EntryDeliveryBehavior::SummaryOnly,
         NormalizedEntryType::AssistantMessage => EntryDeliveryBehavior::RealtimeAndSummary,
     }
+}
+
+fn stable_text_kind_for_entry_type(entry_type: &NormalizedEntryType) -> Option<StableTextKind> {
+    match entry_type {
+        NormalizedEntryType::AssistantMessage => Some(StableTextKind::Assistant),
+        NormalizedEntryType::Thinking => Some(StableTextKind::Thinking),
+        _ => None,
+    }
+}
+
+fn stable_text_kind_label(kind: StableTextKind) -> &'static str {
+    match kind {
+        StableTextKind::Assistant => "Assistant",
+        StableTextKind::Thinking => "Thinking",
+    }
+}
+
+fn stable_text_kind_emoji(kind: StableTextKind) -> &'static str {
+    match kind {
+        StableTextKind::Assistant => "🤖",
+        StableTextKind::Thinking => "🤔",
+    }
+}
+
+fn is_terminal_tool_status(status: &ToolStatus) -> bool {
+    matches!(
+        status,
+        ToolStatus::Success | ToolStatus::Failed | ToolStatus::Denied { .. } | ToolStatus::TimedOut
+    )
 }
 
 async fn start_or_refresh_run_feed_watcher(tg: TelegramContext, session_id: Uuid) {
@@ -982,19 +1069,20 @@ async fn process_run_feed_patch(
         return;
     };
 
-    if matches!(
-        update.current.entry_type,
-        NormalizedEntryType::AssistantMessage
-    ) {
-        accumulator.track_active_assistant_entry(update.index);
+    if let Some(kind) = stable_text_kind_for_entry_type(&update.current.entry_type) {
+        accumulator.track_active_stable_text_entry(update.index, kind);
         return;
+    }
+
+    if matches!(update.current.entry_type, NormalizedEntryType::UserMessage) {
+        accumulator.note_user_turn(update.index);
     }
 
     if !emit_realtime {
         return;
     }
 
-    flush_completed_assistant_card(tg, accumulator).await;
+    flush_completed_stable_text_card(tg, accumulator).await;
 
     let behavior = classify_entry_behavior(&update.current);
     match behavior {
@@ -1012,24 +1100,15 @@ async fn process_run_feed_patch(
     }
 }
 
-async fn flush_completed_assistant_card(
+async fn flush_completed_stable_text_card(
     tg: &TelegramContext,
     accumulator: &mut RunFeedAccumulator,
 ) {
-    let Some(entry_index) = accumulator.active_assistant_entry_index else {
+    let Some((kind, content)) = accumulator.flushable_active_stable_text() else {
         return;
     };
 
-    let Some(content) = accumulator
-        .entries_by_index
-        .get(&entry_index)
-        .filter(|entry| matches!(entry.entry_type, NormalizedEntryType::AssistantMessage))
-        .map(|entry| entry.content.clone())
-    else {
-        return;
-    };
-
-    emit_realtime_assistant_card(tg, accumulator, &content).await;
+    emit_realtime_stable_text_card(tg, accumulator, kind, &content).await;
 }
 
 async fn emit_pending_approval_catch_up_cards(
@@ -1050,17 +1129,49 @@ async fn emit_pending_approval_catch_up_cards(
     }
 }
 
-async fn emit_realtime_assistant_card(
+async fn emit_terminal_tool_turn_card(
     tg: &TelegramContext,
     accumulator: &mut RunFeedAccumulator,
+    entry_index: usize,
+    tool_name: &str,
+    status: &ToolStatus,
+    action_type: &ActionType,
+) {
+    let row = render_terminal_tool_row(tool_name, status, action_type);
+    if !accumulator.append_terminal_tool_row(entry_index, row) {
+        return;
+    }
+
+    let prefix = accumulator.flow_prefix();
+    let message = render_tool_turn_card(&prefix, &accumulator.tool_turn.rendered_rows);
+    match format::edit_or_send_rich_then_plain(
+        &tg.bot,
+        tg.chat_id,
+        accumulator.tool_turn.telegram_message_id,
+        &message,
+        None,
+    )
+    .await
+    {
+        Ok(message) => accumulator.tool_turn.telegram_message_id = Some(message.id),
+        Err(err) => tracing::warn!("Failed to upsert telegram tool turn card: {err}"),
+    }
+}
+
+async fn emit_realtime_stable_text_card(
+    tg: &TelegramContext,
+    accumulator: &mut RunFeedAccumulator,
+    kind: StableTextKind,
     content: &str,
 ) {
     let prefix = accumulator.flow_prefix();
+    let label = stable_text_kind_label(kind);
+    let emoji = stable_text_kind_emoji(kind);
     let message = format!(
-        "🤖 {prefix} Assistant\n{}",
+        "{emoji} {prefix} {label}\n{}",
         truncate_for_telegram(content, TELEGRAM_MESSAGE_LIMIT * 2)
     );
-    let source_message_id = accumulator.active_assistant_message_id();
+    let source_message_id = accumulator.active_stable_text_message_id();
     match format::edit_or_send_rich_then_plain(
         &tg.bot,
         tg.chat_id,
@@ -1070,24 +1181,94 @@ async fn emit_realtime_assistant_card(
     )
     .await
     {
-        Ok(message) => accumulator.set_active_assistant_message_id(message.id),
+        Ok(message) => accumulator.set_active_stable_text_message_id(kind, message.id),
         Err(err) => {
-            tracing::warn!("Failed to upsert telegram assistant card: {err}");
+            tracing::warn!("Failed to upsert telegram stable text card: {err}");
         }
     }
 }
 
-async fn delete_active_assistant_message(
+fn render_tool_turn_card(prefix: &str, rows: &[String]) -> String {
+    let mut message = format!("🛠️ {prefix} Tool calls");
+    for row in rows {
+        message.push('\n');
+        message.push_str(row);
+    }
+    truncate_for_telegram(&message, TELEGRAM_MESSAGE_LIMIT * 2)
+}
+
+fn render_terminal_tool_row(
+    tool_name: &str,
+    status: &ToolStatus,
+    action_type: &ActionType,
+) -> String {
+    let status_label = terminal_tool_status_label(status);
+    let action_preview = truncate_for_telegram(&action_type_summary(action_type), 120);
+    format!("{status_label} {tool_name}: {action_preview}")
+}
+
+fn terminal_tool_status_label(status: &ToolStatus) -> &'static str {
+    match status {
+        ToolStatus::Success => "✅",
+        ToolStatus::Failed => "❌",
+        ToolStatus::Denied { .. } => "🛑",
+        ToolStatus::TimedOut => "⏱️",
+        ToolStatus::Created | ToolStatus::PendingApproval { .. } => "•",
+    }
+}
+
+fn action_type_summary(action_type: &ActionType) -> String {
+    match action_type {
+        ActionType::FileRead { path } => format!("read {path}"),
+        ActionType::FileEdit { path, changes } => {
+            format!("edit {path} ({} change sets)", changes.len())
+        }
+        ActionType::CommandRun { command, .. } => format!("run {command}"),
+        ActionType::Search { query } => format!("search {query}"),
+        ActionType::WebFetch { url } => format!("fetch {url}"),
+        ActionType::Tool {
+            tool_name,
+            arguments,
+            ..
+        } => arguments
+            .as_ref()
+            .map(|arguments| format!("{tool_name} {arguments}"))
+            .unwrap_or_else(|| tool_name.clone()),
+        ActionType::TaskCreate { description } => format!("task {description}"),
+        ActionType::PlanPresentation { plan } => format!("plan {plan}"),
+        ActionType::TodoManagement { operation, todos } => {
+            format!("todo {operation} ({} items)", todos.len())
+        }
+        ActionType::Other { description } => description.clone(),
+    }
+}
+
+async fn delete_active_stable_text_message(
     tg: &TelegramContext,
     accumulator: &mut RunFeedAccumulator,
 ) {
-    let Some(message_id) = accumulator.take_active_assistant_message_id() else {
+    let Some(message_id) = accumulator.take_active_stable_text_message_id() else {
         return;
     };
 
     if let Err(err) = tg.bot.delete_message(tg.chat_id, message_id).await {
         tracing::debug!(
             "Failed to delete Telegram assistant message {} in chat {}: {}",
+            message_id.0,
+            tg.chat_id.0,
+            err
+        );
+    }
+}
+
+async fn delete_tool_turn_message(tg: &TelegramContext, accumulator: &mut RunFeedAccumulator) {
+    let Some(message_id) = accumulator.take_tool_turn_message_id() else {
+        return;
+    };
+
+    if let Err(err) = tg.bot.delete_message(tg.chat_id, message_id).await {
+        tracing::debug!(
+            "Failed to delete Telegram tool turn message {} in chat {}: {}",
             message_id.0,
             tg.chat_id.0,
             err
@@ -1111,7 +1292,9 @@ async fn emit_realtime_card_for_entry(
             let _ = send_telegram_card(tg, message, None).await;
         }
         NormalizedEntryType::ToolUse {
-            tool_name, status, ..
+            tool_name,
+            action_type,
+            status,
         } => match status {
             ToolStatus::PendingApproval { approval_id, .. } => {
                 if should_emit_pending_approval_card(&update.previous, approval_id)
@@ -1128,37 +1311,19 @@ async fn emit_realtime_card_for_entry(
                     .await;
                 }
             }
-            ToolStatus::Denied { reason } => {
-                if should_emit_terminal_tool_card(&update.previous, "denied")
-                    && accumulator
-                        .sent_terminal_tool_updates
-                        .insert((update.index, "denied"))
-                {
-                    let reason = reason.as_deref().unwrap_or("No reason provided");
-                    let message = format!(
-                        "🛑 {} Tool denied: {tool_name}\nReason: {}\n{}",
-                        accumulator.flow_prefix(),
-                        truncate_for_telegram(reason, 140),
-                        truncate_for_telegram(&update.current.content, 180)
-                    );
-                    let _ = send_telegram_card(tg, message, None).await;
-                }
+            ToolStatus::Created => {}
+            status if is_terminal_tool_status(status) => {
+                emit_terminal_tool_turn_card(
+                    tg,
+                    accumulator,
+                    update.index,
+                    tool_name,
+                    status,
+                    action_type,
+                )
+                .await;
             }
-            ToolStatus::TimedOut => {
-                if should_emit_terminal_tool_card(&update.previous, "timed_out")
-                    && accumulator
-                        .sent_terminal_tool_updates
-                        .insert((update.index, "timed_out"))
-                {
-                    let message = format!(
-                        "⏱️ {} Tool approval timed out: {tool_name}\n{}",
-                        accumulator.flow_prefix(),
-                        truncate_for_telegram(&update.current.content, 200)
-                    );
-                    let _ = send_telegram_card(tg, message, None).await;
-                }
-            }
-            ToolStatus::Created | ToolStatus::Success | ToolStatus::Failed => {}
+            _ => {}
         },
         NormalizedEntryType::NextAction {
             failed,
@@ -1196,25 +1361,6 @@ fn should_emit_pending_approval_card(
     } = &previous.entry_type
     {
         return previous_approval_id != approval_id;
-    }
-
-    true
-}
-
-fn should_emit_terminal_tool_card(
-    previous: &Option<NormalizedEntry>,
-    terminal_state: &str,
-) -> bool {
-    let Some(previous) = previous else {
-        return true;
-    };
-
-    if let NormalizedEntryType::ToolUse { status, .. } = &previous.entry_type {
-        match (terminal_state, status) {
-            ("denied", ToolStatus::Denied { .. }) => return false,
-            ("timed_out", ToolStatus::TimedOut) => return false,
-            _ => {}
-        }
     }
 
     true
@@ -1267,7 +1413,8 @@ async fn emit_stage_summary(
     accumulator: &mut RunFeedAccumulator,
     trigger: SummaryTrigger,
 ) {
-    delete_active_assistant_message(tg, accumulator).await;
+    delete_active_stable_text_message(tg, accumulator).await;
+    delete_tool_turn_message(tg, accumulator).await;
 
     if should_skip_stage_summary_in_plan_mode(tg, accumulator.execution_process_id).await {
         accumulator.finalize_stage();
@@ -2399,7 +2546,7 @@ mod tests {
             ),
             (
                 entry(NormalizedEntryType::Thinking, "thinking"),
-                EntryDeliveryBehavior::Ignore,
+                EntryDeliveryBehavior::RealtimeAndSummary,
             ),
             (
                 entry(NormalizedEntryType::Loading, "loading"),
@@ -2434,7 +2581,7 @@ mod tests {
     }
 
     #[test]
-    fn tool_use_realtime_only_for_pending_denied_timed_out() {
+    fn tool_use_created_is_summary_only_others_are_realtime_and_summary() {
         let now = chrono::Utc::now();
         let base = |status| {
             entry(
@@ -2456,11 +2603,11 @@ mod tests {
         );
         assert_eq!(
             classify_entry_behavior(&base(ToolStatus::Success)),
-            EntryDeliveryBehavior::SummaryOnly
+            EntryDeliveryBehavior::RealtimeAndSummary
         );
         assert_eq!(
             classify_entry_behavior(&base(ToolStatus::Failed)),
-            EntryDeliveryBehavior::SummaryOnly
+            EntryDeliveryBehavior::RealtimeAndSummary
         );
         assert_eq!(
             classify_entry_behavior(&base(ToolStatus::PendingApproval {
@@ -2712,47 +2859,83 @@ mod tests {
         let mut acc = RunFeedAccumulator::default();
         let message_id = MessageId(101);
 
-        acc.set_active_assistant_message_id(message_id);
+        acc.set_active_stable_text_message_id(StableTextKind::Assistant, message_id);
 
-        assert_eq!(acc.active_assistant_message_id(), Some(message_id));
-        assert_eq!(acc.active_assistant_entry_index, None);
+        assert_eq!(acc.active_stable_text_message_id(), Some(message_id));
+        assert_eq!(acc.active_stable_text_entry_index, None);
+        assert_eq!(acc.active_stable_text_kind, Some(StableTextKind::Assistant));
     }
 
     #[test]
-    fn track_assistant_entry_without_message_for_history_replay() {
+    fn thinking_is_not_sent_while_still_active() {
         let mut acc = RunFeedAccumulator::default();
-        acc.track_active_assistant_entry(1);
+        let _ = acc.apply_patch(
+            &executors::logs::utils::patch::ConversationPatch::add_normalized_entry(
+                1,
+                entry(NormalizedEntryType::Thinking, "thinking draft"),
+            ),
+        );
+        acc.track_active_stable_text_entry(1, StableTextKind::Thinking);
 
-        assert_eq!(acc.active_assistant_entry_index, Some(1));
-        assert_eq!(acc.active_assistant_message_id, None);
+        assert_eq!(acc.active_stable_text_entry_index, Some(1));
+        assert_eq!(acc.active_stable_text_message_id, None);
+        assert_eq!(
+            acc.flushable_active_stable_text(),
+            Some((StableTextKind::Thinking, "thinking draft".to_string()))
+        );
     }
 
     #[test]
-    fn tracking_new_assistant_entry_keeps_previous_message_id_for_edit_reuse() {
+    fn thinking_flushes_when_later_non_thinking_entry_arrives() {
         let mut acc = RunFeedAccumulator::default();
-        acc.set_active_assistant_message_id(MessageId(101));
+        let _ = acc.apply_patch(
+            &executors::logs::utils::patch::ConversationPatch::add_normalized_entry(
+                1,
+                entry(NormalizedEntryType::Thinking, "stable thinking"),
+            ),
+        );
+        acc.track_active_stable_text_entry(1, StableTextKind::Thinking);
+        let _ = acc.apply_patch(
+            &executors::logs::utils::patch::ConversationPatch::add_normalized_entry(
+                2,
+                entry(NormalizedEntryType::UserMessage, "next user turn"),
+            ),
+        );
 
-        acc.track_active_assistant_entry(2);
-
-        assert_eq!(acc.active_assistant_entry_index, Some(2));
-        assert_eq!(acc.active_assistant_message_id, Some(MessageId(101)));
+        assert_eq!(
+            acc.flushable_active_stable_text(),
+            Some((StableTextKind::Thinking, "stable thinking".to_string()))
+        );
     }
 
     #[test]
-    fn new_execution_process_resets_active_assistant_state() {
+    fn tracking_new_stable_text_entry_keeps_previous_message_id_for_edit_reuse() {
+        let mut acc = RunFeedAccumulator::default();
+        acc.set_active_stable_text_message_id(StableTextKind::Assistant, MessageId(101));
+
+        acc.track_active_stable_text_entry(2, StableTextKind::Thinking);
+
+        assert_eq!(acc.active_stable_text_entry_index, Some(2));
+        assert_eq!(acc.active_stable_text_message_id, Some(MessageId(101)));
+        assert_eq!(acc.active_stable_text_kind, Some(StableTextKind::Thinking));
+    }
+
+    #[test]
+    fn new_execution_process_resets_active_stable_text_state() {
         let mut acc = RunFeedAccumulator::default();
         let process_a = Uuid::new_v4();
         let process_b = Uuid::new_v4();
 
         acc.remember_execution_process(process_a);
-        acc.set_active_assistant_message_id(MessageId(101));
+        acc.set_active_stable_text_message_id(StableTextKind::Assistant, MessageId(101));
         acc.remember_execution_process(process_a);
-        assert_eq!(acc.active_assistant_entry_index, None);
-        assert_eq!(acc.active_assistant_message_id, Some(MessageId(101)));
+        assert_eq!(acc.active_stable_text_entry_index, None);
+        assert_eq!(acc.active_stable_text_message_id, Some(MessageId(101)));
 
         acc.remember_execution_process(process_b);
-        assert_eq!(acc.active_assistant_entry_index, None);
-        assert_eq!(acc.active_assistant_message_id, None);
+        assert_eq!(acc.active_stable_text_entry_index, None);
+        assert_eq!(acc.active_stable_text_message_id, None);
+        assert_eq!(acc.active_stable_text_kind, None);
     }
 
     #[test]
@@ -2769,7 +2952,10 @@ mod tests {
             ),
         );
         acc.sent_pending_approvals.insert("approval-a".to_string());
-        acc.sent_terminal_tool_updates.insert((0, "denied"));
+        acc.tool_turn.current_user_turn_entry_index = Some(9);
+        acc.tool_turn.telegram_message_id = Some(MessageId(222));
+        acc.tool_turn.appended_terminal_tool_indexes.insert(0);
+        acc.tool_turn.rendered_rows.push("row".to_string());
         acc.finalize_stage();
 
         acc.remember_execution_process(process_b);
@@ -2779,8 +2965,76 @@ mod tests {
         assert_eq!(acc.current_seq, 0);
         assert_eq!(acc.last_summary_seq, 0);
         assert!(acc.sent_pending_approvals.is_empty());
-        assert!(acc.sent_terminal_tool_updates.is_empty());
+        assert!(acc.tool_turn.appended_terminal_tool_indexes.is_empty());
+        assert!(acc.tool_turn.rendered_rows.is_empty());
+        assert_eq!(acc.tool_turn.telegram_message_id, None);
         assert_eq!(acc.execution_process_id, Some(process_b));
+    }
+
+    #[test]
+    fn user_message_starts_new_tool_aggregation_turn() {
+        let mut acc = RunFeedAccumulator::default();
+        acc.tool_turn.telegram_message_id = Some(MessageId(55));
+        acc.tool_turn.appended_terminal_tool_indexes.insert(3);
+        acc.tool_turn.rendered_rows.push("old row".to_string());
+
+        acc.note_user_turn(8);
+
+        assert_eq!(acc.tool_turn.current_user_turn_entry_index, Some(8));
+        assert_eq!(acc.tool_turn.telegram_message_id, None);
+        assert!(acc.tool_turn.appended_terminal_tool_indexes.is_empty());
+        assert!(acc.tool_turn.rendered_rows.is_empty());
+    }
+
+    #[test]
+    fn terminal_tool_statuses_append_once_and_non_terminal_do_not() {
+        let mut acc = RunFeedAccumulator::default();
+
+        assert!(!is_terminal_tool_status(&ToolStatus::Created));
+        assert!(!is_terminal_tool_status(&ToolStatus::PendingApproval {
+            approval_id: Uuid::new_v4().to_string(),
+            requested_at: chrono::Utc::now(),
+            timeout_at: chrono::Utc::now(),
+        }));
+        assert!(is_terminal_tool_status(&ToolStatus::Success));
+        assert!(is_terminal_tool_status(&ToolStatus::Failed));
+        assert!(is_terminal_tool_status(&ToolStatus::Denied {
+            reason: None
+        }));
+        assert!(is_terminal_tool_status(&ToolStatus::TimedOut));
+
+        assert!(acc.append_terminal_tool_row(1, "row-1".to_string()));
+        assert!(!acc.append_terminal_tool_row(1, "row-1 duplicate".to_string()));
+        assert_eq!(acc.tool_turn.rendered_rows, vec!["row-1".to_string()]);
+    }
+
+    #[test]
+    fn multiple_terminal_tool_calls_render_in_order_in_one_card() {
+        let rows = vec![
+            render_terminal_tool_row(
+                "bash",
+                &ToolStatus::Success,
+                &ActionType::CommandRun {
+                    command: "cargo test -p services".to_string(),
+                    result: None,
+                },
+            ),
+            render_terminal_tool_row(
+                "search",
+                &ToolStatus::Failed,
+                &ActionType::Search {
+                    query: "telegram notifier".to_string(),
+                },
+            ),
+        ];
+
+        let rendered = render_tool_turn_card("[CODEX · PLAN]", &rows);
+        assert!(rendered.contains("🛠️ [CODEX · PLAN] Tool calls"));
+        assert!(rendered.contains("✅ bash: run cargo test -p services"));
+        assert!(rendered.contains("❌ search: search telegram notifier"));
+        let first = rendered.find("✅ bash").expect("first row should exist");
+        let second = rendered.find("❌ search").expect("second row should exist");
+        assert!(first < second);
     }
 
     #[test]
@@ -2795,6 +3049,26 @@ mod tests {
                 status: ToolStatus::Success,
             },
             "auto tool",
+        );
+
+        assert_eq!(
+            classify_entry_behavior(&entry),
+            EntryDeliveryBehavior::RealtimeAndSummary
+        );
+    }
+
+    #[test]
+    fn created_tools_still_do_not_emit_realtime_cards() {
+        let entry = entry(
+            NormalizedEntryType::ToolUse {
+                tool_name: "bash".to_string(),
+                action_type: ActionType::CommandRun {
+                    command: "echo pending".to_string(),
+                    result: None,
+                },
+                status: ToolStatus::Created,
+            },
+            "created tool",
         );
 
         assert_eq!(

@@ -1,7 +1,7 @@
 use std::{collections::BTreeSet, path::Path};
 
 use async_trait::async_trait;
-use chrono::{DateTime, Local, Utc};
+use chrono::{DateTime, Utc};
 use serde_json::Value;
 use thiserror::Error;
 use tokio::process::Command;
@@ -19,6 +19,7 @@ pub struct ReceiptRequest<'a> {
     pub agent_session_id: &'a str,
     pub task_title: &'a str,
     pub done_at: DateTime<Utc>,
+    pub done_at_display: &'a str,
 }
 
 #[derive(Debug, Error)]
@@ -353,7 +354,7 @@ struct OptionalModelBreakdown {
 struct RenderParams {
     task_title: String,
     session_id: String,
-    done_at: DateTime<Utc>,
+    done_at_display: String,
     metadata_rows: Vec<(String, String)>,
     summary_rows: Vec<(String, String)>,
     model_breakdowns: Vec<OptionalModelBreakdown>,
@@ -384,7 +385,7 @@ impl ClaudeCodeReceiptParams {
         Ok(Self(RenderParams {
             task_title: request.task_title.to_string(),
             session_id,
-            done_at: request.done_at,
+            done_at_display: request.done_at_display.to_string(),
             metadata_rows,
             summary_rows: summary_rows(token_breakdown, read_f64(session, &["totalCost"])),
             model_breakdowns,
@@ -421,7 +422,7 @@ impl CodexReceiptParams {
         Ok(Self(RenderParams {
             task_title: request.task_title.to_string(),
             session_id,
-            done_at: request.done_at,
+            done_at_display: request.done_at_display.to_string(),
             metadata_rows,
             summary_rows: summary_rows(token_breakdown, read_f64(session, &["costUSD"])),
             model_breakdowns: collect_models_map(session),
@@ -454,7 +455,7 @@ impl OpencodeReceiptParams {
         Ok(Self(RenderParams {
             task_title: request.task_title.to_string(),
             session_id,
-            done_at: request.done_at,
+            done_at_display: request.done_at_display.to_string(),
             metadata_rows,
             summary_rows: summary_rows(token_breakdown, read_f64(session, &["totalCost"])),
             model_breakdowns: Vec::new(),
@@ -492,7 +493,7 @@ impl PiReceiptParams {
         Ok(Self(RenderParams {
             task_title: request.task_title.to_string(),
             session_id,
-            done_at: request.done_at,
+            done_at_display: request.done_at_display.to_string(),
             metadata_rows,
             summary_rows: summary_rows(token_breakdown, read_f64(session, &["totalCost"])),
             model_breakdowns: collect_model_breakdowns(session, &["modelName"], &["cost"]),
@@ -643,13 +644,21 @@ fn render_receipt_template(
 
     let mut session_id_short = params.session_id.clone();
     if session_id_short.len() > 24 {
-        session_id_short.truncate(24);
+        let mut cut = 24;
+        while !session_id_short.is_char_boundary(cut) {
+            cut -= 1;
+        }
+        session_id_short.truncate(cut);
         session_id_short.push_str("...");
     }
 
     let mut task_title_short = params.task_title.clone();
     if task_title_short.len() > 30 {
-        task_title_short.truncate(30);
+        let mut cut = 30;
+        while !task_title_short.is_char_boundary(cut) {
+            cut -= 1;
+        }
+        task_title_short.truncate(cut);
         task_title_short.push_str("...");
     }
 
@@ -674,16 +683,7 @@ fn render_receipt_template(
                 &escape_html(executor.receipt_display_name()),
             ),
             ("{{session_id_short}}", &escape_html(&session_id_short)),
-            (
-                "{{done_at}}",
-                &escape_html(
-                    &params
-                        .done_at
-                        .with_timezone(&Local)
-                        .format("%b %d, %Y, %I:%M %p")
-                        .to_string(),
-                ),
-            ),
+            ("{{done_at}}", &escape_html(&params.done_at_display)),
             ("{{model_rows}}", &model_rows),
             ("{{total_height}}", &total_height.to_string()),
             ("{{total_height_minus_8}}", &(total_height - 8).to_string()),
@@ -934,6 +934,7 @@ mod tests {
             agent_session_id: "session-1",
             task_title: "Ship receipt",
             done_at: Utc.with_ymd_and_hms(2026, 5, 1, 10, 30, 0).unwrap(),
+            done_at_display: "May 01, 2026, 06:30 PM CST",
         }
     }
 

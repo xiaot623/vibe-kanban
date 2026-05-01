@@ -1,12 +1,13 @@
 use std::{
-    fs,
+    env, fs,
     path::{Path, PathBuf},
     sync::{Arc, OnceLock},
 };
 
 use anyhow::{Context, anyhow};
 use async_trait::async_trait;
-use chrono::{DateTime, Local, Utc};
+use chrono::{DateTime, FixedOffset, Local, Offset, Utc};
+use chrono_tz::Tz;
 use db::{
     models::{execution_process::ExecutionProcess, task::TaskStatus},
     task_state::{
@@ -109,6 +110,7 @@ impl ReceiptsService {
             );
             return Ok(());
         };
+        let done_at_display = format_receipt_done_at(transition.task.updated_at);
 
         let svg = match self
             .svg_generator
@@ -118,6 +120,7 @@ impl ReceiptsService {
                     agent_session_id: &execution.agent_session_id,
                     task_title: &transition.task.title,
                     done_at: transition.task.updated_at,
+                    done_at_display: &done_at_display,
                 },
             )
             .await
@@ -293,7 +296,7 @@ fn reserve_receipt_path(
     executor: BaseCodingAgent,
     task_title: &str,
 ) -> anyhow::Result<ReceiptPaths> {
-    let local_time = done_at.with_timezone(&Local);
+    let local_time = receipt_local_time(done_at);
     let month = local_time.format("%Y%m").to_string();
     let timestamp = local_time.format("%Y%m%d%H%M%S").to_string();
     let directory = output_root.join(&month);
@@ -345,6 +348,78 @@ fn sanitize_filename_segment(value: &str) -> String {
     } else {
         trimmed.to_string()
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ReceiptTimeZone {
+    Iana(Tz),
+    Fixed(FixedOffset),
+}
+
+fn configured_receipt_time_zone() -> Option<ReceiptTimeZone> {
+    configured_receipt_time_zone_from_str(env::var("TZ").ok().as_deref())
+}
+
+fn configured_receipt_time_zone_from_str(raw: Option<&str>) -> Option<ReceiptTimeZone> {
+    let raw = raw?.trim();
+    if raw.is_empty() {
+        return None;
+    }
+
+    if let Ok(tz) = raw.parse::<Tz>() {
+        return Some(ReceiptTimeZone::Iana(tz));
+    }
+
+    parse_fixed_offset(raw).map(ReceiptTimeZone::Fixed)
+}
+
+fn parse_fixed_offset(raw: &str) -> Option<FixedOffset> {
+    let normalized = raw
+        .strip_prefix("UTC")
+        .or_else(|| raw.strip_prefix("GMT"))
+        .unwrap_or(raw);
+    let normalized = normalized.trim();
+    if normalized.is_empty() {
+        return Some(Utc.fix());
+    }
+
+    let sign = match normalized.as_bytes().first().copied()? {
+        b'+' => 1,
+        b'-' => -1,
+        _ => return None,
+    };
+    let rest = &normalized[1..];
+    let (hours, minutes) = if let Some((hours, minutes)) = rest.split_once(':') {
+        (hours, minutes)
+    } else if rest.len() == 4 {
+        (&rest[..2], &rest[2..])
+    } else if rest.len() <= 2 {
+        (rest, "0")
+    } else {
+        return None;
+    };
+
+    let hours = hours.parse::<i32>().ok()?;
+    let minutes = minutes.parse::<i32>().ok()?;
+    if hours > 23 || minutes > 59 {
+        return None;
+    }
+
+    FixedOffset::east_opt(sign * (hours * 3600 + minutes * 60))
+}
+
+fn receipt_local_time(done_at: DateTime<Utc>) -> DateTime<FixedOffset> {
+    match configured_receipt_time_zone() {
+        Some(ReceiptTimeZone::Iana(tz)) => done_at.with_timezone(&tz).fixed_offset(),
+        Some(ReceiptTimeZone::Fixed(offset)) => done_at.with_timezone(&offset),
+        None => done_at.with_timezone(&Local).fixed_offset(),
+    }
+}
+
+fn format_receipt_done_at(done_at: DateTime<Utc>) -> String {
+    receipt_local_time(done_at)
+        .format("%b %d, %Y, %I:%M %p %:z")
+        .to_string()
 }
 
 fn render_receipt_png(svg_content: &str) -> anyhow::Result<Vec<u8>> {
@@ -490,6 +565,25 @@ mod tests {
         assert_eq!(
             second.file_path.file_name().unwrap().to_string_lossy(),
             format!("{}codex-fix-login-2.png", expected_timestamp)
+        );
+    }
+
+    #[test]
+    fn uses_configured_receipt_timezone_for_display_and_paths() {
+        let done_at = Utc.with_ymd_and_hms(2026, 5, 1, 9, 8, 7).unwrap();
+        let tz = configured_receipt_time_zone_from_str(Some("Asia/Shanghai")).unwrap();
+        let local_time = match tz {
+            ReceiptTimeZone::Iana(tz) => done_at.with_timezone(&tz).fixed_offset(),
+            ReceiptTimeZone::Fixed(offset) => done_at.with_timezone(&offset),
+        };
+
+        assert_eq!(
+            local_time.format("%Y%m%d%H%M%S").to_string(),
+            "20260501170807"
+        );
+        assert_eq!(
+            local_time.format("%b %d, %Y, %I:%M %p %:z").to_string(),
+            "May 01, 2026, 05:08 PM +08:00"
         );
     }
 
