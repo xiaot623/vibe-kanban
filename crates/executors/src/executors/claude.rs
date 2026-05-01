@@ -43,6 +43,7 @@ use crate::{
         stderr_processor::normalize_stderr_logs,
         utils::{EntryIndexProvider, patch::ConversationPatch},
     },
+    receipts::{ReceiptCommand, ReceiptCommandSpec},
     stdout_dup::create_stdout_pipe_writer,
 };
 
@@ -68,6 +69,31 @@ fn fallback_command(claude_code_router: bool) -> &'static str {
         FALLBACK_CLAUDE_ROUTER_COMMAND
     } else {
         FALLBACK_CLAUDE_COMMAND
+    }
+}
+
+pub fn receipt_command_spec(agent_session_id: &str) -> ReceiptCommandSpec {
+    ReceiptCommandSpec {
+        primary: ReceiptCommand {
+            program: "ccusage".to_string(),
+            args: vec![
+                "session".to_string(),
+                "--id".to_string(),
+                agent_session_id.to_string(),
+                "--json".to_string(),
+            ],
+        },
+        fallback: ReceiptCommand {
+            program: "npx".to_string(),
+            args: vec![
+                "--yes".to_string(),
+                "ccusage@latest".to_string(),
+                "session".to_string(),
+                "--id".to_string(),
+                agent_session_id.to_string(),
+                "--json".to_string(),
+            ],
+        },
     }
 }
 

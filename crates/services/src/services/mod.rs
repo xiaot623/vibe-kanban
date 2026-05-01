@@ -21,6 +21,7 @@ pub mod project;
 #[cfg(feature = "qa-mode")]
 pub mod qa_repos;
 pub mod queued_message;
+pub mod receipts;
 pub mod repo;
 pub mod task_state;
 pub mod telegram;

@@ -57,6 +57,9 @@ moka = { version = "0.12", features = ["future"] }
 teloxide = { version = "0.13", features = ["macros"] }
 pulldown-cmark = "0.13"
 telegraph-rs = { version = "0.7", default-features = false, features = ["rustls"] }
+resvg = "0.41"
+tiny-skia = "0.11"
+usvg = "0.41"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 security-framework = "2"

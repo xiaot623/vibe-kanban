@@ -1033,6 +1033,32 @@ export function GeneralSettings() {
                 </p>
               </div>
 
+              <div className="ml-6 flex items-center space-x-2">
+                <Checkbox
+                  id="telegram-send-session-receipt"
+                  checked={draft?.telegram?.send_session_receipt ?? false}
+                  onCheckedChange={(checked: boolean) =>
+                    updateDraft({
+                      telegram: {
+                        ...draft!.telegram,
+                        send_session_receipt: checked,
+                      },
+                    })
+                  }
+                />
+                <div className="space-y-0.5">
+                  <Label
+                    htmlFor="telegram-send-session-receipt"
+                    className="cursor-pointer"
+                  >
+                    {t('settings.general.telegram.sendSessionReceipt.label')}
+                  </Label>
+                  <p className="text-sm text-muted-foreground">
+                    {t('settings.general.telegram.sendSessionReceipt.helper')}
+                  </p>
+                </div>
+              </div>
+
               <div className="ml-6 space-y-2">
                 <Label htmlFor="telegram-default-executor">
                   {t('settings.general.telegram.defaultExecutor.label')}

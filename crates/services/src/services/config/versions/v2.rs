@@ -29,6 +29,8 @@ pub struct TelegramConfig {
     pub bot_token: Option<String>,
     pub chat_id: Option<i64>,
     #[serde(default)]
+    pub send_session_receipt: bool,
+    #[serde(default)]
     pub telegraph_enabled: bool,
     pub telegraph_access_token: Option<String>,
     pub telegraph_short_name: Option<String>,
@@ -56,6 +58,7 @@ impl Default for TelegramConfig {
             enabled: false,
             bot_token: None,
             chat_id: None,
+            send_session_receipt: false,
             telegraph_enabled: false,
             telegraph_access_token: None,
             telegraph_short_name: None,
@@ -486,6 +489,7 @@ mod tests {
         assert_eq!(parsed.telegraph_short_name, None);
         assert!(!parsed.lark_wiki_enabled);
         assert_eq!(parsed.lark_wiki_space_id, None);
+        assert!(!parsed.send_session_receipt);
     }
 
     #[test]
@@ -494,6 +498,7 @@ mod tests {
             enabled: true,
             bot_token: Some("bot".to_string()),
             chat_id: Some(456),
+            send_session_receipt: true,
             telegraph_enabled: true,
             telegraph_access_token: Some("access".to_string()),
             telegraph_short_name: Some("vk_beta".to_string()),
@@ -512,5 +517,6 @@ mod tests {
         assert_eq!(parsed.telegraph_short_name.as_deref(), Some("vk_beta"));
         assert!(parsed.lark_wiki_enabled);
         assert_eq!(parsed.lark_wiki_space_id.as_deref(), Some("space_123"));
+        assert!(parsed.send_session_receipt);
     }
 }

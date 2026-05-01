@@ -20,6 +20,7 @@ use crate::{
         AppendPrompt, AvailabilityInfo, ExecutorError, SpawnedChild, StandardCodingAgentExecutor,
         acp::AcpAgentHarness, command_available,
     },
+    receipts::{ReceiptCommandSpec, package_command},
 };
 
 mod normalize_logs;
@@ -40,6 +41,13 @@ pub fn base_command() -> &'static str {
 
 pub fn fallback_command() -> &'static str {
     FALLBACK_OPENCODE_COMMAND
+}
+
+pub fn receipt_command_spec(agent_session_id: &str) -> ReceiptCommandSpec {
+    let mut spec = package_command("@ccusage/opencode", "ccusage-opencode");
+    spec.primary.args.extend(["--id".to_string(), agent_session_id.to_string()]);
+    spec.fallback.args.extend(["--id".to_string(), agent_session_id.to_string()]);
+    spec
 }
 
 #[derive(Derivative, Clone, Serialize, Deserialize, TS, JsonSchema)]

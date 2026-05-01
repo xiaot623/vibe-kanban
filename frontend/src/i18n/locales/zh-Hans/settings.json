@@ -207,6 +207,10 @@
           "placeholder": "123456789",
           "helper": "发送通知的聊天 ID。"
         },
+        "sendSessionReceipt": {
+          "label": "发送 session 账单",
+          "helper": "在生成账单后，将 session 账单渲染为 PNG 图片并发送到 Telegram。"
+        },
         "defaultExecutor": {
           "label": "默认执行器",
           "placeholder": "选择执行器",

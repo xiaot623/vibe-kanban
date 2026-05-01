@@ -23,6 +23,13 @@ pub fn fallback_command() -> &'static str {
     FALLBACK_CODEX_COMMAND
 }
 
+pub fn receipt_command_spec(agent_session_id: &str) -> ReceiptCommandSpec {
+    let mut spec = package_command("@ccusage/codex", "ccusage-codex");
+    spec.primary.args.extend(["--id".to_string(), agent_session_id.to_string()]);
+    spec.fallback.args.extend(["--id".to_string(), agent_session_id.to_string()]);
+    spec
+}
+
 /// Returns the Codex home directory.
 ///
 /// Checks the `CODEX_HOME` environment variable first, then falls back to `~/.codex`.
@@ -74,6 +81,7 @@ use crate::{
         StandardCodingAgentExecutor,
         codex::{jsonrpc::ExitSignalSender, normalize_logs::Error},
     },
+    receipts::{ReceiptCommandSpec, package_command},
     stdout_dup::create_stdout_pipe_writer,
 };
 

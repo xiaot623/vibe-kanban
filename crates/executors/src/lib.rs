@@ -6,4 +6,5 @@ pub mod executors;
 pub mod logs;
 pub mod mcp_config;
 pub mod profile;
+pub mod receipts;
 pub mod stdout_dup;

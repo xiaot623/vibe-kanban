@@ -53,6 +53,7 @@
     "interactive_bot": true,
     "bot_token": null,
     "chat_id": null,
+    "send_session_receipt": false,
     "telegraph_enabled": false,
     "telegraph_access_token": null,
     "telegraph_short_name": null,

@@ -29,7 +29,8 @@ use self::{
     types::{
         ExtensionUiRequest, PiExecutorEvent, PiRpcMessage,
         approval_status_to_extension_ui_response, extract_agent_end_error,
-        extract_session_file_from_state, parse_extension_ui_request, parse_rpc_message,
+        extract_session_file_from_state, extract_session_id_from_session_path,
+        parse_extension_ui_request, parse_rpc_message,
     },
 };
 use crate::{
@@ -43,6 +44,7 @@ use crate::{
         AppendPrompt, AvailabilityInfo, ExecutorError, ExecutorExitResult, SpawnedChild,
         StandardCodingAgentExecutor, command_available,
     },
+    receipts::{ReceiptCommandSpec, package_command},
     stdout_dup::create_stdout_pipe_writer,
 };
 
@@ -50,6 +52,13 @@ static PI_COMMAND: LazyLock<String> = LazyLock::new(|| env_command_or_default("V
 
 pub fn base_command() -> &'static str {
     PI_COMMAND.as_str()
+}
+
+pub fn receipt_command_spec(agent_session_id: &str) -> ReceiptCommandSpec {
+    let mut spec = package_command("@ccusage/pi", "ccusage-pi");
+    spec.primary.args.extend(["--id".to_string(), agent_session_id.to_string()]);
+    spec.fallback.args.extend(["--id".to_string(), agent_session_id.to_string()]);
+    spec
 }
 
 #[derive(Derivative, Clone, Serialize, Deserialize, TS, JsonSchema)]
@@ -592,6 +601,7 @@ async fn run_pi_rpc_session(
 
     let state = rpc.call("get_state", json!({}), &mut context).await?;
     if let Some(session_id) = extract_session_file_from_state(&state) {
+        let session_id = extract_session_id_from_session_path(&session_id).unwrap_or(session_id);
         log_writer
             .log_event(&PiExecutorEvent::SessionStart { session_id })
             .await?;

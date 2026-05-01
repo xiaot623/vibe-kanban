@@ -20,6 +20,7 @@ use services::services::{
     oauth_credentials::OAuthCredentials,
     project::ProjectService,
     queued_message::QueuedMessageService,
+    receipts::ReceiptsService,
     repo::RepoService,
     telegram::{lark_wiki, telegraph},
 };
@@ -189,6 +190,8 @@ impl Deployment for LocalDeployment {
 
         let pty = PtyService::new();
         let cron_scheduler = CronScheduler::new(db.clone(), git.clone(), container.clone());
+
+        ReceiptsService::register_once(&db::task_state::dispatcher::shared_dispatcher()).await;
 
         let deployment = Self {
             mcp_server_handle: Arc::new(Mutex::new(None)),

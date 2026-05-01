@@ -364,7 +364,7 @@ export type ProxyConfig = { http_proxy: string | null, https_proxy: string | nul
 
 export type DailyModeConfig = { project_id: string | null, };
 
-export type TelegramConfig = { enabled: boolean, bot_token: string | null, chat_id: bigint | null, telegraph_enabled: boolean, telegraph_access_token: string | null, telegraph_short_name: string | null, lark_wiki_enabled: boolean, lark_wiki_space_id: string | null, default_executor: string, default_mode: string, };
+export type TelegramConfig = { enabled: boolean, bot_token: string | null, chat_id: bigint | null, send_session_receipt: boolean, telegraph_enabled: boolean, telegraph_access_token: string | null, telegraph_short_name: string | null, lark_wiki_enabled: boolean, lark_wiki_space_id: string | null, default_executor: string, default_mode: string, };
 
 export enum TtsProvider { REPLICATE = "REPLICATE" }
 

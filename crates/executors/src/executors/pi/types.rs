@@ -279,6 +279,27 @@ pub fn extract_session_file_from_state(value: &Value) -> Option<String> {
     )
 }
 
+pub fn extract_session_id_from_session_path(raw: &str) -> Option<String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    let file_name = trimmed
+        .rsplit(['/', '\\'])
+        .next()
+        .filter(|value| !value.is_empty())
+        .unwrap_or(trimmed);
+    let stem = file_name.strip_suffix(".jsonl").unwrap_or(file_name);
+    let candidate = stem
+        .rsplit_once('_')
+        .map(|(_, suffix)| suffix)
+        .unwrap_or(stem);
+    let candidate = candidate.trim();
+
+    (!candidate.is_empty()).then(|| candidate.to_string())
+}
+
 pub fn extract_agent_end_error(payload: &Value) -> Option<String> {
     let error = payload
         .pointer("/error")
