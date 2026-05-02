@@ -139,16 +139,16 @@ impl LarkWikiClient for LarkCliClient {
         space_id: &str,
         month: &str,
     ) -> Result<LarkWikiMonthNodeMeta> {
-        let params = serde_json::json!({ "space_id": space_id }).to_string();
-        let data = serde_json::json!({
-            "node_type": "origin",
-            "obj_type": "docx",
-            "title": month,
-        })
-        .to_string();
         let output = run_lark_cli(
             &[
-                "wiki", "nodes", "create", "--as", "user", "--params", &params, "--data", &data,
+                "wiki",
+                "+node-create",
+                "--as",
+                "user",
+                "--space-id",
+                space_id,
+                "--title",
+                month,
             ],
             None,
         )

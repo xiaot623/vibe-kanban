@@ -98,7 +98,7 @@ impl MsgStore {
 
     pub fn set_patch_interceptor(
         &self,
-        interceptor: Option<Arc<dyn Fn(&Patch) -> bool + Send + Sync>>,
+        interceptor: Option<PatchInterceptor>,
     ) {
         *self.patch_interceptor.write().unwrap() = interceptor;
     }
