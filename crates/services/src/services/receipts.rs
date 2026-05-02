@@ -77,25 +77,35 @@ impl ReceiptsService {
             TransitionFilter::new().to(vec![TaskStatus::Done]),
             move |ctx, transition| {
                 let service = Arc::clone(&handler_service);
+                let pool = ctx.pool.clone();
+                let transition = transition.clone();
                 Box::pin(async move {
-                    if !should_generate_receipt(transition) {
+                    if !should_generate_receipt(&transition) {
                         return;
                     }
-
-                    if let Err(error) = service.handle_done_transition(&ctx.pool, transition).await
-                    {
-                        tracing::warn!(
-                            task_id = %transition.task_id(),
-                            error = %error,
-                            "Skipping executor session receipt generation"
-                        );
-                    }
+                    service.enqueue_done_transition(pool, transition);
                 })
             },
         );
 
         dispatcher.register_handler(handler).await;
         let _ = RECEIPTS_HANDLER_REGISTERED.set(());
+    }
+
+    fn enqueue_done_transition(
+        self: Arc<Self>,
+        pool: SqlitePool,
+        transition: TaskStateTransition,
+    ) -> tokio::task::JoinHandle<()> {
+        tokio::spawn(async move {
+            if let Err(error) = self.handle_done_transition(&pool, &transition).await {
+                tracing::warn!(
+                    task_id = %transition.task_id(),
+                    error = %error,
+                    "Skipping executor session receipt generation"
+                );
+            }
+        })
     }
 
     async fn handle_done_transition(
@@ -144,17 +154,7 @@ impl ReceiptsService {
             execution.executor,
             &transition.task.title,
         )?;
-        fs::create_dir_all(&paths.directory).with_context(|| {
-            format!(
-                "failed to create receipt directory {}",
-                paths.directory.display()
-            )
-        })?;
-
-        let png_bytes =
-            render_receipt_png(&svg).context("failed to render SVG to PNG for storage")?;
-        fs::write(&paths.file_path, png_bytes)
-            .with_context(|| format!("failed to write receipt {}", paths.file_path.display()))?;
+        let png_bytes = render_receipt_png_to_file(svg, paths.clone()).await?;
         tracing::info!(
             task_id = %transition.task_id(),
             receipt_path = %paths.file_path.display(),
@@ -164,7 +164,7 @@ impl ReceiptsService {
         );
 
         if let Err(error) = self
-            .send_receipt_png_if_enabled(&transition.task.title, &svg)
+            .send_receipt_png_if_enabled(&transition.task.title, &png_bytes)
             .await
         {
             tracing::warn!(
@@ -179,7 +179,11 @@ impl ReceiptsService {
         Ok(())
     }
 
-    async fn send_receipt_png_if_enabled(&self, task_title: &str, svg: &str) -> anyhow::Result<()> {
+    async fn send_receipt_png_if_enabled(
+        &self,
+        task_title: &str,
+        png_bytes: &[u8],
+    ) -> anyhow::Result<()> {
         let Some(tg) = crate::services::telegram::notifier::get_context().await else {
             return Ok(());
         };
@@ -188,8 +192,6 @@ impl ReceiptsService {
         if !config.telegram.enabled || !config.telegram.send_session_receipt {
             return Ok(());
         }
-
-        let png_bytes = render_receipt_png(svg)?;
         let file_name = format!(
             "session-receipt-{}.png",
             sanitize_filename_segment(task_title).trim_matches('_')
@@ -198,11 +200,13 @@ impl ReceiptsService {
         tg.bot
             .send_photo(
                 tg.chat_id,
-                InputFile::memory(png_bytes).file_name(if file_name == "session-receipt-.png" {
-                    "session-receipt.png".to_string()
-                } else {
-                    file_name
-                }),
+                InputFile::memory(png_bytes.to_vec()).file_name(
+                    if file_name == "session-receipt-.png" {
+                        "session-receipt.png".to_string()
+                    } else {
+                        file_name
+                    },
+                ),
             )
             .caption(format!("Session receipt: {}", task_title))
             .await
@@ -447,6 +451,25 @@ fn render_receipt_png(svg_content: &str) -> anyhow::Result<Vec<u8>> {
     Ok(png_bytes)
 }
 
+async fn render_receipt_png_to_file(svg: String, paths: ReceiptPaths) -> anyhow::Result<Vec<u8>> {
+    tokio::task::spawn_blocking(move || {
+        fs::create_dir_all(&paths.directory).with_context(|| {
+            format!(
+                "failed to create receipt directory {}",
+                paths.directory.display()
+            )
+        })?;
+
+        let png_bytes =
+            render_receipt_png(&svg).context("failed to render SVG to PNG for storage")?;
+        fs::write(&paths.file_path, &png_bytes)
+            .with_context(|| format!("failed to write receipt {}", paths.file_path.display()))?;
+        Ok(png_bytes)
+    })
+    .await
+    .context("receipt render task join failed")?
+}
+
 #[cfg(test)]
 mod tests {
     use chrono::TimeZone;
@@ -467,7 +490,10 @@ mod tests {
         profile::ExecutorProfileId,
     };
     use tempfile::TempDir;
-    use tokio::time::{Duration, sleep, timeout};
+    use tokio::{
+        sync::Notify,
+        time::{Duration, sleep, timeout},
+    };
 
     use super::*;
 
@@ -480,6 +506,9 @@ mod tests {
     #[derive(Clone)]
     struct MockReceiptSvgGenerator {
         svg: Arc<String>,
+        delay: Option<Duration>,
+        started: Option<Arc<Notify>>,
+        release: Option<Arc<Notify>>,
     }
 
     #[async_trait]
@@ -489,15 +518,37 @@ mod tests {
             _executor: BaseCodingAgent,
             _request: ReceiptRequest<'_>,
         ) -> Result<String, ReceiptError> {
+            if let Some(started) = &self.started {
+                started.notify_waiters();
+            }
+            if let Some(delay) = self.delay {
+                sleep(delay).await;
+            }
+            if let Some(release) = &self.release {
+                release.notified().await;
+            }
             Ok(self.svg.as_ref().clone())
         }
     }
 
     fn mock_service(output_root: PathBuf) -> Arc<ReceiptsService> {
-        Arc::new(ReceiptsService::with_svg_generator_and_root(
+        mock_service_with_generator(
+            output_root,
             Arc::new(MockReceiptSvgGenerator {
                 svg: Arc::new(TEST_SVG.to_string()),
+                delay: None,
+                started: None,
+                release: None,
             }),
+        )
+    }
+
+    fn mock_service_with_generator(
+        output_root: PathBuf,
+        svg_generator: Arc<dyn ReceiptSvgGenerator>,
+    ) -> Arc<ReceiptsService> {
+        Arc::new(ReceiptsService::with_svg_generator_and_root(
+            svg_generator,
             output_root,
         ))
     }
@@ -600,114 +651,7 @@ mod tests {
         let db = db::DBService::new().await.unwrap();
         let temp_dir = TempDir::new().unwrap();
         let service = mock_service(temp_dir.path().join("receipts"));
-
-        let project = Project::create(
-            &db.pool,
-            &CreateProject {
-                name: "Receipts".to_string(),
-                repositories: vec![],
-            },
-            Uuid::new_v4(),
-        )
-        .await
-        .unwrap();
-
-        let task = Task::create(
-            &db.pool,
-            &CreateTask {
-                project_id: project.id,
-                title: "Render receipt".to_string(),
-                description: None,
-                status: Some(TaskStatus::InProgress),
-                parent_workspace_id: None,
-                source_cron_task_id: None,
-                image_ids: None,
-            },
-            Uuid::new_v4(),
-        )
-        .await
-        .unwrap();
-
-        let workspace = Workspace::create(
-            &db.pool,
-            &CreateWorkspace {
-                branch: "receipt-branch".to_string(),
-                agent_working_dir: None,
-            },
-            Uuid::new_v4(),
-            task.id,
-        )
-        .await
-        .unwrap();
-
-        let session = Session::create(
-            &db.pool,
-            &CreateSession {
-                executor: Some("CODEX".to_string()),
-            },
-            Uuid::new_v4(),
-            workspace.id,
-        )
-        .await
-        .unwrap();
-
-        let action = ExecutorAction::new(
-            ExecutorActionType::CodingAgentInitialRequest(CodingAgentInitialRequest {
-                prompt: "Implement it".to_string(),
-                executor_profile_id: ExecutorProfileId::new(BaseCodingAgent::Codex),
-                working_dir: None,
-            }),
-            None,
-        );
-
-        let execution = ExecutionProcess::create(
-            &db.pool,
-            &CreateExecutionProcess {
-                session_id: session.id,
-                executor_action: action,
-                run_reason: ExecutionProcessRunReason::CodingAgent,
-            },
-            Uuid::new_v4(),
-            &[],
-        )
-        .await
-        .unwrap();
-        ExecutionProcess::update_completion(
-            &db.pool,
-            execution.id,
-            ExecutionProcessStatus::Completed,
-            Some(0),
-        )
-        .await
-        .unwrap();
-
-        let _turn = CodingAgentTurn::create(
-            &db.pool,
-            &CreateCodingAgentTurn {
-                execution_process_id: execution.id,
-                prompt: Some("Implement it".to_string()),
-            },
-            Uuid::new_v4(),
-        )
-        .await
-        .unwrap();
-        CodingAgentTurn::update_agent_session_id(&db.pool, execution.id, "session-xyz")
-            .await
-            .unwrap();
-
-        let done_task = Task::update(
-            &db.pool,
-            task.id,
-            task.project_id,
-            task.title.clone(),
-            None,
-            TaskStatus::Done,
-            None,
-        )
-        .await
-        .unwrap();
-
-        let transition = TaskStateTransition::new(done_task, Some(TaskStatus::InProgress));
+        let transition = seed_receipt_transition(&db.pool).await;
         service
             .handle_done_transition(&db.pool, &transition)
             .await
@@ -736,5 +680,170 @@ mod tests {
         })
         .await
         .unwrap();
+    }
+
+    #[tokio::test]
+    async fn enqueuing_done_receipt_returns_before_svg_generation_completes() {
+        let db = db::DBService::new().await.unwrap();
+        let temp_dir = TempDir::new().unwrap();
+        let started = Arc::new(Notify::new());
+        let release = Arc::new(Notify::new());
+        let service = mock_service_with_generator(
+            temp_dir.path().join("receipts"),
+            Arc::new(MockReceiptSvgGenerator {
+                svg: Arc::new(TEST_SVG.to_string()),
+                delay: None,
+                started: Some(Arc::clone(&started)),
+                release: Some(Arc::clone(&release)),
+            }),
+        );
+
+        let transition = seed_receipt_transition(&db.pool).await;
+        let join_handle = Arc::clone(&service).enqueue_done_transition(db.pool.clone(), transition);
+
+        timeout(Duration::from_millis(250), started.notified())
+            .await
+            .expect("background job should start promptly");
+
+        let month_dir = temp_dir
+            .path()
+            .join("receipts")
+            .join(Utc::now().format("%Y%m").to_string());
+        assert!(
+            timeout(Duration::from_millis(100), async {
+                loop {
+                    if month_dir.exists() {
+                        break;
+                    }
+                    sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .is_err(),
+            "receipt write should not complete before the generator is released"
+        );
+
+        release.notify_waiters();
+        join_handle.await.unwrap();
+
+        let files = fs::read_dir(&month_dir)
+            .unwrap()
+            .filter_map(Result::ok)
+            .collect::<Vec<_>>();
+        assert_eq!(files.len(), 1);
+
+        let png = fs::read(files[0].path()).unwrap();
+        assert!(png.starts_with(&[137, 80, 78, 71, 13, 10, 26, 10]));
+        assert!(png.len() > 1_000);
+    }
+
+    async fn seed_receipt_transition(pool: &SqlitePool) -> TaskStateTransition {
+        let project = Project::create(
+            pool,
+            &CreateProject {
+                name: "Receipts".to_string(),
+                repositories: vec![],
+            },
+            Uuid::new_v4(),
+        )
+        .await
+        .unwrap();
+
+        let task = Task::create(
+            pool,
+            &CreateTask {
+                project_id: project.id,
+                title: "Render receipt".to_string(),
+                description: None,
+                status: Some(TaskStatus::InProgress),
+                parent_workspace_id: None,
+                source_cron_task_id: None,
+                image_ids: None,
+            },
+            Uuid::new_v4(),
+        )
+        .await
+        .unwrap();
+
+        let workspace = Workspace::create(
+            pool,
+            &CreateWorkspace {
+                branch: "receipt-branch".to_string(),
+                agent_working_dir: None,
+            },
+            Uuid::new_v4(),
+            task.id,
+        )
+        .await
+        .unwrap();
+
+        let session = Session::create(
+            pool,
+            &CreateSession {
+                executor: Some("CODEX".to_string()),
+            },
+            Uuid::new_v4(),
+            workspace.id,
+        )
+        .await
+        .unwrap();
+
+        let action = ExecutorAction::new(
+            ExecutorActionType::CodingAgentInitialRequest(CodingAgentInitialRequest {
+                prompt: "Implement it".to_string(),
+                executor_profile_id: ExecutorProfileId::new(BaseCodingAgent::Codex),
+                working_dir: None,
+            }),
+            None,
+        );
+
+        let execution = ExecutionProcess::create(
+            pool,
+            &CreateExecutionProcess {
+                session_id: session.id,
+                executor_action: action,
+                run_reason: ExecutionProcessRunReason::CodingAgent,
+            },
+            Uuid::new_v4(),
+            &[],
+        )
+        .await
+        .unwrap();
+        ExecutionProcess::update_completion(
+            pool,
+            execution.id,
+            ExecutionProcessStatus::Completed,
+            Some(0),
+        )
+        .await
+        .unwrap();
+
+        let _turn = CodingAgentTurn::create(
+            pool,
+            &CreateCodingAgentTurn {
+                execution_process_id: execution.id,
+                prompt: Some("Implement it".to_string()),
+            },
+            Uuid::new_v4(),
+        )
+        .await
+        .unwrap();
+        CodingAgentTurn::update_agent_session_id(pool, execution.id, "session-xyz")
+            .await
+            .unwrap();
+
+        let done_task = Task::update(
+            pool,
+            task.id,
+            task.project_id,
+            task.title.clone(),
+            None,
+            TaskStatus::Done,
+            None,
+        )
+        .await
+        .unwrap();
+
+        TaskStateTransition::new(done_task, Some(TaskStatus::InProgress))
     }
 }
