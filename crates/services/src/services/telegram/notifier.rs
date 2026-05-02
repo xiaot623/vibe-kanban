@@ -569,6 +569,20 @@ struct RunFeedAccumulator {
     tool_turn: ToolTurnAggregation,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ToolTurnUpdatePlan {
+    SkipDuplicate,
+    EditCurrent {
+        rows: Vec<String>,
+        message: String,
+    },
+    ReplaceMessage {
+        old_message_id: Option<MessageId>,
+        rows: Vec<String>,
+        message: String,
+    },
+}
+
 impl RunFeedAccumulator {
     fn apply_patch(&mut self, patch: &json_patch::Patch) -> Option<EntryUpdate> {
         let (index, entry) = extract_normalized_entry_from_patch(patch)?;
@@ -731,23 +745,56 @@ impl RunFeedAccumulator {
         self.tool_turn.rendered_rows.clear();
     }
 
-    fn append_terminal_tool_row(&mut self, entry_index: usize, row: String) -> bool {
-        if !self
-            .tool_turn
-            .appended_terminal_tool_indexes
-            .insert(entry_index)
-        {
-            return false;
-        }
-        self.tool_turn.rendered_rows.push(row);
-        true
-    }
-
     fn take_tool_turn_message_id(&mut self) -> Option<MessageId> {
         let message_id = self.tool_turn.telegram_message_id.take();
         self.tool_turn.appended_terminal_tool_indexes.clear();
         self.tool_turn.rendered_rows.clear();
         message_id
+    }
+
+    fn plan_terminal_tool_turn_update(
+        &self,
+        entry_index: usize,
+        row: String,
+        prefix: &str,
+    ) -> ToolTurnUpdatePlan {
+        if self
+            .tool_turn
+            .appended_terminal_tool_indexes
+            .contains(&entry_index)
+        {
+            return ToolTurnUpdatePlan::SkipDuplicate;
+        }
+
+        let mut rows = self.tool_turn.rendered_rows.clone();
+        rows.push(row.clone());
+        let candidate = render_tool_turn_card(prefix, &rows);
+        if candidate.chars().count() <= TELEGRAM_MESSAGE_LIMIT {
+            return ToolTurnUpdatePlan::EditCurrent {
+                rows,
+                message: candidate,
+            };
+        }
+
+        let replacement_rows = vec![row];
+        ToolTurnUpdatePlan::ReplaceMessage {
+            old_message_id: self.tool_turn.telegram_message_id,
+            message: render_tool_turn_card(prefix, &replacement_rows),
+            rows: replacement_rows,
+        }
+    }
+
+    fn apply_terminal_tool_turn_update(
+        &mut self,
+        entry_index: usize,
+        rows: Vec<String>,
+        message_id: MessageId,
+    ) {
+        self.tool_turn
+            .appended_terminal_tool_indexes
+            .insert(entry_index);
+        self.tool_turn.rendered_rows = rows;
+        self.tool_turn.telegram_message_id = Some(message_id);
     }
 }
 
@@ -1138,23 +1185,50 @@ async fn emit_terminal_tool_turn_card(
     action_type: &ActionType,
 ) {
     let row = render_terminal_tool_row(tool_name, status, action_type);
-    if !accumulator.append_terminal_tool_row(entry_index, row) {
-        return;
-    }
-
     let prefix = accumulator.flow_prefix();
-    let message = render_tool_turn_card(&prefix, &accumulator.tool_turn.rendered_rows);
-    match format::edit_or_send_rich_then_plain(
-        &tg.bot,
-        tg.chat_id,
-        accumulator.tool_turn.telegram_message_id,
-        &message,
-        None,
-    )
-    .await
-    {
-        Ok(message) => accumulator.tool_turn.telegram_message_id = Some(message.id),
-        Err(err) => tracing::warn!("Failed to upsert telegram tool turn card: {err}"),
+    match accumulator.plan_terminal_tool_turn_update(entry_index, row, &prefix) {
+        ToolTurnUpdatePlan::SkipDuplicate => {}
+        ToolTurnUpdatePlan::EditCurrent { rows, message } => {
+            match format::edit_or_send_rich_then_plain(
+                &tg.bot,
+                tg.chat_id,
+                accumulator.tool_turn.telegram_message_id,
+                &message,
+                None,
+            )
+            .await
+            {
+                Ok(message) => {
+                    accumulator.apply_terminal_tool_turn_update(entry_index, rows, message.id);
+                }
+                Err(err) => tracing::warn!("Failed to upsert telegram tool turn card: {err}"),
+            }
+        }
+        ToolTurnUpdatePlan::ReplaceMessage {
+            old_message_id,
+            rows,
+            message,
+        } => {
+            if let Some(message_id) = old_message_id
+                && let Err(err) = tg.bot.delete_message(tg.chat_id, message_id).await
+            {
+                tracing::debug!(
+                    "Failed to delete Telegram tool turn message {} in chat {}: {}",
+                    message_id.0,
+                    tg.chat_id.0,
+                    err
+                );
+            }
+
+            match format::edit_or_send_rich_then_plain(&tg.bot, tg.chat_id, None, &message, None)
+                .await
+            {
+                Ok(message) => {
+                    accumulator.apply_terminal_tool_turn_update(entry_index, rows, message.id);
+                }
+                Err(err) => tracing::warn!("Failed to upsert telegram tool turn card: {err}"),
+            }
+        }
     }
 }
 
@@ -1194,7 +1268,7 @@ fn render_tool_turn_card(prefix: &str, rows: &[String]) -> String {
         message.push('\n');
         message.push_str(row);
     }
-    truncate_for_telegram(&message, TELEGRAM_MESSAGE_LIMIT * 2)
+    message
 }
 
 fn render_terminal_tool_row(
@@ -3002,10 +3076,69 @@ mod tests {
             reason: None
         }));
         assert!(is_terminal_tool_status(&ToolStatus::TimedOut));
-
-        assert!(acc.append_terminal_tool_row(1, "row-1".to_string()));
-        assert!(!acc.append_terminal_tool_row(1, "row-1 duplicate".to_string()));
+        acc.apply_terminal_tool_turn_update(1, vec!["row-1".to_string()], MessageId(42));
         assert_eq!(acc.tool_turn.rendered_rows, vec!["row-1".to_string()]);
+        assert!(acc.tool_turn.appended_terminal_tool_indexes.contains(&1));
+    }
+
+    #[test]
+    fn tool_turn_update_keeps_appending_when_under_limit() {
+        let mut acc = RunFeedAccumulator::default();
+        acc.tool_turn.telegram_message_id = Some(MessageId(101));
+        acc.tool_turn.rendered_rows = vec!["✅ bash: run cargo test".to_string()];
+
+        let plan = acc.plan_terminal_tool_turn_update(
+            2,
+            "❌ search: search notifier".to_string(),
+            "[CODEX · PLAN]",
+        );
+
+        match plan {
+            ToolTurnUpdatePlan::EditCurrent { rows, message } => {
+                assert_eq!(rows.len(), 2);
+                assert_eq!(rows[0], "✅ bash: run cargo test");
+                assert_eq!(rows[1], "❌ search: search notifier");
+                assert!(message.contains("✅ bash: run cargo test"));
+                assert!(message.contains("❌ search: search notifier"));
+            }
+            other => panic!("expected edit plan, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn tool_turn_update_replaces_message_when_limit_would_be_exceeded() {
+        let mut acc = RunFeedAccumulator::default();
+        acc.tool_turn.telegram_message_id = Some(MessageId(202));
+        acc.tool_turn.rendered_rows = vec!["x".repeat(TELEGRAM_MESSAGE_LIMIT)];
+
+        let plan = acc.plan_terminal_tool_turn_update(3, "next row".to_string(), "[X]");
+
+        match plan {
+            ToolTurnUpdatePlan::ReplaceMessage {
+                old_message_id,
+                rows,
+                message,
+            } => {
+                assert_eq!(old_message_id, Some(MessageId(202)));
+                assert_eq!(rows, vec!["next row".to_string()]);
+                assert_eq!(message, render_tool_turn_card("[X]", &rows));
+                assert!(message.contains("next row"));
+                assert!(!message.contains(&"x".repeat(16)));
+            }
+            other => panic!("expected replace plan, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn duplicate_terminal_tool_call_does_not_reappend() {
+        let mut acc = RunFeedAccumulator::default();
+        acc.tool_turn.appended_terminal_tool_indexes.insert(7);
+        acc.tool_turn.rendered_rows = vec!["existing row".to_string()];
+
+        let plan =
+            acc.plan_terminal_tool_turn_update(7, "duplicate row".to_string(), "[CODEX · PLAN]");
+
+        assert_eq!(plan, ToolTurnUpdatePlan::SkipDuplicate);
     }
 
     #[test]
