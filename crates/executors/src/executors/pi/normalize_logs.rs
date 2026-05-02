@@ -423,6 +423,9 @@ impl LogState {
     }
 
     fn handle_tool_execution_start(&mut self, payload: &Value, worktree_path: &Path) {
+        self.assistant = None;
+        self.thinking = None;
+
         let tool_call_id = extract_first_string(
             payload,
             &["/tool_call_id", "/toolCallId", "/call_id", "/callId", "/id"],
@@ -454,6 +457,9 @@ impl LogState {
     }
 
     fn handle_tool_execution_end(&mut self, payload: &Value, worktree_path: &Path) {
+        self.assistant = None;
+        self.thinking = None;
+
         let Some(tool_call_id) = extract_first_string(
             payload,
             &["/tool_call_id", "/toolCallId", "/call_id", "/callId", "/id"],
@@ -520,6 +526,9 @@ impl LogState {
         timeout_at: chrono::DateTime<chrono::Utc>,
         worktree_path: &Path,
     ) {
+        self.assistant = None;
+        self.thinking = None;
+
         let tool_state = self
             .tools
             .entry(tool_call_id.clone())
