@@ -389,6 +389,12 @@ impl PiRpcSession {
         self.stdin.flush().await.map_err(ExecutorError::Io)?;
         Ok(())
     }
+
+    async fn close_stdin(&mut self) -> Result<(), ExecutorError> {
+        self.stdin.flush().await.map_err(ExecutorError::Io)?;
+        self.stdin.shutdown().await.map_err(ExecutorError::Io)?;
+        Ok(())
+    }
 }
 
 fn build_pi_command(command: &str, params: Value) -> Value {
@@ -611,13 +617,30 @@ async fn run_pi_rpc_session(
             .await?;
     }
 
-    log_writer.log_event(&PiExecutorEvent::Done).await?;
-    if context.agent_end_error.is_some() {
-        Ok(ExecutorExitResult::Failure)
-    } else {
-        Ok(ExecutorExitResult::Success)
+    if let Err(err) = rpc.close_stdin().await {
+        let _ = log_writer
+            .log_event(&PiExecutorEvent::ProtocolError {
+                message: format!("Failed to close Pi RPC stdin: {err}"),
+            })
+            .await;
     }
+
+    log_writer.log_event(&PiExecutorEvent::Done).await?;
+    let exit_result = if context.agent_end_error.is_some() {
+        ExecutorExitResult::Failure
+    } else {
+        ExecutorExitResult::Success
+    };
+
+    // Keep rpc alive in the background to drain any remaining output and prevent EPIPE
+    tokio::spawn(async move {
+        while let Ok(Some(_)) = rpc.next_message().await {}
+    });
+
+    Ok(exit_result)
 }
+
+
 
 #[cfg(test)]
 mod tests {

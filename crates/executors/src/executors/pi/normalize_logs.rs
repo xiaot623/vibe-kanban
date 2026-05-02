@@ -238,6 +238,10 @@ impl LogState {
     }
 
     fn handle_pi_event(&mut self, method: &str, payload: &Value, worktree_path: &Path) {
+        if self.handle_extension_ui_event(method, payload) {
+            return;
+        }
+
         match method {
             "message_update" => self.handle_message_update(payload),
             "tool_execution_start" => self.handle_tool_execution_start(payload, worktree_path),
@@ -256,6 +260,48 @@ impl LogState {
                 }
             }
         }
+    }
+
+    fn handle_extension_ui_event(&mut self, method: &str, payload: &Value) -> bool {
+        if method != "extension_ui_request" {
+            return false;
+        }
+
+        let Some(ui_method) = extract_first_string(payload, &["/method"]) else {
+            return false;
+        };
+
+        if ui_method != "setWidget" {
+            return false;
+        }
+
+        let widget_key = extract_first_string(payload, &["/widgetKey", "/widget_key"])
+            .unwrap_or_default()
+            .to_ascii_lowercase();
+        let widget_text = extract_widget_lines(payload);
+        if widget_text.trim().is_empty() {
+            return true;
+        }
+
+        let looks_like_summary = widget_key.contains("summary")
+            || widget_text
+                .lines()
+                .next()
+                .is_some_and(|line| line.to_ascii_lowercase().contains("summary"));
+
+        if looks_like_summary {
+            self.update_streaming_text(
+                UpdateMode::Set,
+                widget_text.trim(),
+                NormalizedEntryType::AssistantMessage,
+            );
+        } else if self.debug_events {
+            self.add_system_entry(format!(
+                "[pi-debug] ignored setWidget key={widget_key} text={widget_text}"
+            ));
+        }
+
+        true
     }
 
     fn handle_message_update(&mut self, payload: &Value) {
@@ -771,6 +817,33 @@ fn content_item_text(value: &Value) -> Option<String> {
     .filter(|value| !value.trim().is_empty())
 }
 
+fn extract_widget_lines(value: &Value) -> String {
+    let Some(lines) = value
+        .pointer("/widgetLines")
+        .or_else(|| value.pointer("/widget_lines"))
+    else {
+        return String::new();
+    };
+
+    match lines {
+        Value::Array(items) => items
+            .iter()
+            .filter_map(|item| match item {
+                Value::String(text) => Some(text.trim_end().to_string()),
+                Value::Object(_) => extract_first_string(item, &["/text", "/content", "/value"]),
+                _ => None,
+            })
+            .filter(|line| !line.trim().is_empty())
+            .collect::<Vec<_>>()
+            .join("\n"),
+        Value::String(text) => text.clone(),
+        Value::Object(_) => {
+            extract_first_string(lines, &["/text", "/content", "/value"]).unwrap_or_default()
+        }
+        _ => String::new(),
+    }
+}
+
 fn make_relative_path(path: &str, worktree_path: &Path) -> String {
     make_path_relative(path, &worktree_path.to_string_lossy())
 }
@@ -882,6 +955,36 @@ mod tests {
             .find(|entry| matches!(entry.entry_type, NormalizedEntryType::AssistantMessage))
             .expect("assistant entry should exist");
         assert_eq!(assistant.content, "Hello");
+    }
+
+    #[test]
+    fn summary_widget_updates_assistant_message() {
+        let (mut state, msg_store) = new_state();
+        let worktree_path = Path::new("/tmp");
+
+        state.handle_pi_event(
+            "extension_ui_request",
+            &json!({
+                "method": "setWidget",
+                "widgetKey": "summary",
+                "widgetLines": [
+                    "Summary",
+                    "Implemented the requested change.",
+                    "Tests pass."
+                ]
+            }),
+            worktree_path,
+        );
+
+        let entries = collect_entries(&msg_store);
+        let assistant = entries
+            .iter()
+            .find(|entry| matches!(entry.entry_type, NormalizedEntryType::AssistantMessage))
+            .expect("summary widget should create assistant entry");
+        assert_eq!(
+            assistant.content,
+            "Summary\nImplemented the requested change.\nTests pass."
+        );
     }
 
     #[test]
