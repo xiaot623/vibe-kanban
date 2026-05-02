@@ -55,13 +55,15 @@ pub fn base_command() -> &'static str {
 }
 
 pub fn receipt_command_spec(agent_session_id: &str) -> ReceiptCommandSpec {
+    let short_id = extract_session_id_from_session_path(agent_session_id)
+        .unwrap_or_else(|| agent_session_id.to_string());
     let mut spec = package_command("@ccusage/pi", "ccusage-pi");
     spec.primary
         .args
-        .extend(["--id".to_string(), agent_session_id.to_string()]);
+        .extend(["--id".to_string(), short_id.clone()]);
     spec.fallback
         .args
-        .extend(["--id".to_string(), agent_session_id.to_string()]);
+        .extend(["--id".to_string(), short_id]);
     spec
 }
 
@@ -591,14 +593,16 @@ async fn run_pi_rpc_session(
     }
 
     if let Some(session_file) = resume_session_file {
+        let short_id = extract_session_id_from_session_path(&session_file)
+            .unwrap_or_else(|| session_file.clone());
         rpc.call(
             "switch_session",
             json!({
                 "sessionPath": session_file.clone(),
                 "sessionFile": session_file.clone(),
                 "session_file": session_file.clone(),
-                "sessionId": session_file.clone(),
-                "session_id": session_file,
+                "sessionId": short_id.clone(),
+                "session_id": short_id,
             }),
             &mut context,
         )
@@ -611,7 +615,6 @@ async fn run_pi_rpc_session(
 
     let state = rpc.call("get_state", json!({}), &mut context).await?;
     if let Some(session_id) = extract_session_file_from_state(&state) {
-        let session_id = extract_session_id_from_session_path(&session_id).unwrap_or(session_id);
         log_writer
             .log_event(&PiExecutorEvent::SessionStart { session_id })
             .await?;
