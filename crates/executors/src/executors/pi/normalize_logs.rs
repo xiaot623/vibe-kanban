@@ -9,7 +9,7 @@ use crate::{
     approvals::ToolCallMetadata,
     logs::{
         ActionType, CommandExitStatus, CommandRunResult, FileChange, NormalizedEntry,
-        NormalizedEntryError, NormalizedEntryType, ToolResult, ToolStatus,
+        NormalizedEntryError, NormalizedEntryType, TokenUsageInfo, ToolResult, ToolStatus,
         stderr_processor::normalize_stderr_logs,
         utils::{
             EntryIndexProvider,
@@ -250,6 +250,33 @@ impl LogState {
             "agent_end" => {
                 if let Some(error) = extract_agent_end_error(payload) {
                     self.add_error_entry(error);
+                }
+
+                let usage_val = payload.pointer("/usage").or_else(|| {
+                    payload
+                        .pointer("/messages")
+                        .and_then(|m| m.as_array())
+                        .and_then(|m| m.last())
+                        .and_then(|m| m.pointer("/usage"))
+                });
+
+                if let Some(usage) = usage_val {
+                    if let Some(total_tokens) = usage
+                        .get("totalTokens")
+                        .or_else(|| usage.get("total_tokens"))
+                        .and_then(|v| v.as_u64())
+                    {
+                        let total_tokens = total_tokens as u32;
+                        self.add_normalized_entry(NormalizedEntry {
+                            timestamp: None,
+                            entry_type: NormalizedEntryType::TokenUsageInfo(TokenUsageInfo {
+                                total_tokens,
+                                model_context_window: 0,
+                            }),
+                            content: format!("Tokens used: {total_tokens}"),
+                            metadata: None,
+                        });
+                    }
                 }
             }
             _ => {
