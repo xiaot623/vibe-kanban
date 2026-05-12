@@ -113,19 +113,25 @@ impl KeepAwakeState {
 }
 
 /// Run desktop server mode (`kanban server`) without launching Tauri windows.
-pub fn run_server_mode_blocking(port_override: Option<u16>) -> anyhow::Result<()> {
+pub fn run_server_mode_blocking(
+    host_override: Option<String>,
+    port_override: Option<u16>,
+) -> anyhow::Result<()> {
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?;
-    runtime.block_on(run_server_mode(port_override))
+    runtime.block_on(run_server_mode(host_override, port_override))
 }
 
 /// Start the backend in headless mode and wait for Ctrl+C / SIGTERM.
-pub async fn run_server_mode(port_override: Option<u16>) -> anyhow::Result<()> {
+pub async fn run_server_mode(
+    host_override: Option<String>,
+    port_override: Option<u16>,
+) -> anyhow::Result<()> {
     let deployment = startup::initialize_deployment().await?;
     startup::spawn_background_services(&deployment, "desktop-server").await;
 
-    let config = server_mode_config(port_override);
+    let config = server_mode_config(host_override, port_override);
 
     let (_port, server_handle) = startup::start_server(deployment.clone(), config)
         .await
@@ -138,10 +144,10 @@ pub async fn run_server_mode(port_override: Option<u16>) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn server_mode_config(port_override: Option<u16>) -> ServerConfig {
+fn server_mode_config(host_override: Option<String>, port_override: Option<u16>) -> ServerConfig {
     ServerConfig {
         port: resolve_server_mode_port(port_override),
-        host: "127.0.0.1".to_string(),
+        host: resolve_server_mode_host(host_override),
         open_browser: false,
         write_port_file: true,
         local_network_auth: false,
@@ -252,6 +258,13 @@ async fn start_desktop_server(
         .map_err(anyhow::Error::from)
 }
 
+fn resolve_server_mode_host(cli_host: Option<String>) -> String {
+    cli_host
+        .map(|host| host.trim().to_string())
+        .filter(|host| !host.is_empty())
+        .unwrap_or_else(|| "127.0.0.1".to_string())
+}
+
 fn resolve_server_mode_port(cli_port: Option<u16>) -> u16 {
     cli_port
         .or_else(|| parse_port_from_env("BACKEND_PORT"))
@@ -282,11 +295,18 @@ mod tests {
 
     #[test]
     fn server_subcommand_does_not_open_browser() {
-        let config = server_mode_config(Some(8080));
+        let config = server_mode_config(None, Some(8080));
         assert_eq!(config.port, 8080);
         assert_eq!(config.host, "127.0.0.1");
         assert!(!config.open_browser);
         assert!(config.write_port_file);
+    }
+
+    #[test]
+    fn server_subcommand_accepts_host_override() {
+        let config = server_mode_config(Some("0.0.0.0".to_string()), Some(8080));
+        assert_eq!(config.port, 8080);
+        assert_eq!(config.host, "0.0.0.0");
     }
 }
 

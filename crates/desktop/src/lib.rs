@@ -92,7 +92,7 @@ pub fn run_from_cli_env() -> Result<(), LaunchError> {
         Some(cli::CliCommand::Server(args)) => {
             install_rustls_provider();
             init_logging();
-            desktop::run_server_mode_blocking(args.port).map_err(LaunchError::Runtime)
+            desktop::run_server_mode_blocking(args.host, args.port).map_err(LaunchError::Runtime)
         }
         Some(command @ cli::CliCommand::Project(_)) | Some(command @ cli::CliCommand::Task(_)) => {
             install_rustls_provider();

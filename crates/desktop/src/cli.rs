@@ -64,6 +64,8 @@ pub enum CliCommand {
 
 #[derive(Debug, Clone, Args)]
 pub struct ServerArgs {
+    #[arg(long, value_name = "host")]
+    pub host: Option<String>,
     #[arg(long, value_name = "u16")]
     pub port: Option<u16>,
 }
@@ -458,7 +460,10 @@ mod tests {
     fn parses_server_subcommand() {
         let parsed = CliArgs::parse_from(["server"]).expect("expected parse success");
         match parsed.command {
-            Some(CliCommand::Server(args)) => assert_eq!(args.port, None),
+            Some(CliCommand::Server(args)) => {
+                assert_eq!(args.host, None);
+                assert_eq!(args.port, None);
+            }
             other => panic!("unexpected parse result: {other:?}"),
         }
     }
@@ -469,6 +474,16 @@ mod tests {
             CliArgs::parse_from(["server", "--port", "8080"]).expect("expected parse success");
         match parsed.command {
             Some(CliCommand::Server(args)) => assert_eq!(args.port, Some(8080)),
+            other => panic!("unexpected parse result: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_server_subcommand_with_host() {
+        let parsed =
+            CliArgs::parse_from(["server", "--host", "0.0.0.0"]).expect("expected parse success");
+        match parsed.command {
+            Some(CliCommand::Server(args)) => assert_eq!(args.host.as_deref(), Some("0.0.0.0")),
             other => panic!("unexpected parse result: {other:?}"),
         }
     }
