@@ -1059,6 +1059,32 @@ export function GeneralSettings() {
                 </div>
               </div>
 
+              <div className="ml-6 flex items-center space-x-2">
+                <Checkbox
+                  id="telegram-topic-enabled"
+                  checked={draft?.telegram?.topic_enabled ?? false}
+                  onCheckedChange={(checked: boolean) =>
+                    updateDraft({
+                      telegram: {
+                        ...draft!.telegram,
+                        topic_enabled: checked,
+                      },
+                    })
+                  }
+                />
+                <div className="space-y-0.5">
+                  <Label
+                    htmlFor="telegram-topic-enabled"
+                    className="cursor-pointer"
+                  >
+                    {t('settings.general.telegram.topicEnabled.label')}
+                  </Label>
+                  <p className="text-sm text-muted-foreground">
+                    {t('settings.general.telegram.topicEnabled.helper')}
+                  </p>
+                </div>
+              </div>
+
               <div className="ml-6 space-y-2">
                 <Label htmlFor="telegram-default-executor">
                   {t('settings.general.telegram.defaultExecutor.label')}

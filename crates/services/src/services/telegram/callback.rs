@@ -108,6 +108,10 @@ pub enum CallbackAction {
     DoneTask {
         flow_token: String,
     },
+    /// Close and delete the Telegram topic bound to a task.
+    CloseTaskTopic {
+        task_id: Uuid,
+    },
     /// Legacy flow-unaware follow-up action encoded with task id.
     LegacyFollowUpReplyTask {
         task_id: Uuid,
@@ -206,6 +210,7 @@ impl CallbackAction {
             Self::CreateReviewTask { .. } => "rv",
             Self::CreateReviewTaskConfirm { .. } => "rc",
             Self::DoneTask { .. } => "fd",
+            Self::CloseTaskTopic { .. } => "ct",
             Self::LegacyFollowUpReplyTask { .. } => "frl",
             Self::LegacyCreateReviewTask { .. } => "rvl",
             Self::LegacyCreateReviewTaskConfirm { .. } => "rcl",
@@ -257,6 +262,7 @@ impl CallbackAction {
             | Self::ApproveYes { task_id }
             | Self::RejectInput { task_id }
             | Self::Refresh { task_id }
+            | Self::CloseTaskTopic { task_id }
             | Self::LegacyFollowUpReplyTask { task_id }
             | Self::LegacyCreateReviewTask { task_id }
             | Self::LegacyCreateReviewTaskConfirm { task_id }
@@ -413,6 +419,9 @@ impl CallbackAction {
             }),
             "fd" => Some(Self::DoneTask {
                 flow_token: parts.get(2)?.to_string(),
+            }),
+            "ct" => Some(Self::CloseTaskTopic {
+                task_id: parse_short_uuid(parts.get(2)?)?,
             }),
             "frl" => Some(Self::LegacyFollowUpReplyTask {
                 task_id: parse_short_uuid(parts.get(2)?)?,
@@ -576,6 +585,7 @@ mod tests {
             CallbackAction::DoneTask {
                 flow_token: flow_token.clone(),
             },
+            CallbackAction::CloseTaskTopic { task_id: id },
             CallbackAction::NewTaskProject { project_id: id },
             CallbackAction::LegacyFollowUpReplyTask { task_id: id },
             CallbackAction::LegacyCreateReviewTask { task_id: id },
@@ -744,6 +754,7 @@ mod tests {
             CallbackAction::DoneTask {
                 flow_token: flow_token.clone(),
             },
+            CallbackAction::CloseTaskTopic { task_id: id },
             CallbackAction::NewTaskProject { project_id: id },
             CallbackAction::LegacyFollowUpReplyTask { task_id: id },
             CallbackAction::LegacyCreateReviewTask { task_id: id },

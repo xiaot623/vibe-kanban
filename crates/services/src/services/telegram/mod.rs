@@ -8,5 +8,6 @@ pub mod lark_wiki;
 pub mod notifier;
 pub mod state;
 pub mod telegraph;
+pub mod topic;
 
 pub const EXIT_PLAN_MODE_NAME: &str = "ExitPlanMode";

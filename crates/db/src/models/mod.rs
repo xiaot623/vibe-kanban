@@ -15,5 +15,6 @@ pub mod session;
 pub mod tag;
 pub mod task;
 pub mod telegram_flow_binding;
+pub mod telegram_task_topic;
 pub mod workspace;
 pub mod workspace_repo;

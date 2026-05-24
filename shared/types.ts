@@ -364,7 +364,7 @@ export type ProxyConfig = { http_proxy: string | null, https_proxy: string | nul
 
 export type DailyModeConfig = { project_id: string | null, };
 
-export type TelegramConfig = { enabled: boolean, bot_token: string | null, chat_id: bigint | null, send_session_receipt: boolean, telegraph_enabled: boolean, telegraph_access_token: string | null, telegraph_short_name: string | null, lark_wiki_enabled: boolean, lark_wiki_space_id: string | null, default_executor: string, default_mode: string, };
+export type TelegramConfig = { enabled: boolean, bot_token: string | null, chat_id: bigint | null, topic_enabled: boolean, send_session_receipt: boolean, telegraph_enabled: boolean, telegraph_access_token: string | null, telegraph_short_name: string | null, lark_wiki_enabled: boolean, lark_wiki_space_id: string | null, default_executor: string, default_mode: string, };
 
 export enum TtsProvider { REPLICATE = "REPLICATE" }
 
@@ -417,9 +417,9 @@ working_dir: string | null, };
 
 export type ScriptRequestLanguage = "Bash";
 
-export enum BaseCodingAgent { CLAUDE_CODE = "CLAUDE_CODE", GEMINI = "GEMINI", CODEX = "CODEX", OPENCODE = "OPENCODE", DROID = "DROID", PI = "PI" }
+export enum BaseCodingAgent { CLAUDE_CODE = "CLAUDE_CODE", GEMINI = "GEMINI", CODEX = "CODEX", OPENCODE = "OPENCODE", PI = "PI" }
 
-export type CodingAgent = { "CLAUDE_CODE": ClaudeCode } | { "GEMINI": Gemini } | { "CODEX": Codex } | { "OPENCODE": Opencode } | { "DROID": Droid } | { "PI": Pi };
+export type CodingAgent = { "CLAUDE_CODE": ClaudeCode } | { "GEMINI": Gemini } | { "CODEX": Codex } | { "OPENCODE": Opencode } | { "PI": Pi };
 
 export type AvailabilityInfo = { "type": "LOGIN_DETECTED", last_auth_timestamp: bigint, } | { "type": "INSTALLATION_FOUND" } | { "type": "NOT_FOUND" };
 
@@ -443,7 +443,7 @@ executor: BaseCodingAgent,
  */
 variant: string | null, };
 
-export type ExecutorConfig = { [key in string]?: { "CLAUDE_CODE": ClaudeCode } | { "GEMINI": Gemini } | { "CODEX": Codex } | { "OPENCODE": Opencode } | { "DROID": Droid } | { "PI": Pi } };
+export type ExecutorConfig = { [key in string]?: { "CLAUDE_CODE": ClaudeCode } | { "GEMINI": Gemini } | { "CODEX": Codex } | { "OPENCODE": Opencode } | { "PI": Pi } };
 
 export type ExecutorConfigs = { executors: { [key in BaseCodingAgent]?: ExecutorConfig }, };
 
@@ -481,13 +481,7 @@ mode?: string | null,
  */
 auto_approve: boolean, base_command_override?: string | null, additional_params?: Array<string> | null, env?: { [key in string]?: string } | null, };
 
-export type Droid = { append_prompt: AppendPrompt, autonomy: Autonomy, model?: string | null, reasoning_effort?: DroidReasoningEffort | null, base_command_override?: string | null, additional_params?: Array<string> | null, env?: { [key in string]?: string } | null, };
-
 export type Pi = { append_prompt: AppendPrompt, model?: string | null, thinking?: string | null, approve?: boolean | null, base_command_override?: string | null, additional_params?: Array<string> | null, env?: { [key in string]?: string } | null, };
-
-export type Autonomy = "normal" | "low" | "medium" | "high" | "skip-permissions-unsafe";
-
-export type DroidReasoningEffort = "none" | "dynamic" | "off" | "low" | "medium" | "high";
 
 export type AppendPrompt = string | null;
 

@@ -30,13 +30,16 @@ use executors::logs::{
     ActionType, NormalizedEntry, NormalizedEntryType, TokenUsageInfo, ToolStatus,
     utils::patch::extract_normalized_entry_from_patch,
 };
-use teloxide::{prelude::*, types::MessageId};
+use teloxide::{
+    prelude::*,
+    types::{MessageId, ThreadId},
+};
 use tokio::sync::{OnceCell, RwLock};
 use tokio_util::sync::CancellationToken;
 use utils::{log_msg::LogMsg, msg_store::MsgStore};
 use uuid::Uuid;
 
-use super::{EXIT_PLAN_MODE_NAME, flow, format, keyboard, lark_wiki, telegraph};
+use super::{EXIT_PLAN_MODE_NAME, flow, format, keyboard, lark_wiki, telegraph, topic};
 use crate::services::{approvals::Approvals, config::Config, git::GitService};
 
 /// Telegram context for event handlers.
@@ -139,6 +142,12 @@ pub async fn notify_coding_agent_execution_started(session_id: Uuid, execution_p
             .await
     {
         let _ = TelegramFlowBinding::refresh_expiry(&tg.db.pool, &flow_ctx.flow_token).await;
+        let topic_enabled = tg.config.read().await.telegram.topic_enabled;
+        if topic_enabled
+            && let Ok(Some(task)) = Task::find_by_id(&tg.db.pool, flow_ctx.task_id).await
+        {
+            let _ = topic::ensure_task_topic(&tg.db.pool, &tg.bot, tg.chat_id, &task).await;
+        }
     }
 
     start_or_refresh_run_feed_watcher(tg, session_id).await;
@@ -419,7 +428,8 @@ impl TelegramHandler for TaskInReviewHandler {
                 } else {
                     None
                 };
-                if let Some(message_id) = send_telegram_card(tg, chunk, markup).await {
+                if let Some(message_id) = send_task_telegram_card(tg, task.id, chunk, markup).await
+                {
                     sent_message_ids.push(message_id);
                 }
             }
@@ -460,6 +470,7 @@ impl TelegramHandler for TaskFinishedHandler {
             Some(task.project_id),
             configured_daily_project_id.as_deref(),
         ) {
+            send_task_topic_close_prompt(tg, task.id, &task.title).await;
             return;
         }
 
@@ -479,9 +490,8 @@ impl TelegramHandler for TaskFinishedHandler {
             }
         );
 
-        if let Err(err) = format::send_rich_then_plain(&tg.bot, tg.chat_id, &message, None).await {
-            tracing::warn!("Failed to send telegram notification: {}", err);
-        }
+        let _ = send_task_telegram_card(tg, task.id, message, None).await;
+        send_task_topic_close_prompt(tg, task.id, &task.title).await;
     }
 }
 
@@ -668,6 +678,10 @@ impl RunFeedAccumulator {
 
     fn remember_flow_context(&mut self, flow_ctx: flow::TelegramFlowContext) {
         self.flow_context = Some(flow_ctx);
+    }
+
+    fn topic_thread_id(&self) -> Option<ThreadId> {
+        self.flow_context.as_ref()?.topic_thread_id
     }
 
     fn remember_execution_process(&mut self, execution_process_id: Uuid) {
@@ -935,7 +949,7 @@ async fn run_feed_watcher_loop(
         accumulator.remember_session(session.id, workspace.id);
         accumulator.remember_task(task.id, task.project_id, &task.title);
 
-        let flow_ctx =
+        let mut flow_ctx =
             match flow::ensure_flow_context_for_session(&tg.db.pool, session.id, None).await {
                 Ok(ctx) => ctx,
                 Err(err) => {
@@ -945,6 +959,9 @@ async fn run_feed_watcher_loop(
                     return;
                 }
             };
+        if !telegram_topics_enabled(&tg).await {
+            flow_ctx.topic_thread_id = None;
+        }
         accumulator.remember_flow_context(flow_ctx);
 
         let processes =
@@ -981,9 +998,12 @@ async fn run_feed_watcher_loop(
 
         watched_processes.insert(process.id);
         accumulator.remember_execution_process(process.id);
-        if let Ok(flow_ctx) =
+        if let Ok(mut flow_ctx) =
             flow::ensure_flow_context_for_session(&tg.db.pool, session_id, Some(process.id)).await
         {
+            if !telegram_topics_enabled(&tg).await {
+                flow_ctx.topic_thread_id = None;
+            }
             accumulator.remember_flow_context(flow_ctx);
         }
 
@@ -1171,7 +1191,14 @@ async fn emit_pending_approval_catch_up_cards(
                 .sent_pending_approvals
                 .insert(approval_id.clone())
         {
-            send_tool_pending_approval_card(tg, approval_id, tool_name, &entry.content).await;
+            send_tool_pending_approval_card(
+                tg,
+                accumulator.topic_thread_id(),
+                approval_id,
+                tool_name,
+                &entry.content,
+            )
+            .await;
         }
     }
 }
@@ -1189,9 +1216,10 @@ async fn emit_terminal_tool_turn_card(
     match accumulator.plan_terminal_tool_turn_update(entry_index, row, &prefix) {
         ToolTurnUpdatePlan::SkipDuplicate => {}
         ToolTurnUpdatePlan::EditCurrent { rows, message } => {
-            match format::edit_or_send_rich_then_plain(
+            match format::edit_or_send_rich_then_plain_to_thread(
                 &tg.bot,
                 tg.chat_id,
+                accumulator.topic_thread_id(),
                 accumulator.tool_turn.telegram_message_id,
                 &message,
                 None,
@@ -1201,7 +1229,29 @@ async fn emit_terminal_tool_turn_card(
                 Ok(message) => {
                     accumulator.apply_terminal_tool_turn_update(entry_index, rows, message.id);
                 }
-                Err(err) => tracing::warn!("Failed to upsert telegram tool turn card: {err}"),
+                Err(err) => {
+                    tracing::warn!("Failed to upsert telegram tool turn card in topic: {err}");
+                    match format::edit_or_send_rich_then_plain(
+                        &tg.bot,
+                        tg.chat_id,
+                        accumulator.tool_turn.telegram_message_id,
+                        &message,
+                        None,
+                    )
+                    .await
+                    {
+                        Ok(message) => {
+                            accumulator.apply_terminal_tool_turn_update(
+                                entry_index,
+                                rows,
+                                message.id,
+                            );
+                        }
+                        Err(err) => {
+                            tracing::warn!("Failed to upsert telegram tool turn card: {err}")
+                        }
+                    }
+                }
             }
         }
         ToolTurnUpdatePlan::ReplaceMessage {
@@ -1220,13 +1270,38 @@ async fn emit_terminal_tool_turn_card(
                 );
             }
 
-            match format::edit_or_send_rich_then_plain(&tg.bot, tg.chat_id, None, &message, None)
-                .await
+            match format::edit_or_send_rich_then_plain_to_thread(
+                &tg.bot,
+                tg.chat_id,
+                accumulator.topic_thread_id(),
+                None,
+                &message,
+                None,
+            )
+            .await
             {
                 Ok(message) => {
                     accumulator.apply_terminal_tool_turn_update(entry_index, rows, message.id);
                 }
-                Err(err) => tracing::warn!("Failed to upsert telegram tool turn card: {err}"),
+                Err(err) => {
+                    tracing::warn!("Failed to upsert telegram tool turn card in topic: {err}");
+                    match format::edit_or_send_rich_then_plain(
+                        &tg.bot, tg.chat_id, None, &message, None,
+                    )
+                    .await
+                    {
+                        Ok(message) => {
+                            accumulator.apply_terminal_tool_turn_update(
+                                entry_index,
+                                rows,
+                                message.id,
+                            );
+                        }
+                        Err(err) => {
+                            tracing::warn!("Failed to upsert telegram tool turn card: {err}")
+                        }
+                    }
+                }
             }
         }
     }
@@ -1246,9 +1321,10 @@ async fn emit_realtime_stable_text_card(
         truncate_for_telegram(content, TELEGRAM_MESSAGE_LIMIT * 2)
     );
     let source_message_id = accumulator.active_stable_text_message_id();
-    match format::edit_or_send_rich_then_plain(
+    match format::edit_or_send_rich_then_plain_to_thread(
         &tg.bot,
         tg.chat_id,
+        accumulator.topic_thread_id(),
         source_message_id,
         &message,
         None,
@@ -1363,7 +1439,8 @@ async fn emit_realtime_card_for_entry(
                 denied_tool,
                 truncate_for_telegram(&update.current.content, 220)
             );
-            let _ = send_telegram_card(tg, message, None).await;
+            let _ = send_telegram_card_to_thread(tg, accumulator.topic_thread_id(), message, None)
+                .await;
         }
         NormalizedEntryType::ToolUse {
             tool_name,
@@ -1378,6 +1455,7 @@ async fn emit_realtime_card_for_entry(
                 {
                     send_tool_pending_approval_card(
                         tg,
+                        accumulator.topic_thread_id(),
                         approval_id,
                         tool_name,
                         &update.current.content,
@@ -1411,7 +1489,8 @@ async fn emit_realtime_card_for_entry(
                 execution_processes,
                 needs_setup
             );
-            let _ = send_telegram_card(tg, message, None).await;
+            let _ = send_telegram_card_to_thread(tg, accumulator.topic_thread_id(), message, None)
+                .await;
         }
         _ => {}
     }
@@ -1446,6 +1525,7 @@ fn should_send_tool_pending_approval_card(tool_name: &str) -> bool {
 
 async fn send_tool_pending_approval_card(
     tg: &TelegramContext,
+    thread_id: Option<ThreadId>,
     approval_id: &str,
     tool_name: &str,
     content: &str,
@@ -1469,13 +1549,14 @@ async fn send_tool_pending_approval_card(
             "🛑 Need approval for {tool_name}\n{}\nThis request needs structured input. Please handle it in Web UI.",
             request_preview
         );
-        let _ = send_telegram_card(tg, message, None).await;
+        let _ = send_telegram_card_to_thread(tg, thread_id, message, None).await;
         return;
     }
 
     let message = format!("🛑 Need approval for {tool_name}\n{request_preview}");
-    let _ = send_telegram_card(
+    let _ = send_telegram_card_to_thread(
         tg,
+        thread_id,
         message,
         Some(keyboard::tool_approval_keyboard(approval_id)),
     )
@@ -1551,7 +1632,13 @@ async fn emit_stage_summary(
         is_daily_task,
         None, // msg_id not known yet; will be filled after send
     );
-    let sent_ids = send_split_telegram_card(tg, lines.join("\n"), summary_markup).await;
+    let sent_ids = send_split_telegram_card(
+        tg,
+        accumulator.topic_thread_id(),
+        lines.join("\n"),
+        summary_markup,
+    )
+    .await;
     if matches!(trigger, SummaryTrigger::ExecutionFinished)
         && !sent_ids.is_empty()
         && let Some(session_id) = accumulator.session_id
@@ -1959,6 +2046,25 @@ async fn is_daily_project_task(tg: &TelegramContext, task_project_id: Option<Uui
     is_configured_daily_project_task(task_project_id, configured_daily_project_id.as_deref())
 }
 
+async fn telegram_topics_enabled(tg: &TelegramContext) -> bool {
+    tg.config.read().await.telegram.topic_enabled
+}
+
+async fn send_task_topic_close_prompt(tg: &TelegramContext, task_id: Uuid, task_title: &str) {
+    if !telegram_topics_enabled(tg).await {
+        return;
+    }
+
+    let message = format!("Task {task_title} is Done. Close this topic?");
+    let _ = send_task_telegram_card(
+        tg,
+        task_id,
+        message,
+        Some(keyboard::close_task_topic_keyboard(task_id)),
+    )
+    .await;
+}
+
 fn should_send_task_finished_notification(
     task_project_id: Option<Uuid>,
     configured_daily_project_id: Option<&str>,
@@ -1990,22 +2096,67 @@ fn is_configured_daily_project_task(
     }
 }
 
-async fn send_telegram_card(
+async fn send_task_telegram_card(
     tg: &TelegramContext,
+    task_id: Uuid,
     message: String,
     markup: Option<teloxide::types::InlineKeyboardMarkup>,
 ) -> Option<MessageId> {
-    match format::send_rich_then_plain(&tg.bot, tg.chat_id, &message, markup).await {
+    let thread_id = if telegram_topics_enabled(tg).await {
+        match topic::find_task_topic(&tg.db.pool, task_id).await {
+            Ok(Some(topic)) => Some(topic.thread_id),
+            Ok(None) => None,
+            Err(err) => {
+                tracing::debug!(task_id = %task_id, "Failed to look up Telegram task topic: {err}");
+                None
+            }
+        }
+    } else {
+        None
+    };
+
+    send_telegram_card_to_thread(tg, thread_id, message, markup).await
+}
+
+async fn send_telegram_card_to_thread(
+    tg: &TelegramContext,
+    thread_id: Option<ThreadId>,
+    message: String,
+    markup: Option<teloxide::types::InlineKeyboardMarkup>,
+) -> Option<MessageId> {
+    match format::send_rich_then_plain_to_thread(
+        &tg.bot,
+        tg.chat_id,
+        thread_id,
+        &message,
+        markup.clone(),
+    )
+    .await
+    {
         Ok(message) => Some(message.id),
         Err(err) => {
-            tracing::warn!("Failed to send telegram run-feed card: {err}");
-            None
+            if thread_id.is_some() {
+                tracing::warn!(
+                    "Failed to send telegram run-feed card to topic, falling back to main chat: {err}"
+                );
+                match format::send_rich_then_plain(&tg.bot, tg.chat_id, &message, markup).await {
+                    Ok(message) => Some(message.id),
+                    Err(fallback_err) => {
+                        tracing::warn!("Failed to send telegram run-feed card: {fallback_err}");
+                        None
+                    }
+                }
+            } else {
+                tracing::warn!("Failed to send telegram run-feed card: {err}");
+                None
+            }
         }
     }
 }
 
 async fn send_split_telegram_card(
     tg: &TelegramContext,
+    thread_id: Option<ThreadId>,
     message: String,
     markup_last: Option<teloxide::types::InlineKeyboardMarkup>,
 ) -> Vec<MessageId> {
@@ -2016,7 +2167,7 @@ async fn send_split_telegram_card(
     );
 
     if chunks.len() <= 1 {
-        return send_telegram_card(tg, message, markup_last)
+        return send_telegram_card_to_thread(tg, thread_id, message, markup_last)
             .await
             .into_iter()
             .collect();
@@ -2030,8 +2181,13 @@ async fn send_split_telegram_card(
         } else {
             None
         };
-        if let Some(message_id) =
-            send_telegram_card(tg, format!("[{}/{}]\n{}", index + 1, total, chunk), markup).await
+        if let Some(message_id) = send_telegram_card_to_thread(
+            tg,
+            thread_id,
+            format!("[{}/{}]\n{}", index + 1, total, chunk),
+            markup,
+        )
+        .await
         {
             ids.push(message_id);
         }
@@ -2897,6 +3053,7 @@ mod tests {
             latest_execution_process_id: None,
             executor_label: "CODEX".to_string(),
             variant_label: "PLAN".to_string(),
+            topic_thread_id: None,
         });
 
         assert_eq!(acc.flow_prefix(), "[CODEX · PLAN]");

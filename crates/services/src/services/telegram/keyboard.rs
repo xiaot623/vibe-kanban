@@ -364,6 +364,14 @@ pub fn stage_summary_reply_done_keyboard(flow_token: &str, msg_id: i32) -> Inlin
     ]])
 }
 
+/// Build the confirmation keyboard shown after a task is marked Done.
+pub fn close_task_topic_keyboard(task_id: uuid::Uuid) -> InlineKeyboardMarkup {
+    InlineKeyboardMarkup::new(vec![vec![btn(
+        "Close topic",
+        CallbackAction::CloseTaskTopic { task_id },
+    )]])
+}
+
 /// Build the keyboard shown while audio synthesis is running (replaces Audio button).
 pub fn stage_summary_audio_running_keyboard(flow_token: &str, msg_id: i32) -> InlineKeyboardMarkup {
     InlineKeyboardMarkup::new(vec![vec![btn(

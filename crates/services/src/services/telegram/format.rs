@@ -6,7 +6,7 @@ use teloxide::{
     payloads::{EditMessageTextSetters, SendMessageSetters},
     prelude::{Bot, ChatId},
     requests::Requester,
-    types::{InlineKeyboardMarkup, Message, MessageId, ParseMode},
+    types::{InlineKeyboardMarkup, Message, MessageId, ParseMode, ThreadId},
 };
 
 pub(crate) const TELEGRAM_MESSAGE_LIMIT: usize = 3072;
@@ -240,8 +240,18 @@ pub(crate) async fn send_rich_then_plain(
     markdown: &str,
     markup: Option<InlineKeyboardMarkup>,
 ) -> Result<Message, RequestError> {
+    send_rich_then_plain_to_thread(bot, chat_id, None, markdown, markup).await
+}
+
+pub(crate) async fn send_rich_then_plain_to_thread(
+    bot: &Bot,
+    chat_id: ChatId,
+    thread_id: Option<ThreadId>,
+    markdown: &str,
+    markup: Option<InlineKeyboardMarkup>,
+) -> Result<Message, RequestError> {
     let payload = TelegramPayload::from_markdown(markdown);
-    send_payload(bot, chat_id, payload, markup).await
+    send_payload(bot, chat_id, thread_id, payload, markup).await
 }
 
 pub(crate) async fn edit_or_send_rich_then_plain(
@@ -251,10 +261,22 @@ pub(crate) async fn edit_or_send_rich_then_plain(
     markdown: &str,
     markup: Option<InlineKeyboardMarkup>,
 ) -> Result<Message, RequestError> {
+    edit_or_send_rich_then_plain_to_thread(bot, chat_id, None, source_message_id, markdown, markup)
+        .await
+}
+
+pub(crate) async fn edit_or_send_rich_then_plain_to_thread(
+    bot: &Bot,
+    chat_id: ChatId,
+    thread_id: Option<ThreadId>,
+    source_message_id: Option<MessageId>,
+    markdown: &str,
+    markup: Option<InlineKeyboardMarkup>,
+) -> Result<Message, RequestError> {
     let payload = TelegramPayload::from_markdown(markdown);
 
     let Some(source_message_id) = source_message_id else {
-        return send_payload(bot, chat_id, payload, markup).await;
+        return send_payload(bot, chat_id, thread_id, payload, markup).await;
     };
 
     if let Some(rich) = payload.rich.as_ref() {
@@ -294,7 +316,7 @@ pub(crate) async fn edit_or_send_rich_then_plain(
         }
     }
 
-    let sent = send_payload(bot, chat_id, payload, markup).await?;
+    let sent = send_payload(bot, chat_id, thread_id, payload, markup).await?;
     if sent.id != source_message_id
         && let Err(err) = bot.delete_message(chat_id, source_message_id).await
     {
@@ -343,11 +365,15 @@ impl TelegramPayload {
 async fn send_payload(
     bot: &Bot,
     chat_id: ChatId,
+    thread_id: Option<ThreadId>,
     payload: TelegramPayload,
     markup: Option<InlineKeyboardMarkup>,
 ) -> Result<Message, RequestError> {
     if let Some(rich) = payload.rich {
         let mut request = bot.send_message(chat_id, rich).parse_mode(ParseMode::Html);
+        if let Some(thread_id) = thread_id {
+            request = request.message_thread_id(thread_id);
+        }
         if let Some(existing_markup) = markup.clone() {
             request = request.reply_markup(existing_markup);
         }
@@ -364,6 +390,9 @@ async fn send_payload(
     }
 
     let mut request = bot.send_message(chat_id, payload.plain);
+    if let Some(thread_id) = thread_id {
+        request = request.message_thread_id(thread_id);
+    }
     if let Some(existing_markup) = markup {
         request = request.reply_markup(existing_markup);
     }

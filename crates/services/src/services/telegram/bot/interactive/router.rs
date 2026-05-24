@@ -4,7 +4,7 @@ use teloxide::{prelude::*, types::MessageId, utils::command::BotCommands};
 
 use super::{BotDialogue, CardRenderContext, TelegramBotService};
 use crate::services::telegram::{
-    callback::CallbackAction, format, keyboard, notifier, state::DialogueState,
+    callback::CallbackAction, format, keyboard, notifier, state::DialogueState, topic,
 };
 
 #[derive(BotCommands, Clone)]
@@ -26,6 +26,8 @@ pub enum Command {
     Pin,
     #[command(description = "unpin the current project")]
     Unpin,
+    #[command(description = "close this task topic")]
+    Close,
 }
 
 pub(super) async fn handle_command(
@@ -106,6 +108,66 @@ pub(super) async fn handle_command(
         }
         Command::Unpin => {
             super::screens::handle_unpin(&bot, msg.chat.id, &service, None).await?;
+        }
+        Command::Close => {
+            let Some(thread_id) = msg.thread_id else {
+                format::send_rich_then_plain(
+                    &bot,
+                    msg.chat.id,
+                    "/close only works inside a known task topic.",
+                    None,
+                )
+                .await?;
+                return Ok(());
+            };
+
+            let topic = topic::find_task_topic_by_thread_id(&service.db.pool, thread_id).await;
+            match topic {
+                Ok(Some(task_topic)) => {
+                    if let Err(err) = topic::delete_task_topic(
+                        &service.db.pool,
+                        &bot,
+                        msg.chat.id,
+                        task_topic.task_id,
+                    )
+                    .await
+                    {
+                        tracing::warn!(
+                            task_id = %task_topic.task_id,
+                            "Failed to close Telegram task topic from /close: {err}"
+                        );
+                        format::send_rich_then_plain(
+                            &bot,
+                            msg.chat.id,
+                            "Failed to close this topic.",
+                            None,
+                        )
+                        .await?;
+                    }
+                }
+                Ok(None) => {
+                    format::send_rich_then_plain(
+                        &bot,
+                        msg.chat.id,
+                        "/close only works inside a known task topic.",
+                        None,
+                    )
+                    .await?;
+                }
+                Err(err) => {
+                    tracing::warn!(
+                        thread_id = thread_id.0.0,
+                        "Failed to resolve Telegram task topic from /close: {err}"
+                    );
+                    format::send_rich_then_plain(
+                        &bot,
+                        msg.chat.id,
+                        "Failed to close this topic.",
+                        None,
+                    )
+                    .await?;
+                }
+            }
         }
     }
 
@@ -397,6 +459,10 @@ pub(super) async fn handle_callback(
             super::actions::handle_done_task(&bot, chat_id, &service, &flow_token, card_context)
                 .await?;
         }
+        CallbackAction::CloseTaskTopic { task_id } => {
+            super::actions::handle_close_task_topic(&bot, chat_id, &service, task_id, card_context)
+                .await?;
+        }
         CallbackAction::ToolApprove { approval_id } => {
             super::actions::handle_tool_approval_callback(
                 &bot,
@@ -650,6 +716,10 @@ mod tests {
             Command::parse("/unpin", bot_name),
             Ok(Command::Unpin)
         ));
+        assert!(matches!(
+            Command::parse("/close", bot_name),
+            Ok(Command::Close)
+        ));
     }
 
     #[test]
@@ -663,7 +733,8 @@ mod tests {
         assert_eq!(
             names,
             vec![
-                "/start", "/help", "/tasks", "/new", "/pending", "/cancel", "/pin", "/unpin"
+                "/start", "/help", "/tasks", "/new", "/pending", "/cancel", "/pin", "/unpin",
+                "/close"
             ]
         );
     }

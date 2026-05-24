@@ -211,6 +211,10 @@
           "label": "发送 session 账单",
           "helper": "在生成账单后，将 session 账单渲染为 PNG 图片并发送到 Telegram。"
         },
+        "topicEnabled": {
+          "label": "创建任务话题",
+          "helper": "为每个任务创建一个 Telegram 话题发送运行时更新。任务创建通知仍发送到主聊天。"
+        },
         "defaultExecutor": {
           "label": "默认执行器",
           "placeholder": "选择执行器",

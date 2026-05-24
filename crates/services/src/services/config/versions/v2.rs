@@ -29,6 +29,8 @@ pub struct TelegramConfig {
     pub bot_token: Option<String>,
     pub chat_id: Option<i64>,
     #[serde(default)]
+    pub topic_enabled: bool,
+    #[serde(default)]
     pub send_session_receipt: bool,
     #[serde(default)]
     pub telegraph_enabled: bool,
@@ -58,6 +60,7 @@ impl Default for TelegramConfig {
             enabled: false,
             bot_token: None,
             chat_id: None,
+            topic_enabled: false,
             send_session_receipt: false,
             telegraph_enabled: false,
             telegraph_access_token: None,
@@ -490,6 +493,7 @@ mod tests {
         assert!(!parsed.lark_wiki_enabled);
         assert_eq!(parsed.lark_wiki_space_id, None);
         assert!(!parsed.send_session_receipt);
+        assert!(!parsed.topic_enabled);
     }
 
     #[test]
@@ -498,6 +502,7 @@ mod tests {
             enabled: true,
             bot_token: Some("bot".to_string()),
             chat_id: Some(456),
+            topic_enabled: true,
             send_session_receipt: true,
             telegraph_enabled: true,
             telegraph_access_token: Some("access".to_string()),
@@ -513,6 +518,7 @@ mod tests {
             serde_json::from_value(value).expect("deserialize telegram config");
 
         assert!(parsed.telegraph_enabled);
+        assert!(parsed.topic_enabled);
         assert_eq!(parsed.telegraph_access_token.as_deref(), Some("access"));
         assert_eq!(parsed.telegraph_short_name.as_deref(), Some("vk_beta"));
         assert!(parsed.lark_wiki_enabled);

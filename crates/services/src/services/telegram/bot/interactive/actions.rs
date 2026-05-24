@@ -19,7 +19,9 @@ use super::{
 };
 use crate::services::{
     approvals::{ApprovalError, PendingApprovalInfo},
-    telegram::{bot::PinnedProjectState, flow, format, keyboard, notifier, state::DialogueState},
+    telegram::{
+        bot::PinnedProjectState, flow, format, keyboard, notifier, state::DialogueState, topic,
+    },
 };
 
 pub(super) async fn handle_tool_approval_callback(
@@ -991,6 +993,53 @@ pub(super) async fn handle_done_task(
         format_done_task_status_message(&task.title, status_updated, &status_errors),
     )
     .await?;
+    Ok(())
+}
+
+pub(super) async fn handle_close_task_topic(
+    bot: &Bot,
+    chat_id: ChatId,
+    service: &TelegramBotService,
+    task_id: Uuid,
+    card_context: Option<CardRenderContext>,
+) -> ResponseResult<()> {
+    match topic::find_task_topic(&service.db.pool, task_id).await {
+        Ok(Some(_)) => {}
+        Ok(None) => {
+            super::ui::render_or_send_card(
+                bot,
+                chat_id,
+                card_context,
+                "This task topic is already closed.",
+                Some(super::ui::empty_inline_keyboard()),
+            )
+            .await?;
+            return Ok(());
+        }
+        Err(err) => {
+            super::ui::render_or_send_card(
+                bot,
+                chat_id,
+                card_context,
+                format!("Failed to load task topic: {err}"),
+                Some(super::ui::empty_inline_keyboard()),
+            )
+            .await?;
+            return Ok(());
+        }
+    }
+
+    if let Err(err) = topic::delete_task_topic(&service.db.pool, bot, chat_id, task_id).await {
+        super::ui::render_or_send_card(
+            bot,
+            chat_id,
+            card_context,
+            format!("Failed to close this topic: {err}"),
+            Some(super::ui::empty_inline_keyboard()),
+        )
+        .await?;
+    }
+
     Ok(())
 }
 

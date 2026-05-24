@@ -211,6 +211,10 @@
           "label": "Send session receipt",
           "helper": "Render the completed session receipt as a PNG and send it to Telegram after receipt generation."
         },
+        "topicEnabled": {
+          "label": "Create task topics",
+          "helper": "Create one Telegram topic per task for runtime updates. Task-created notifications stay in the main chat."
+        },
         "defaultExecutor": {
           "label": "Default Executor",
           "placeholder": "Select executor",

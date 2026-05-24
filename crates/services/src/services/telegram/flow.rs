@@ -6,6 +6,7 @@ use db::models::{
     workspace::Workspace,
 };
 use sqlx::SqlitePool;
+use teloxide::types::{MessageId, ThreadId};
 use uuid::Uuid;
 
 #[derive(Debug, Clone)]
@@ -17,6 +18,7 @@ pub struct TelegramFlowContext {
     pub latest_execution_process_id: Option<Uuid>,
     pub executor_label: String,
     pub variant_label: String,
+    pub topic_thread_id: Option<ThreadId>,
 }
 
 pub async fn resolve_flow_context(
@@ -116,6 +118,7 @@ async fn binding_to_context(
         latest_execution_process_id: binding.latest_execution_process_id,
         executor_label: binding.executor_label,
         variant_label: resolve_variant_label(pool, binding.session_id).await,
+        topic_thread_id: resolve_topic_thread_id(pool, binding.task_id).await,
     }
 }
 
@@ -134,4 +137,14 @@ fn normalize_executor_label(raw: &str) -> String {
         return "UNKNOWN".to_string();
     }
     trimmed.to_ascii_uppercase()
+}
+
+async fn resolve_topic_thread_id(pool: &SqlitePool, task_id: Uuid) -> Option<ThreadId> {
+    let binding =
+        db::models::telegram_task_topic::TelegramTaskTopic::find_by_task_id(pool, task_id)
+            .await
+            .ok()
+            .flatten()?;
+    let message_thread_id = i32::try_from(binding.message_thread_id?).ok()?;
+    Some(ThreadId(MessageId(message_thread_id)))
 }
